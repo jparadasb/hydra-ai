@@ -1,0 +1,20 @@
+[package]
+name = "worker-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "hydra-worker"
+path = "src/main.rs"
+
+[dependencies]
+worker-core = { path = "../worker-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+directories = { workspace = true }
+rpassword = "7"

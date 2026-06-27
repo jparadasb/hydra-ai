@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hydra-ai/proto/registration.schema.json",
+  "title": "WorkerRegistration",
+  "description": "Worker -> coordinator. Capabilities and policy only. MUST NOT contain secrets.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["worker_id", "execution_mode", "models"],
+  "properties": {
+    "worker_id": { "type": "string", "minLength": 1 },
+    "execution_mode": { "enum": ["local_model", "external_provider", "both"] },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Present when a local runtime is active.",
+      "required": ["name", "endpoint"],
+      "properties": {
+        "name": { "enum": ["ollama", "llama_cpp", "lm_studio", "vllm"] },
+        "endpoint": { "type": "string" }
+      }
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Present when external-provider mode is active. token_storage is a label only; never the token.",
+      "required": ["name", "api_type"],
+      "properties": {
+        "name": { "type": "string" },
+        "api_type": { "type": "string" },
+        "base_url": { "type": "string" },
+        "token_storage": { "enum": ["os_keychain", "local_encrypted"] }
+      }
+    },
+    "models": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "capabilities", "uses_external_provider"],
+        "properties": {
+          "name": { "type": "string" },
+          "capabilities": { "type": "array", "items": { "type": "string" } },
+          "context_length": { "type": "integer", "minimum": 0 },
+          "modalities": { "type": "array", "items": { "type": "string" } },
+          "uses_external_provider": { "type": "boolean" }
+        }
+      }
+    },
+    "privacy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "accepted_job_levels": {
+          "type": "array",
+          "items": { "enum": ["public", "private", "sensitive", "local_only"] }
+        },
+        "allow_private_jobs": { "type": "boolean" },
+        "allow_sensitive_jobs": { "type": "boolean" }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_requests_per_hour": { "type": "integer", "minimum": 0 },
+        "max_cost_per_day_usd": { "type": "number", "minimum": 0 },
+        "max_parallel_provider_requests": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "trust_level": { "type": "string" }
+  }
+}

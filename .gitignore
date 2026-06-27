@@ -1,0 +1,14 @@
+# Rust
+/worker/target/
+**/*.rs.bk
+
+# Elixir
+/coordinator/_build/
+/coordinator/deps/
+/coordinator/*.ez
+erl_crash.dump
+
+# Local worker state (never commit secrets)
+*.vault.bin
+.hydra-vault.bin
+.hydra-usage.json

@@ -1,0 +1,144 @@
+//! Wire and domain types. These mirror the schemas in `/proto`.
+//!
+//! INVARIANT: none of the *registration* / *usage* / *result* types carry a token,
+//! api key, or authorization header. Secrets live only in [`crate::vault`].
+
+use serde::{Deserialize, Serialize};
+
+/// How a worker processes AI jobs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    LocalModel,
+    ExternalProvider,
+    Both,
+}
+
+/// Privacy class of a job; governs which workers may run it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivacyLevel {
+    Public,
+    Private,
+    Sensitive,
+    LocalOnly,
+}
+
+/// Capabilities of one model exposed by an adapter.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelInfo {
+    pub name: String,
+    pub capabilities: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modalities: Vec<String>,
+    pub uses_external_provider: bool,
+}
+
+/// A chat-completion request normalized across providers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatRequest {
+    pub model: String,
+    pub messages: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatResponse {
+    pub model: String,
+    pub content: String,
+    pub usage: Usage,
+}
+
+/// A single vision/multimodal request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VisionRequest {
+    pub model: String,
+    pub prompt: String,
+    /// base64-encoded image(s).
+    pub images: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VisionResponse {
+    pub model: String,
+    pub content: String,
+    pub usage: Usage,
+}
+
+/// Token/unit usage for a single call.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Usage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub image_units: u64,
+    #[serde(default)]
+    pub audio_units: u64,
+}
+
+/// Estimated cost of some usage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CostEstimate {
+    pub usd: f64,
+}
+
+/// A leased job from the coordinator. Mirrors `proto/job.schema.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Job {
+    pub job_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_id: Option<String>,
+    pub capability: String,
+    pub privacy: PrivacyLevel,
+    #[serde(default)]
+    pub allow_external_providers: bool,
+    /// Capability-specific input (e.g. `{ "messages": [...], "max_tokens": 256 }`).
+    pub payload: serde_json::Value,
+}
+
+/// Status of a finished job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobStatus {
+    Ok,
+    Rejected,
+    Error,
+}
+
+/// Result returned to the coordinator. Mirrors `proto/job_result.schema.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobResult {
+    pub job_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_id: Option<String>,
+    pub status: JobStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ResultUsage>,
+}
+
+/// Per-job usage attached to a result. No secrets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResultUsage {
+    pub provider: String,
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub latency_ms: f64,
+}

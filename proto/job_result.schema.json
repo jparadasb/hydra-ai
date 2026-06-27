@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hydra-ai/proto/job_result.schema.json",
+  "title": "JobResult",
+  "description": "Worker -> coordinator. Normalized result of a leased job.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["job_id", "status"],
+  "properties": {
+    "job_id": { "type": "string" },
+    "lease_id": { "type": "string" },
+    "status": { "enum": ["ok", "rejected", "error"] },
+    "reason": { "type": "string", "description": "Set when status is rejected/error (e.g. privacy_violation, limit_exceeded)." },
+    "output": { "type": "object", "description": "Capability-specific normalized output." },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider": { "type": "string" },
+        "model": { "type": "string" },
+        "input_tokens": { "type": "integer", "minimum": 0 },
+        "output_tokens": { "type": "integer", "minimum": 0 },
+        "latency_ms": { "type": "number", "minimum": 0 }
+      }
+    }
+  }
+}

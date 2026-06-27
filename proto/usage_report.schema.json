@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hydra-ai/proto/usage_report.schema.json",
+  "title": "UsageReport",
+  "description": "Worker -> coordinator. Aggregated usage. MUST NOT contain secrets.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["worker_id", "provider", "model", "period"],
+  "properties": {
+    "worker_id": { "type": "string" },
+    "provider": { "type": "string" },
+    "model": { "type": "string" },
+    "period": { "type": "string", "description": "YYYY-MM or YYYY-MM-DD" },
+    "requests": { "type": "integer", "minimum": 0 },
+    "input_tokens": { "type": "integer", "minimum": 0 },
+    "output_tokens": { "type": "integer", "minimum": 0 },
+    "image_units": { "type": "integer", "minimum": 0 },
+    "audio_units": { "type": "integer", "minimum": 0 },
+    "estimated_cost_usd": { "type": "number", "minimum": 0 },
+    "successful_jobs": { "type": "integer", "minimum": 0 },
+    "failed_jobs": { "type": "integer", "minimum": 0 },
+    "average_latency_ms": { "type": "number", "minimum": 0 }
+  }
+}

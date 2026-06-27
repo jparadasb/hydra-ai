@@ -1,0 +1,33 @@
+[package]
+name = "worker-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+tracing = { workspace = true }
+keyring = { workspace = true, optional = true }
+chacha20poly1305 = { workspace = true }
+argon2 = { workspace = true }
+rand = { workspace = true }
+sysinfo = { workspace = true }
+directories = { workspace = true }
+
+[features]
+default = []
+# Enable to store secrets in the OS keychain (Secret Service / Keychain / Credential
+# Manager). Requires platform crypto libs at build time. Without it, the worker falls
+# back to an encrypted local file.
+os-keychain = ["dep:keyring", "keyring/sync-secret-service", "keyring/apple-native", "keyring/windows-native"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+wiremock = "0.6"
+tempfile = "3"

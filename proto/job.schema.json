@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hydra-ai/proto/job.schema.json",
+  "title": "Job",
+  "description": "Coordinator -> worker. A leased job.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["job_id", "capability", "privacy", "payload"],
+  "properties": {
+    "job_id": { "type": "string" },
+    "lease_id": { "type": "string" },
+    "capability": { "type": "string", "description": "e.g. text.extract_json, image.describe, ocr.extract" },
+    "privacy": { "enum": ["public", "private", "sensitive", "local_only"] },
+    "allow_external_providers": { "type": "boolean", "default": false },
+    "payload": {
+      "type": "object",
+      "description": "Capability-specific input (chat messages, image refs, etc.)."
+    }
+  }
+}

@@ -1,0 +1,20 @@
+[package]
+name = "worker-tauri"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# The command layer the Tauri app calls. Kept free of the Tauri/webkit runtime so the
+# UI↔core contract (especially "UI never sees a raw token") stays unit-testable in CI.
+# The desktop app adds `tauri` + `#[tauri::command]` wrappers around `commands::*`.
+
+[dependencies]
+worker-core = { path = "../worker-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
