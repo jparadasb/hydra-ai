@@ -4,12 +4,16 @@ Worker node execution modes (local model + user-provided API provider), per the 
 Greenfield → first vertical slice, with the **provider-tokens-stay-on-the-worker** rule
 enforced and tested on both sides.
 
-## Tests: 45 passing (29 Rust + 16 Elixir)
+## Tests: 54 passing (33 Rust + 21 Elixir), incl. a live end-to-end
 
 ```sh
-cd worker && cargo test --workspace     # 29
-cd coordinator && mix test              # 16
+cd worker && cargo test --workspace     # 33
+cd coordinator && mix test              # 21 (one drives the real worker binary over a socket)
 ```
+
+The Elixir suite starts a live endpoint and the actual `hydra-worker` binary, which connects
+over a WebSocket, registers, is leased a job, runs it through the gateway, and returns a
+secret-free result the coordinator observes (`test/integration_test.exs`).
 
 ## Done
 
@@ -33,6 +37,14 @@ vault file is `0600` and encrypted (token absent from disk, config, and registra
 **worker-tauri** — UI command layer (`commands.rs`, `dto.rs`); returns fingerprints only,
 tested that the raw token never crosses the boundary.
 
+**Transport (worker ↔ coordinator)**
+- worker-core `coordinator_client`: Phoenix v2 wire framing (unit-tested) + networked client
+  (feature `transport`) that joins `worker:<id>`, sends registration, receives `"job"` leases,
+  runs `Gateway::execute`, replies with `"result"`, heartbeats
+- coordinator `Endpoint` + `WorkerSocket` + `WorkerChannel` (wraps `WorkerSession`; SecretGuard
+  on join + every inbound message); `lease/2` broadcasts a job to a worker topic
+- `hydra-worker run` wires config + vault → adapters → gateway → live connection
+
 **coordinator (Elixir)**
 - `SecretGuard` (strips/rejects secret-shaped payloads), `Job`, `Worker`, `Router`
   (privacy table + scheduling score), `WorkerRegistry` (GenServer + process monitoring),
@@ -40,13 +52,11 @@ tested that the raw token never crosses the boundary.
 
 **proto** — JSON schemas for registration / usage / job / job_result (no secret fields).
 
-## Remaining (transport + shell)
+## Remaining
 
-1. **Worker ↔ coordinator transport**: Phoenix Channel client in worker-core
-   (`coordinator_client`) joining the socket, sending registration, running leases through
-   `Gateway::execute`, returning results. Payloads + gateway + secret guard already done.
-2. **Coordinator durability/endpoint**: `WorkerChannel` (Phoenix.Channel) + Oban/Ecto/Postgres
-   for durable jobs/leases. `WorkerSession` + `Router` are ready to wrap.
-3. **Desktop app shell**: Tauri runtime + `worker/ui/` web frontend over `worker-tauri`
-   commands (4 screens: mode chooser, providers, privacy, usage).
-4. Broaden local runtimes beyond Ollama (llama.cpp / LM Studio / vLLM) behind the same trait.
+1. **Coordinator durability**: Oban + Ecto/Postgres for durable jobs/leases and re-queue on
+   worker rejection/timeout. `WorkerSession` + `Router` + the channel are ready to wrap; the
+   live transport is done.
+2. **Desktop app shell**: Tauri runtime + `worker/ui/` web frontend over `worker-tauri`
+   commands (4 screens: mode chooser, providers, privacy, usage). Command layer done + tested.
+3. Broaden local runtimes beyond Ollama (llama.cpp / LM Studio / vLLM) behind the same trait.

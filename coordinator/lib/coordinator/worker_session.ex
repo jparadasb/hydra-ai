@@ -41,11 +41,19 @@ defmodule Coordinator.WorkerSession do
     end
   end
 
-  @doc "Handle a normalized job result from a worker."
+  @doc """
+  Handle a normalized job result from a worker. Broadcasts the (sanitized, secret-free)
+  result on the `"job_results"` PubSub topic so schedulers/tests can observe completions.
+  """
   def handle_result(payload) do
     case SecretGuard.verify(payload) do
-      :ok -> {:ok, SecretGuard.sanitize(payload)}
-      {:error, _} = err -> err
+      :ok ->
+        clean = SecretGuard.sanitize(payload)
+        Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {:job_result, clean})
+        {:ok, clean}
+
+      {:error, _} = err ->
+        err
     end
   end
 

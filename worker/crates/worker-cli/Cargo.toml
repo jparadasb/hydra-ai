@@ -10,7 +10,7 @@ name = "hydra-worker"
 path = "src/main.rs"
 
 [dependencies]
-worker-core = { path = "../worker-core" }
+worker-core = { path = "../worker-core", features = ["transport"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 clap = { workspace = true }

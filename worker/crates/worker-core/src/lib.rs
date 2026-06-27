@@ -6,7 +6,9 @@
 
 pub mod adapter;
 pub mod adapters;
+pub mod bootstrap;
 pub mod config;
+pub mod coordinator_client;
 pub mod error;
 pub mod gateway;
 pub mod limits;

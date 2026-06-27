@@ -19,9 +19,13 @@ argon2 = { workspace = true }
 rand = { workspace = true }
 sysinfo = { workspace = true }
 directories = { workspace = true }
+tokio-tungstenite = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
 
 [features]
 default = []
+# Networked Phoenix Channel client used to talk to the coordinator.
+transport = ["dep:tokio-tungstenite", "dep:futures-util"]
 # Enable to store secrets in the OS keychain (Secret Service / Keychain / Credential
 # Manager). Requires platform crypto libs at build time. Without it, the worker falls
 # back to an encrypted local file.

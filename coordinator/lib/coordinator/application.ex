@@ -8,8 +8,10 @@ defmodule Coordinator.Application do
   @impl true
   def start(_type, _args) do
     children = [
+      {Phoenix.PubSub, name: Coordinator.PubSub},
       # Live registry of connected workers (source of truth for the Router).
-      Coordinator.WorkerRegistry
+      Coordinator.WorkerRegistry,
+      Coordinator.Endpoint
     ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html

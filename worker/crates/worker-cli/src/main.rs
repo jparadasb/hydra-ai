@@ -146,7 +146,7 @@ fn cmd_init(mode: Option<String>) {
 async fn cmd_provider(action: ProviderAction) {
     let vault = open_vault();
     match action {
-        ProviderAction::Add { name, base_url: _ } => {
+        ProviderAction::Add { name, base_url } => {
             let token = read_token();
             if token.expose().is_empty() {
                 eprintln!("no token provided");
@@ -154,7 +154,14 @@ async fn cmd_provider(action: ProviderAction) {
             }
             let fp = token.fingerprint();
             match vault.add(&name, token) {
-                Ok(()) => println!("Stored token for '{name}' ({fp})."),
+                Ok(()) => {
+                    // Record the provider (no token) in config so `run` can build its adapter.
+                    if let Some(mut cfg) = load_config() {
+                        cfg.upsert_provider(&name, base_url);
+                        let _ = save_config(&cfg);
+                    }
+                    println!("Stored token for '{name}' ({fp}).");
+                }
                 Err(e) => eprintln!("vault error: {e}"),
             }
         }
@@ -229,14 +236,77 @@ async fn cmd_run() {
         eprintln!("no config found — run `hydra-worker init` first");
         return;
     };
-    // Build the (non-secret) registration to confirm what the coordinator would see.
-    // The persistent Phoenix Channel transport is layered on top of this payload.
-    let reg = worker_core::registration::WorkerRegistration::build(&cfg, None, None, &[]);
+    let coordinator_url = std::env::var("HYDRA_COORDINATOR_URL")
+        .ok()
+        .or_else(|| cfg.coordinator_url.clone())
+        .unwrap_or_else(|| "ws://127.0.0.1:4000".to_string());
+
+    let vault = open_vault();
+    let http = reqwest::Client::new();
+
+    // Build the adapter registry + gateway from config + vault (tokens never surface here).
+    let registry = worker_core::bootstrap::build_registry(&cfg, &vault, http.clone());
+    let usage = std::sync::Arc::new(
+        match worker_core::usage::JsonUsageStore::new(
+            worker_core::usage::JsonUsageStore::default_path(),
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("usage store error: {e}");
+                return;
+            }
+        },
+    );
+    let mut gateway = worker_core::gateway::Gateway::new(
+        registry,
+        cfg.routing.clone(),
+        worker_core::limits::LimitGuard::new(cfg.limits.clone()),
+        usage,
+    );
+    gateway.refresh_catalog().await;
+
+    let provider_desc =
+        cfg.providers
+            .first()
+            .map(|p| worker_core::registration::ProviderDescriptor {
+                name: p.name.clone(),
+                api_type: "openai_compatible".into(),
+                base_url: p.base_url.clone(),
+                token_storage: "local_encrypted".into(),
+            });
+    let reg = worker_core::registration::WorkerRegistration::build(
+        &cfg,
+        None,
+        provider_desc,
+        &gateway.model_catalog(),
+    );
+    let registration = serde_json::to_value(&reg).unwrap();
+
     println!(
-        "Worker '{}' ready in {:?} mode.",
+        "Worker '{}' ({:?}) connecting to {coordinator_url}.",
         cfg.worker_id, cfg.execution_mode
     );
-    println!("Registration payload the coordinator will receive (no secrets):");
-    println!("{}", serde_json::to_string_pretty(&reg).unwrap());
-    println!("\n(transport) connect to coordinator channel and process leases — see worker-core::coordinator_client");
+    println!(
+        "Registration (no secrets):\n{}",
+        serde_json::to_string_pretty(&reg).unwrap()
+    );
+
+    let config = worker_core::coordinator_client::ClientConfig {
+        base_url: coordinator_url,
+        worker_id: cfg.worker_id.clone(),
+        registration,
+        heartbeat: std::time::Duration::from_secs(30),
+    };
+    // Ignore broken-pipe on these final writes (parent may have closed our stdout).
+    use std::io::Write;
+    match worker_core::coordinator_client::connect_and_run(config, std::sync::Arc::new(gateway))
+        .await
+    {
+        Ok(()) => {
+            let _ = writeln!(std::io::stdout(), "Disconnected.");
+        }
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "transport error: {e}");
+        }
+    }
 }

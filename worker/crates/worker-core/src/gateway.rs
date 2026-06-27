@@ -66,6 +66,11 @@ impl Gateway {
         self.catalog = catalog;
     }
 
+    /// The discovered models, for building the registration payload.
+    pub fn model_catalog(&self) -> Vec<ModelInfo> {
+        self.catalog.iter().map(|(_, m)| m.clone()).collect()
+    }
+
     fn candidates_for(&self, capability: &str) -> Vec<Candidate> {
         let mut cands: Vec<Candidate> = self
             .catalog

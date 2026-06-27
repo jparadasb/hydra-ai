@@ -71,6 +71,14 @@ impl Default for PrivacyPrefs {
     }
 }
 
+/// A configured external provider. NON-SECRET: the token lives in the vault, keyed by `name`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderEntry {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+}
+
 /// Top-level, non-secret worker configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerConfig {
@@ -82,6 +90,12 @@ pub struct WorkerConfig {
     pub limits: Limits,
     #[serde(default)]
     pub privacy: PrivacyPrefs,
+    /// External providers the user has configured (tokens are NOT here — see the vault).
+    #[serde(default)]
+    pub providers: Vec<ProviderEntry>,
+    /// Coordinator base URL, e.g. `ws://127.0.0.1:4000`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator_url: Option<String>,
 }
 
 impl WorkerConfig {
@@ -92,6 +106,17 @@ impl WorkerConfig {
             routing: RoutingPolicy::default(),
             limits: Limits::default(),
             privacy: PrivacyPrefs::default(),
+            providers: Vec::new(),
+            coordinator_url: None,
+        }
+    }
+
+    /// Add or update a provider entry (idempotent by name).
+    pub fn upsert_provider(&mut self, name: impl Into<String>, base_url: Option<String>) {
+        let name = name.into();
+        match self.providers.iter_mut().find(|p| p.name == name) {
+            Some(p) => p.base_url = base_url,
+            None => self.providers.push(ProviderEntry { name, base_url }),
         }
     }
 }
