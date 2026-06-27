@@ -7,7 +7,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use worker_core::adapter::ProviderAdapter;
 use worker_core::adapters::{
-    AnthropicAdapter, GeminiAdapter, OllamaAdapter, OpenAICompatibleAdapter,
+    AnthropicAdapter, GeminiAdapter, LocalOpenAiAdapter, OllamaAdapter, OpenAICompatibleAdapter,
 };
 use worker_core::types::{ChatMessage, ChatRequest};
 use worker_core::vault::Secret;
@@ -130,6 +130,43 @@ async fn gemini_chat_maps_usage_metadata() {
         .unwrap();
     assert_eq!(resp.content, "gem-reply");
     assert_eq!(resp.usage.input_tokens, 9);
+}
+
+#[tokio::test]
+async fn local_openai_runtime_is_local_no_auth() {
+    let server = MockServer::start().await;
+    // No Authorization header required for a local runtime.
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "id": "llama-3.1-8b" }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{ "message": { "content": "local-oai" } }],
+            "usage": { "prompt_tokens": 7, "completion_tokens": 2 }
+        })))
+        .mount(&server)
+        .await;
+
+    // llama.cpp / vLLM share this adapter; base_url override points at the mock.
+    let a = LocalOpenAiAdapter::new("llama_cpp", server.uri(), None, Client::new());
+    assert!(!a.uses_external_provider());
+
+    let models = a.list_models().await.unwrap();
+    assert_eq!(models[0].name, "llama-3.1-8b");
+    assert!(
+        !models[0].uses_external_provider,
+        "local models must not be flagged external"
+    );
+
+    let resp = a.run_chat_completion(chat("llama-3.1-8b")).await.unwrap();
+    assert_eq!(resp.content, "local-oai");
+    assert_eq!(resp.usage.input_tokens, 7);
+    assert_eq!(resp.usage.output_tokens, 2);
 }
 
 #[tokio::test]

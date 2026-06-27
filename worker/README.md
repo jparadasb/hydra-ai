@@ -6,7 +6,7 @@ Rust workspace for the local AI execution gateway.
 
 | crate | what |
 |-------|------|
-| `worker-core` | adapters, token vault, gateway (privacy + limits + usage), registration, runtime detect |
+| `worker-core` | adapters (OpenAI-compat/Anthropic/Gemini external; Ollama/llama.cpp/vLLM local), token vault, gateway (privacy + limits + usage), registration, runtime detect |
 | `worker-cli`  | `hydra-worker` headless CLI |
 | `worker-tauri`| command layer the desktop UI calls (returns fingerprints, never tokens) |
 

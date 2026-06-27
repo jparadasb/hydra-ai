@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use crate::adapter::AdapterRegistry;
-use crate::adapters::{build_external_adapter, OllamaAdapter};
+use crate::adapters::{build_external_adapter, LocalOpenAiAdapter, OllamaAdapter};
 use crate::config::WorkerConfig;
 use crate::types::ExecutionMode;
 use crate::vault::Vault;
@@ -25,7 +25,12 @@ pub fn build_registry(
         config.execution_mode,
         ExecutionMode::LocalModel | ExecutionMode::Both
     ) {
+        // Register all supported local runtimes at their default endpoints. Only the ones
+        // actually running contribute models — the gateway tolerates a runtime whose
+        // `list_models` fails (it just yields no models).
         registry.register(Arc::new(OllamaAdapter::new(http.clone())));
+        registry.register(Arc::new(LocalOpenAiAdapter::llama_cpp(http.clone())));
+        registry.register(Arc::new(LocalOpenAiAdapter::vllm(http.clone())));
     }
 
     if matches!(

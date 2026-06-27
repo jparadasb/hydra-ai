@@ -4,10 +4,10 @@ Worker node execution modes (local model + user-provided API provider), per the 
 Greenfield → first vertical slice, with the **provider-tokens-stay-on-the-worker** rule
 enforced and tested on both sides.
 
-## Tests: 59 passing (33 Rust + 26 Elixir), incl. a live end-to-end
+## Tests: 61 passing (35 Rust + 26 Elixir), incl. a live end-to-end
 
 ```sh
-cd worker && cargo test --workspace     # 33
+cd worker && cargo test --workspace     # 35
 cd coordinator && mix test              # 26 (one drives the real worker binary over a socket)
 ```
 
@@ -21,7 +21,8 @@ secret-free result the coordinator observes (`test/integration_test.exs`).
 - Execution modes + routing policy + limits + privacy prefs (`config.rs`)
 - `ProviderAdapter` trait + `AdapterRegistry` (`adapter.rs`)
 - Adapters: OpenAI-compatible (OpenAI/OpenRouter/Groq/Mistral/Together/Fireworks/custom),
-  Anthropic, Gemini, Ollama (`adapters/`) — request/response mapping tested via mock HTTP
+  Anthropic, Gemini (external); Ollama + llama.cpp + vLLM (local, `uses_external=false`) —
+  request/response mapping tested via mock HTTP; OpenAI-compat HTTP path shared external/local
 - Token vault: `Secret` (non-`Serialize`, redacted Debug), encrypted-file store
   (ChaCha20-Poly1305 + Argon2id, `0600`), OS-keychain backend behind `os-keychain` feature,
   `fingerprint`/`redact` (`vault.rs`)
@@ -68,5 +69,5 @@ with `cargo tauri dev` after the system deps in `worker/crates/worker-app/SETUP.
 
 1. **Desktop app**: build/verify on a machine with the WebView system deps (this dev box
    lacks webkit2gtk); generate bundle icons. Code + frontend are complete and wired.
-2. Broaden local runtimes beyond Ollama (llama.cpp / LM Studio / vLLM) behind the same trait.
+2. LM Studio local runtime (also OpenAI-compatible — drops into `LocalOpenAiAdapter`).
 3. Production swap: SQLite → Postgres is a repo-adapter + Oban-engine change (Lite → Basic).
