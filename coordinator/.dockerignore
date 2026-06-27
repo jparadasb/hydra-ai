@@ -1,0 +1,9 @@
+_build
+deps
+.elixir_ls
+*.db
+*.db-shm
+*.db-wal
+.git
+.gitignore
+test

@@ -1,0 +1,53 @@
+# hydra-ai coordinator stack: Postgres + the coordinator release + a Cloudflare tunnel.
+#
+#   1. cp .env.example .env   (fill POSTGRES_PASSWORD, SECRET_KEY_BASE, TUNNEL_TOKEN)
+#   2. docker compose up -d --build
+#
+# The Cloudflare tunnel exposes the coordinator publicly using a token created in the
+# Cloudflare Zero Trust dashboard; in that dashboard route your hostname to the service
+# http://coordinator:4000. No inbound ports need to be opened on the host.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: hydra
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: hydra
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hydra -d hydra"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  coordinator:
+    build:
+      context: ./coordinator
+      dockerfile: Dockerfile
+    environment:
+      DB_ADAPTER: postgres
+      DATABASE_URL: ecto://hydra:${POSTGRES_PASSWORD}@postgres:5432/hydra
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE:?set SECRET_KEY_BASE in .env}
+      PORT: "4000"
+      POOL_SIZE: ${POOL_SIZE:-10}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "4000"
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN in .env}
+    depends_on:
+      - coordinator
+    restart: unless-stopped
+
+volumes:
+  pgdata:

@@ -13,6 +13,9 @@ erl_crash.dump
 /coordinator/*.db-shm
 /coordinator/*.db-wal
 
+# Local secrets
+.env
+
 # Local worker state (never commit secrets)
 *.vault.bin
 .hydra-vault.bin
