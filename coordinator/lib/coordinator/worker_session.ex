@@ -49,6 +49,7 @@ defmodule Coordinator.WorkerSession do
     case SecretGuard.verify(payload) do
       :ok ->
         clean = SecretGuard.sanitize(payload)
+        persist_result(clean)
         Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {:job_result, clean})
         {:ok, clean}
 
@@ -56,6 +57,17 @@ defmodule Coordinator.WorkerSession do
         err
     end
   end
+
+  # Record the result against the durable job, if it is one we are tracking.
+  defp persist_result(%{"job_id" => job_id} = result) when is_binary(job_id) do
+    Coordinator.Jobs.complete(job_id, result)
+  rescue
+    # The worker may report a result for a job we don't persist (e.g. ad-hoc). Don't crash
+    # the channel over it.
+    _ -> :ok
+  end
+
+  defp persist_result(_), do: :ok
 
   defp validate_registration(%{"worker_id" => id, "execution_mode" => mode})
        when is_binary(id) and mode in ["local_model", "external_provider", "both"],

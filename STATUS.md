@@ -4,11 +4,11 @@ Worker node execution modes (local model + user-provided API provider), per the 
 Greenfield → first vertical slice, with the **provider-tokens-stay-on-the-worker** rule
 enforced and tested on both sides.
 
-## Tests: 54 passing (33 Rust + 21 Elixir), incl. a live end-to-end
+## Tests: 59 passing (33 Rust + 26 Elixir), incl. a live end-to-end
 
 ```sh
 cd worker && cargo test --workspace     # 33
-cd coordinator && mix test              # 21 (one drives the real worker binary over a socket)
+cd coordinator && mix test              # 26 (one drives the real worker binary over a socket)
 ```
 
 The Elixir suite starts a live endpoint and the actual `hydra-worker` binary, which connects
@@ -52,11 +52,16 @@ tested that the raw token never crosses the boundary.
 
 **proto** — JSON schemas for registration / usage / job / job_result (no secret fields).
 
+**Durability (Elixir)**
+- `Coordinator.Repo` (Ecto + SQLite — no DB server needed), `jobs` table + migration
+- `Coordinator.Jobs` lifecycle: enqueue → lease → done | (re-queue ×5) → failed
+- `Coordinator.LeaseWorker` (Oban Lite engine): routes pending jobs via the Router, snoozes
+  until an eligible worker connects; worker results persist via `WorkerSession`
+- `Coordinator.submit_job/1` public entrypoint
+
 ## Remaining
 
-1. **Coordinator durability**: Oban + Ecto/Postgres for durable jobs/leases and re-queue on
-   worker rejection/timeout. `WorkerSession` + `Router` + the channel are ready to wrap; the
-   live transport is done.
-2. **Desktop app shell**: Tauri runtime + `worker/ui/` web frontend over `worker-tauri`
+1. **Desktop app shell**: Tauri runtime + `worker/ui/` web frontend over `worker-tauri`
    commands (4 screens: mode chooser, providers, privacy, usage). Command layer done + tested.
-3. Broaden local runtimes beyond Ollama (llama.cpp / LM Studio / vLLM) behind the same trait.
+2. Broaden local runtimes beyond Ollama (llama.cpp / LM Studio / vLLM) behind the same trait.
+3. Production swap: SQLite → Postgres is a repo-adapter + Oban-engine change (Lite → Basic).

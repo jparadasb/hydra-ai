@@ -11,4 +11,14 @@ config :coordinator, Coordinator.Endpoint,
 
 config :phoenix, :json_library, Jason
 
+config :coordinator,
+  ecto_repos: [Coordinator.Repo]
+
+config :coordinator, Oban,
+  engine: Oban.Engines.Lite,
+  # SQLite has no LISTEN/NOTIFY; use the process-group notifier.
+  notifier: Oban.Notifiers.PG,
+  repo: Coordinator.Repo,
+  queues: [leases: 10]
+
 import_config "#{config_env()}.exs"

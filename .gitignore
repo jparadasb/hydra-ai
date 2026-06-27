@@ -8,6 +8,11 @@
 /coordinator/*.ez
 erl_crash.dump
 
+# SQLite databases
+/coordinator/*.db
+/coordinator/*.db-shm
+/coordinator/*.db-wal
+
 # Local worker state (never commit secrets)
 *.vault.bin
 .hydra-vault.bin

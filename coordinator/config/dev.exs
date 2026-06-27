@@ -6,4 +6,8 @@ config :coordinator, Coordinator.Endpoint,
   debug_errors: true,
   server: true
 
+config :coordinator, Coordinator.Repo,
+  database: Path.expand("../coordinator_dev.db", __DIR__),
+  pool_size: 5
+
 config :logger, :console, format: "[$level] $message\n"

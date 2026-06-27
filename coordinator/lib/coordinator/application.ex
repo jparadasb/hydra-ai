@@ -8,6 +8,8 @@ defmodule Coordinator.Application do
   @impl true
   def start(_type, _args) do
     children = [
+      Coordinator.Repo,
+      {Oban, Application.fetch_env!(:coordinator, Oban)},
       {Phoenix.PubSub, name: Coordinator.PubSub},
       # Live registry of connected workers (source of truth for the Router).
       Coordinator.WorkerRegistry,

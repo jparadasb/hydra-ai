@@ -13,15 +13,27 @@ boundary.
 | `Coordinator.Worker`         | a registered worker's non-secret capability snapshot |
 | `Coordinator.Router`         | privacy-aware routing + scheduling score |
 | `Coordinator.WorkerRegistry` | live in-memory worker set (GenServer; source of truth) |
-| `Coordinator.WorkerSession`  | channel-boundary logic (a Phoenix.Channel wraps this) |
+| `Coordinator.WorkerSession`  | channel-boundary logic (`WorkerChannel` wraps this) |
+| `Coordinator.WorkerChannel`  | per-worker Phoenix Channel (registration in, leases out) |
+| `Coordinator.Jobs`           | durable job/lease lifecycle (Ecto + SQLite) |
+| `Coordinator.LeaseWorker`    | Oban worker that assigns pending jobs via the Router |
+
+## Durability
+
+Jobs are persisted in SQLite (`Coordinator.Repo`) and leased by **Oban** (Lite engine), so
+assignment survives restarts. `Coordinator.submit_job/1` enqueues a job; `LeaseWorker` routes
+it to an eligible worker (snoozing until one connects), and a worker's result marks the job
+`done` or re-queues it (up to 5 attempts) then `failed`. SQLite keeps the coordinator
+self-contained — no separate DB server.
 
 ## Test
 
 ```sh
-mix test
+mix test     # creates + migrates the SQLite test DB, then runs the suite
 ```
 
-Runs without a database — the contract modules are pure / in-memory.
+A live integration test launches the real `hydra-worker` binary, which connects over a
+WebSocket, registers, is leased a job, and returns a secret-free result.
 
 ## Privacy routing table
 
