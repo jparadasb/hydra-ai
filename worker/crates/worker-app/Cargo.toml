@@ -1,0 +1,25 @@
+[package]
+name = "worker-app"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+# NOTE: excluded from the workspace (see worker/Cargo.toml). The `tauri` runtime links
+# webkit2gtk/gtk; install the system deps (see worker/crates/worker-app/SETUP.md) then run
+# `cargo tauri dev` from this directory. The app logic it wraps lives in `worker-tauri`,
+# which IS in the workspace and is unit-tested without the GUI runtime.
+
+[[bin]]
+name = "hydra-worker-app"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+worker-core = { path = "../worker-core" }
+worker-tauri = { path = "../worker-tauri" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

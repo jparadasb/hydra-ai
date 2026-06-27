@@ -20,7 +20,12 @@ The token input box collects the raw token and passes it directly to the `add_pr
 command. The frontend must not persist it, log it, or render it back — the command returns a
 fingerprint, which is the only form shown thereafter.
 
-## Status
+## Files
 
-Scaffold/spec only. The command layer (`worker-tauri`) is implemented and tested; this
-directory holds the Tauri runtime + HTML/JS shell to be built on top.
+- `index.html` / `styles.css` / `main.js` — the static frontend (no build step). `main.js`
+  calls the Rust commands via the global Tauri bridge (`window.__TAURI__.core.invoke`).
+
+The Tauri runtime that serves this lives in `../crates/worker-app` (excluded from the Rust
+workspace because it links system WebView libs). Build/run it with `cargo tauri dev` after
+installing the system deps in `../crates/worker-app/SETUP.md`. The commands it exposes are
+implemented + unit-tested in `../crates/worker-tauri`.

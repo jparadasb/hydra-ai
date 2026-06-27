@@ -2436,6 +2436,7 @@ dependencies = [
 name = "worker-tauri"
 version = "0.1.0"
 dependencies = [
+ "directories",
  "reqwest",
  "serde",
  "serde_json",

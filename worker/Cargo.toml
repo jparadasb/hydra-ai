@@ -5,6 +5,10 @@ members = [
     "crates/worker-cli",
     "crates/worker-tauri",
 ]
+# The desktop app links the Tauri/webkit runtime, which needs system GUI libs
+# (webkit2gtk, gtk). Excluded so `cargo build --workspace` stays buildable on headless/CI
+# machines. Build it explicitly with `cargo tauri dev` from worker/crates/worker-app.
+exclude = ["crates/worker-app"]
 
 [workspace.package]
 version = "0.1.0"

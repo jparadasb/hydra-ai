@@ -34,8 +34,13 @@ secret-free result the coordinator observes (`test/integration_test.exs`).
 **worker-cli** — `init` / `provider add|test|rm|rotate` / `usage` / `run`. Verified live:
 vault file is `0600` and encrypted (token absent from disk, config, and registration).
 
-**worker-tauri** — UI command layer (`commands.rs`, `dto.rs`); returns fingerprints only,
-tested that the raw token never crosses the boundary.
+**worker-tauri** — UI command layer (`commands.rs`, `dto.rs`, `support.rs`); returns
+fingerprints only, tested that the raw token never crosses the boundary.
+
+**Desktop app** — `worker/crates/worker-app` (Tauri 2, excluded from the workspace because it
+links system WebView libs) + `worker/ui/` frontend (4 screens: mode / providers / privacy /
+usage, with a vault-unlock gate). Thin `#[tauri::command]` shell over `worker-tauri`. Build
+with `cargo tauri dev` after the system deps in `worker/crates/worker-app/SETUP.md`.
 
 **Transport (worker ↔ coordinator)**
 - worker-core `coordinator_client`: Phoenix v2 wire framing (unit-tested) + networked client
@@ -61,7 +66,7 @@ tested that the raw token never crosses the boundary.
 
 ## Remaining
 
-1. **Desktop app shell**: Tauri runtime + `worker/ui/` web frontend over `worker-tauri`
-   commands (4 screens: mode chooser, providers, privacy, usage). Command layer done + tested.
+1. **Desktop app**: build/verify on a machine with the WebView system deps (this dev box
+   lacks webkit2gtk); generate bundle icons. Code + frontend are complete and wired.
 2. Broaden local runtimes beyond Ollama (llama.cpp / LM Studio / vLLM) behind the same trait.
 3. Production swap: SQLite → Postgres is a repo-adapter + Oban-engine change (Lite → Basic).
