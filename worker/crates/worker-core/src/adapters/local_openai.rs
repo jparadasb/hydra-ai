@@ -1,7 +1,8 @@
-//! Local OpenAI-compatible runtimes: **llama.cpp** (`llama-server`) and **vLLM**. Both serve
-//! an OpenAI-style `/v1` API, so they reuse the shared OpenAI-compatible HTTP path — but they
-//! run on this machine, so `uses_external_provider() == false` (privacy-safe for every job
-//! level) and a token is optional (most local setups need none).
+//! Local OpenAI-compatible runtimes: **llama.cpp** (`llama-server`), **vLLM**, and
+//! **LM Studio**. All serve an OpenAI-style `/v1` API, so they reuse the shared
+//! OpenAI-compatible HTTP path — but they run on this machine, so
+//! `uses_external_provider() == false` (privacy-safe for every job level) and a token is
+//! optional (most local setups need none).
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -16,6 +17,8 @@ use crate::vault::Secret;
 pub const LLAMACPP_DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8080/v1";
 /// vLLM OpenAI-compatible server default endpoint.
 pub const VLLM_DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8000/v1";
+/// LM Studio local server default endpoint.
+pub const LM_STUDIO_DEFAULT_ENDPOINT: &str = "http://127.0.0.1:1234/v1";
 
 /// A local runtime exposing an OpenAI-compatible `/v1` API.
 pub struct LocalOpenAiAdapter {
@@ -49,6 +52,11 @@ impl LocalOpenAiAdapter {
     /// vLLM at the default endpoint.
     pub fn vllm(client: Client) -> Self {
         Self::new("vllm", VLLM_DEFAULT_ENDPOINT, None, client)
+    }
+
+    /// LM Studio at the default endpoint.
+    pub fn lm_studio(client: Client) -> Self {
+        Self::new("lm_studio", LM_STUDIO_DEFAULT_ENDPOINT, None, client)
     }
 
     fn bearer(&self) -> Option<&str> {

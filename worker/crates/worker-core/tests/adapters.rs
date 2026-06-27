@@ -170,6 +170,18 @@ async fn local_openai_runtime_is_local_no_auth() {
 }
 
 #[tokio::test]
+async fn local_runtime_constructors_are_local() {
+    // llama.cpp / vLLM / LM Studio share one local adapter at distinct default endpoints.
+    for a in [
+        LocalOpenAiAdapter::llama_cpp(Client::new()),
+        LocalOpenAiAdapter::vllm(Client::new()),
+        LocalOpenAiAdapter::lm_studio(Client::new()),
+    ] {
+        assert!(!a.uses_external_provider());
+    }
+}
+
+#[tokio::test]
 async fn ollama_is_local_and_maps_counts() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

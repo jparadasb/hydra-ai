@@ -31,6 +31,7 @@ pub fn build_registry(
         registry.register(Arc::new(OllamaAdapter::new(http.clone())));
         registry.register(Arc::new(LocalOpenAiAdapter::llama_cpp(http.clone())));
         registry.register(Arc::new(LocalOpenAiAdapter::vllm(http.clone())));
+        registry.register(Arc::new(LocalOpenAiAdapter::lm_studio(http.clone())));
     }
 
     if matches!(

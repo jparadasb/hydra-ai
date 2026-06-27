@@ -2,7 +2,7 @@
 //!
 //! External providers (`uses_external_provider() == true`): OpenAI-compatible (OpenAI,
 //! OpenRouter, Groq, Mistral, Together, Fireworks, custom), Anthropic, Gemini.
-//! Local runtimes (`false`): Ollama, plus llama.cpp / vLLM (OpenAI-compatible, local).
+//! Local runtimes (`false`): Ollama, plus llama.cpp / vLLM / LM Studio (OpenAI-compatible).
 
 pub mod anthropic;
 pub mod gemini;
