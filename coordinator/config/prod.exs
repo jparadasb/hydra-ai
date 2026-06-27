@@ -7,8 +7,7 @@ config :coordinator, Coordinator.Endpoint,
 # secret_key_base MUST be provided via env in production:
 #   config :coordinator, Coordinator.Endpoint, secret_key_base: System.fetch_env!("SECRET_KEY_BASE")
 
-config :coordinator, Coordinator.Repo,
-  database: System.get_env("DATABASE_PATH") || "/var/lib/hydra/coordinator.db",
-  pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10")
+# Repo connection + Oban engine are configured at runtime (config/runtime.exs), branching on
+# DB_ADAPTER (sqlite3 | postgres).
 
 config :logger, level: :info

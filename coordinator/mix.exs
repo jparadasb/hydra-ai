@@ -36,6 +36,7 @@ defmodule Coordinator.MixProject do
       {:bandit, "~> 1.5"},
       {:ecto_sql, "~> 3.12"},
       {:ecto_sqlite3, "~> 0.17"},
+      {:postgrex, "~> 0.19"},
       {:oban, "~> 2.18"}
     ]
   end

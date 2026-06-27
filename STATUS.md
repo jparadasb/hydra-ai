@@ -65,8 +65,17 @@ with `cargo tauri dev` after the system deps in `worker/crates/worker-app/SETUP.
   until an eligible worker connects; worker results persist via `WorkerSession`
 - `Coordinator.submit_job/1` public entrypoint
 
+**Database backend (SQLite ↔ Postgres)**
+- `DB_ADAPTER` env selects the backend: unset/`sqlite3` (Lite engine, dev/test/single-node)
+  or `postgres` (Basic engine, Postgres LISTEN/NOTIFY, production/multi-node)
+- Repo adapter is compile-time (`Coordinator.Repo`); connection + Oban engine/notifier set at
+  runtime (`config/runtime.exs`). Migration + Oban tables are adapter-agnostic
+- `Coordinator.Release.migrate/0` for release deploys. Verified both adapters compile + select
+  correctly; SQLite path runs the full test suite
+
 ## Remaining
 
 1. **Desktop app**: build/verify on a machine with the WebView system deps (this dev box
    lacks webkit2gtk); generate bundle icons. Code + frontend are complete and wired.
-2. Production swap: SQLite → Postgres is a repo-adapter + Oban-engine change (Lite → Basic).
+2. **Postgres live run**: exercise against a real Postgres server (none on this dev box). The
+   adapter selection, runtime config, and migrations are in place and compile-verified.

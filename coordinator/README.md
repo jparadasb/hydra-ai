@@ -20,11 +20,32 @@ boundary.
 
 ## Durability
 
-Jobs are persisted in SQLite (`Coordinator.Repo`) and leased by **Oban** (Lite engine), so
-assignment survives restarts. `Coordinator.submit_job/1` enqueues a job; `LeaseWorker` routes
-it to an eligible worker (snoozing until one connects), and a worker's result marks the job
-`done` or re-queues it (up to 5 attempts) then `failed`. SQLite keeps the coordinator
-self-contained — no separate DB server.
+Jobs are persisted (`Coordinator.Repo`) and leased by **Oban**, so assignment survives
+restarts. `Coordinator.submit_job/1` enqueues a job; `LeaseWorker` routes it to an eligible
+worker (snoozing until one connects), and a worker's result marks the job `done` or re-queues
+it (up to 5 attempts) then `failed`.
+
+### Database backend (SQLite ↔ Postgres)
+
+The backend is chosen by the `DB_ADAPTER` env var. The repo adapter is **compile-time**;
+connection details + the matching Oban engine/notifier are set at runtime
+(`config/runtime.exs`). The `jobs` migration and Oban tables are adapter-agnostic.
+
+| `DB_ADAPTER` | adapter | Oban engine | notifier | use |
+|--------------|---------|-------------|----------|-----|
+| unset / `sqlite3` | SQLite3 | Lite | PG (process-group) | dev / test / single-node — no DB server |
+| `postgres` | Postgres | Basic | Postgres LISTEN/NOTIFY | production / multi-node |
+
+**Production (Postgres):**
+```sh
+export DB_ADAPTER=postgres                 # MUST be set at build AND boot (adapter is compiled in)
+export DATABASE_URL=ecto://user:pass@host/hydra
+export SECRET_KEY_BASE=$(mix phx.gen.secret)
+MIX_ENV=prod mix release
+DB_ADAPTER=postgres DATABASE_URL=... _build/prod/rel/coordinator/bin/coordinator eval "Coordinator.Release.migrate()"
+```
+Run migrations with the same `DB_ADAPTER`. Everything else (Router, leasing, channel, secret
+guard) is unchanged.
 
 ## Test
 
