@@ -135,7 +135,8 @@ fn cmd_init(mode: Option<String>) {
         "provider" => ExecutionMode::ExternalProvider,
         _ => ExecutionMode::Both,
     };
-    let worker_id = format!("worker-{}", std::process::id());
+    // Stable machine-derived id (the same value `run` will use + prove with the device key).
+    let worker_id = worker_core::identity::machine_worker_id();
     let cfg = WorkerConfig::new(worker_id, exec);
     match save_config(&cfg) {
         Ok(()) => println!("Initialized worker '{}' in {:?} mode.", cfg.worker_id, exec),
@@ -236,72 +237,25 @@ async fn cmd_run() {
         eprintln!("no config found — run `hydra-worker init` first");
         return;
     };
-    let coordinator_url = std::env::var("HYDRA_COORDINATOR_URL")
-        .ok()
-        .or_else(|| cfg.coordinator_url.clone())
-        .unwrap_or_else(|| "ws://127.0.0.1:4000".to_string());
+    // Vault passphrase: env (automation) or no-echo prompt.
+    let passphrase = std::env::var("HYDRA_VAULT_PASSPHRASE")
+        .unwrap_or_else(|_| rpassword::prompt_password("Vault passphrase: ").unwrap_or_default());
 
-    let vault = open_vault();
-    let http = reqwest::Client::new();
+    let worker_id = worker_core::identity::machine_worker_id();
+    let url = worker_core::worker_run::resolve_coordinator_url(None, &cfg);
+    println!("Worker '{worker_id}' ({:?}) connecting to {url}.", cfg.execution_mode);
 
-    // Build the adapter registry + gateway from config + vault (tokens never surface here).
-    let registry = worker_core::bootstrap::build_registry(&cfg, &vault, http.clone());
-    let usage = std::sync::Arc::new(
-        match worker_core::usage::JsonUsageStore::new(
-            worker_core::usage::JsonUsageStore::default_path(),
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("usage store error: {e}");
-                return;
-            }
-        },
-    );
-    let mut gateway = worker_core::gateway::Gateway::new(
-        registry,
-        cfg.routing.clone(),
-        worker_core::limits::LimitGuard::new(cfg.limits.clone()),
-        usage,
-    );
-    gateway.refresh_catalog().await;
-
-    let provider_desc =
-        cfg.providers
-            .first()
-            .map(|p| worker_core::registration::ProviderDescriptor {
-                name: p.name.clone(),
-                api_type: "openai_compatible".into(),
-                base_url: p.base_url.clone(),
-                token_storage: "local_encrypted".into(),
-            });
-    let reg = worker_core::registration::WorkerRegistration::build(
-        &cfg,
-        None,
-        provider_desc,
-        &gateway.model_catalog(),
-    );
-    let registration = serde_json::to_value(&reg).unwrap();
-
-    println!(
-        "Worker '{}' ({:?}) connecting to {coordinator_url}.",
-        cfg.worker_id, cfg.execution_mode
-    );
-    println!(
-        "Registration (no secrets):\n{}",
-        serde_json::to_string_pretty(&reg).unwrap()
-    );
-
-    let config = worker_core::coordinator_client::ClientConfig {
-        base_url: coordinator_url,
-        worker_id: cfg.worker_id.clone(),
-        registration,
-        heartbeat: std::time::Duration::from_secs(30),
+    // CLI and the desktop app share this exact run path (see worker_core::worker_run).
+    let status = worker_core::worker_run::RunStatus::new();
+    let params = worker_core::worker_run::RunParams {
+        config: cfg,
+        passphrase,
+        coordinator_url: None,
+        join_token: None,
     };
     // Ignore broken-pipe on these final writes (parent may have closed our stdout).
     use std::io::Write;
-    match worker_core::coordinator_client::connect_and_run(config, std::sync::Arc::new(gateway))
-        .await
-    {
+    match worker_core::worker_run::build_and_run(params, status).await {
         Ok(()) => {
             let _ = writeln!(std::io::stdout(), "Disconnected.");
         }

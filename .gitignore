@@ -1,5 +1,8 @@
 # Rust
 /worker/target/
+# worker-app is excluded from the workspace, so it has its own target/ + Tauri-generated dirs.
+/worker/crates/worker-app/target/
+/worker/crates/worker-app/gen/
 **/*.rs.bk
 
 # Elixir

@@ -10,7 +10,9 @@ rust-version.workspace = true
 # The desktop app adds `tauri` + `#[tauri::command]` wrappers around `commands::*`.
 
 [dependencies]
-worker-core = { path = "../worker-core" }
+# `transport` pulls the networked client so the app can run the worker (Start/Stop), sharing
+# worker-core's run path with the CLI.
+worker-core = { path = "../worker-core", features = ["transport"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }

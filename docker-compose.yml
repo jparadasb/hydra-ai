@@ -33,11 +33,20 @@ services:
       SECRET_KEY_BASE: ${SECRET_KEY_BASE:?set SECRET_KEY_BASE in .env}
       PORT: "4000"
       POOL_SIZE: ${POOL_SIZE:-10}
+      HYDRA_JOIN_TOKEN: ${HYDRA_JOIN_TOKEN:-}
+      HYDRA_REQUIRE_DEVICE_AUTH: ${HYDRA_REQUIRE_DEVICE_AUTH:-}
+      # OpenAI front-door (Coordinator.ApiRouter). API token gates callers; capability must match
+      # what connected workers advertise (built-in adapters serve "text.extract_json").
+      HYDRA_API_TOKEN: ${HYDRA_API_TOKEN:-}
+      HYDRA_API_CAPABILITY: ${HYDRA_API_CAPABILITY:-}
     depends_on:
       postgres:
         condition: service_healthy
     expose:
       - "4000"
+    # Publish to host loopback for local workers. Public access goes via the tunnel.
+    ports:
+      - "127.0.0.1:4000:4000"
     restart: unless-stopped
 
   cloudflared:

@@ -32,6 +32,20 @@ body {
   display: inline-block; width: 8px; height: 8px; border-radius: 50%;
   background: var(--accent); box-shadow: 0 0 10px var(--accent); margin-right: 8px;
 }
+.dot.on { background: var(--accent); box-shadow: 0 0 10px var(--accent); }
+.dot.warn { background: #fbbf24; box-shadow: 0 0 10px #fbbf24; }
+.dot.off { background: var(--muted); box-shadow: none; }
+
+/* Run status */
+.status-card {
+  max-width: 560px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 18px 20px;
+}
+.status-head { font-size: 15px; margin-bottom: 14px; }
+.status-grid { display: grid; grid-template-columns: 130px 1fr; gap: 8px 16px; margin: 0; }
+.status-grid dt { color: var(--muted); font-size: 13px; }
+.status-grid dd { margin: 0; word-break: break-all; }
+.runstate { margin-bottom: 8px; }
 .brand { font-weight: 600; letter-spacing: .3px; }
 .brand.small { font-size: 13px; margin-bottom: 22px; }
 

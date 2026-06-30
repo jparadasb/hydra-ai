@@ -32,6 +32,7 @@ $("#unlock-btn").addEventListener("click", async () => {
   $("#console").classList.remove("hidden");
   await loadConfig();
   await refreshProviders();
+  startStatusPolling();
 });
 $("#pass").addEventListener("keydown", (e) => {
   if (e.key === "Enter") $("#unlock-btn").click();
@@ -59,6 +60,51 @@ async function loadConfig() {
   $("#allow-private").checked = cfg.privacy.allow_private_jobs;
   $("#allow-sensitive").checked = cfg.privacy.allow_sensitive_jobs;
   $("#pref").value = cfg.routing_preference;
+  if (cfg.coordinator_url && !$("#r-url").value) $("#r-url").placeholder = cfg.coordinator_url;
+}
+
+// ---- Run (start / stop / live status) ----
+$("#start-worker").addEventListener("click", async () => {
+  const url = $("#r-url").value.trim() || null;
+  await call("start_worker", { coordinator_url: url });
+  toast("worker starting…");
+  pollStatus();
+});
+
+$("#stop-worker").addEventListener("click", async () => {
+  await call("stop_worker");
+  toast("worker stopped");
+  pollStatus();
+});
+
+function fmtTime(unix) {
+  return unix > 0 ? new Date(unix * 1000).toLocaleTimeString() : "—";
+}
+
+async function pollStatus() {
+  let s;
+  try {
+    s = await invoke("worker_status"); // silent: polled frequently, don't toast errors
+  } catch {
+    return;
+  }
+  const state = s.running ? (s.connected ? "connected" : "connecting…") : "stopped";
+  const cls = s.running ? (s.connected ? "on" : "warn") : "off";
+  $("#run-state").textContent = state;
+  $("#run-connected").textContent = s.connected ? "yes" : "no";
+  $("#run-jobs").textContent = s.jobs_processed;
+  $("#run-started").textContent = s.running ? fmtTime(s.started_unix) : "—";
+  $("#run-error").textContent = s.last_error || "—";
+  $("#run-error").className = "mono" + (s.last_error ? " status-bad" : "");
+  for (const dot of [$("#run-dot"), $("#rail-dot")]) dot.className = `dot ${cls}`;
+  $("#rail-label").textContent = state;
+  $("#rail-label").className = s.running ? (s.connected ? "status-ok" : "muted") : "muted";
+}
+
+function startStatusPolling() {
+  if (startStatusPolling._t) return;
+  pollStatus();
+  startStatusPolling._t = setInterval(pollStatus, 1500);
 }
 
 $("#save-mode").addEventListener("click", async () => {

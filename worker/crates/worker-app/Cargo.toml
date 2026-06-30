@@ -17,7 +17,7 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-worker-core = { path = "../worker-core" }
+worker-core = { path = "../worker-core", features = ["transport"] }
 worker-tauri = { path = "../worker-tauri" }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }

@@ -1,5 +1,33 @@
 import Config
 
+# Worker join token (shared secret). Applies in every environment, resolved at boot. Unset or
+# empty => the coordinator accepts any worker that reaches it (fine on loopback, NOT for a
+# public tunnel). See Coordinator.JoinAuth.
+case System.get_env("HYDRA_JOIN_TOKEN") do
+  token when token in [nil, ""] -> :ok
+  token -> config :coordinator, :join_token, token
+end
+
+# Require every worker to authenticate with an Ed25519 device key (Coordinator.DeviceAuth).
+# Recommended for a public coordinator; rejects token-only / open connections.
+config :coordinator, :require_device_auth, System.get_env("HYDRA_REQUIRE_DEVICE_AUTH") == "true"
+
+# Gateway access key for the OpenAI-compatible HTTP front-door (Coordinator.ApiRouter). This is
+# NOT a provider token — it only gates who may submit jobs. Unset/empty => the door is open
+# (fine on loopback, NOT for a public tunnel). Callers send `Authorization: Bearer <token>`.
+case System.get_env("HYDRA_API_TOKEN") do
+  token when token in [nil, ""] -> :ok
+  token -> config :coordinator, :api_token, token
+end
+
+# Routing capability for the front-door's chat requests. Workers run a chat completion for any
+# capability they advertise, so this must match a capability the connected workers serve. Unset
+# => "chat". (Current built-in adapters advertise e.g. "text.extract_json".)
+case System.get_env("HYDRA_API_CAPABILITY") do
+  cap when cap in [nil, ""] -> :ok
+  cap -> config :coordinator, :api_capability, cap
+end
+
 # Production database + Oban configuration, resolved at boot from the environment.
 # DB_ADAPTER selects the backend (and MUST match the value used when the release was built,
 # since the repo adapter is compiled in — see Coordinator.Repo).
