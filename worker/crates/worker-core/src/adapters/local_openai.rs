@@ -79,7 +79,7 @@ impl ProviderAdapter for LocalOpenAiAdapter {
             &self.client,
             &self.base_url,
             self.bearer(),
-            &["text.extract_json", "text.clean", "image.describe"],
+            &["chat", "text.extract_json", "text.clean", "image.describe"],
             false,
         )
         .await

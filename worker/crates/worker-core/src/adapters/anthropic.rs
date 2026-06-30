@@ -78,6 +78,7 @@ impl ProviderAdapter for AnthropicAdapter {
                     .map(|id| ModelInfo {
                         name: id.to_string(),
                         capabilities: vec![
+                            "chat".into(),
                             "text.clean".into(),
                             "text.extract_json".into(),
                             "image.describe".into(),

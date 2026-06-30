@@ -59,7 +59,11 @@ impl ProviderAdapter for GeminiAdapter {
                     .map(|name| ModelInfo {
                         // names come back as "models/gemini-1.5-flash"
                         name: name.trim_start_matches("models/").to_string(),
-                        capabilities: vec!["text.extract_json".into(), "image.describe".into()],
+                        capabilities: vec![
+                            "chat".into(),
+                            "text.extract_json".into(),
+                            "image.describe".into(),
+                        ],
                         context_length: None,
                         modalities: vec!["text".into(), "image".into()],
                         uses_external_provider: true,

@@ -55,6 +55,7 @@ impl ProviderAdapter for OllamaAdapter {
                     .map(|name| ModelInfo {
                         name: name.to_string(),
                         capabilities: vec![
+                            "chat".into(),
                             "text.extract_json".into(),
                             "ocr.extract".into(),
                             "image.describe".into(),

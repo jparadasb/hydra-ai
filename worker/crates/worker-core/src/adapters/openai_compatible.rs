@@ -63,7 +63,7 @@ impl ProviderAdapter for OpenAICompatibleAdapter {
             &self.client,
             &self.base_url,
             Some(self.token.expose()),
-            &["text.clean", "text.extract_json"],
+            &["chat", "text.clean", "text.extract_json"],
             true,
         )
         .await
