@@ -158,6 +158,7 @@ pub async fn build_and_run(params: RunParams, status: Arc<RunStatus>) -> Result<
 
     let device_key = DeviceKey::load_or_create(&DeviceKey::default_path())?;
     let gateway = Arc::new(gateway);
+    let max_parallel_jobs = resolve_max_parallel_jobs();
 
     status.mark_running();
 
@@ -182,6 +183,7 @@ pub async fn build_and_run(params: RunParams, status: Arc<RunStatus>) -> Result<
             heartbeat: Duration::from_secs(30),
             join_token: join_token.clone(),
             auth: Some(auth),
+            max_parallel_jobs,
         };
 
         match connect_and_run(client, Arc::clone(&gateway), Arc::clone(&status)).await {
@@ -204,6 +206,17 @@ fn jitter(d: Duration) -> Duration {
         .unwrap_or(0);
     let pct = (nanos % 250) as u128; // 0..249 -> up to ~24.9%
     Duration::from_millis((d.as_millis() * pct / 1000) as u64)
+}
+
+/// How many leased jobs the worker runs in parallel. `HYDRA_MAX_PARALLEL_JOBS` overrides the
+/// default of 4; always at least 1. A local model is typically the bottleneck, so keep this
+/// modest unless the backend (vLLM, a provider) handles real concurrency.
+fn resolve_max_parallel_jobs() -> usize {
+    std::env::var("HYDRA_MAX_PARALLEL_JOBS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(4)
+        .max(1)
 }
 
 fn now_unix() -> i64 {

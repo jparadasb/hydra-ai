@@ -173,7 +173,7 @@ mod networked {
 
     use futures_util::{SinkExt, StreamExt};
     use serde_json::Value;
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, Semaphore};
     use tokio_tungstenite::tungstenite::Message;
 
     use super::framing::{self, PhoenixMsg};
@@ -194,6 +194,10 @@ mod networked {
         /// Optional signed device-key challenge (Ed25519 TOFU). When set, the coordinator
         /// verifies the signature and pins the public key to this `worker_id` on first sight.
         pub auth: Option<crate::identity::AuthParams>,
+        /// Max jobs executed in parallel. Leased jobs run in spawned tasks bounded by this; the
+        /// reader stays responsive (so disconnects are detected promptly) while at most this many
+        /// `gateway.execute` calls run at once. Must be >= 1.
+        pub max_parallel_jobs: usize,
     }
 
     /// Connect, join `worker:<id>`, then process leased jobs until the socket closes. Updates
@@ -266,7 +270,14 @@ mod networked {
             }
         });
 
-        // Reader loop: run leased jobs and reply with results.
+        // Bounds how many jobs execute concurrently. The reader never blocks on it: each job is
+        // spawned and acquires a permit inside its task, so the loop keeps reading the socket
+        // (heartbeat replies, Close frames) while at most `max_parallel_jobs` run at once.
+        let sem = Arc::new(Semaphore::new(config.max_parallel_jobs.max(1)));
+
+        // Reader loop: dispatch leased jobs to bounded background tasks; each replies with its
+        // own result. Running jobs in tasks (not inline) lets a worker process many leases in
+        // parallel instead of head-of-line blocking on one slow inference.
         while let Some(msg) = stream.next().await {
             let text = match msg {
                 Ok(Message::Text(t)) => t,
@@ -278,17 +289,31 @@ mod networked {
             };
             if pm.event == "job" && pm.topic == topic {
                 if let Ok(job) = serde_json::from_value::<Job>(pm.payload.clone()) {
-                    let result = gateway.execute(&job).await;
-                    let payload = serde_json::to_value(&result).unwrap_or(Value::Null);
-                    let out = PhoenixMsg::new(
-                        Some("1".into()),
-                        Some(next_ref()),
-                        &topic,
-                        "result",
-                        payload,
-                    );
-                    tx.send(out.encode()).ok();
-                    status.incr_jobs();
+                    let gateway = Arc::clone(&gateway);
+                    let status = Arc::clone(&status);
+                    let sem = Arc::clone(&sem);
+                    let tx = tx.clone();
+                    let topic = topic.clone();
+                    let next_ref = next_ref.clone();
+                    tokio::spawn(async move {
+                        // Wait for a free slot; if the semaphore is gone we're shutting down.
+                        let Ok(_permit) = sem.acquire_owned().await else {
+                            return;
+                        };
+                        let result = gateway.execute(&job).await;
+                        let payload = serde_json::to_value(&result).unwrap_or(Value::Null);
+                        let out = PhoenixMsg::new(
+                            Some("1".into()),
+                            Some(next_ref()),
+                            &topic,
+                            "result",
+                            payload,
+                        );
+                        // Send fails silently if the socket already closed; the coordinator
+                        // re-leases the job on lease timeout.
+                        tx.send(out.encode()).ok();
+                        status.incr_jobs();
+                    });
                 }
             }
         }
