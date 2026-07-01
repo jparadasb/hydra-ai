@@ -50,6 +50,7 @@ defmodule Coordinator.WorkerSession do
       :ok ->
         clean = SecretGuard.sanitize(payload)
         persist_result(clean)
+        release_reservation(clean)
         Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {:job_result, clean})
         {:ok, clean}
 
@@ -57,6 +58,20 @@ defmodule Coordinator.WorkerSession do
         err
     end
   end
+
+  # This attempt is done, so free the worker's inflight slot (see WorkerRegistry.reserve/2). A
+  # requeued job simply reserves again when it is re-leased. Best-effort: unknown jobs are
+  # ignored (the worker may report a result for a job we don't persist).
+  defp release_reservation(%{"job_id" => job_id}) when is_binary(job_id) do
+    case Coordinator.Jobs.get(job_id) do
+      %{worker_id: wid} when is_binary(wid) -> Coordinator.WorkerRegistry.release(wid)
+      _ -> :ok
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp release_reservation(_), do: :ok
 
   # Record the result against the durable job, if it is one we are tracking.
   defp persist_result(%{"job_id" => job_id} = result) when is_binary(job_id) do
