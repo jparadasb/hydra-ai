@@ -118,6 +118,31 @@ key (recommended once the coordinator is publicly reachable). An optional shared
 `HYDRA_JOIN_TOKEN` is the fallback for non-device clients. Pinned keys live in the
 `worker_keys` table; revoke a worker with `Coordinator.DeviceAuth.revoke(worker_id)`.
 
+## Admin console (`/admin`)
+
+The coordinator serves an admin console alongside the OpenAI-compatible front-door:
+
+- **Issue API keys** — mint gateway keys that authorize callers of `POST /v1/chat/completions`.
+  Each key's plaintext is shown **once** at creation; only its SHA-256 hash is stored (a DB or
+  backup leak never yields a usable key). Keys are revocable. These are **not** provider tokens
+  — they only gate who may submit jobs. Set `HYDRA_REQUIRE_API_TOKEN=true` so admin-issued keys
+  alone gate the door even without a shared `HYDRA_API_TOKEN`.
+- **Oban dashboard** at `/admin/oban` — the real Oban Web UI for tracking jobs, queues, and
+  retries.
+
+**Access is protected by GitHub OAuth in prod, and open on loopback dev.** To enable it:
+
+1. Register a GitHub **OAuth app** with Authorization callback URL
+   `<HYDRA_ADMIN_BASE_URL>/auth/github/callback` (e.g.
+   `https://hydrai.lambdatauri.dev/auth/github/callback`).
+2. Set `HYDRA_GITHUB_CLIENT_ID`, `HYDRA_GITHUB_CLIENT_SECRET`, `HYDRA_ADMIN_BASE_URL`, and
+   `HYDRA_ADMIN_GITHUB_USERS` (comma-separated allowlist of GitHub logins). An empty allowlist
+   admits nobody (fail closed).
+
+Enforcement is on automatically in prod; set `HYDRA_ADMIN_AUTH=false` to open `/admin` without
+login (never on a public tunnel). The OAuth access token is used once server-side to read the
+user's login and is never persisted.
+
 ## Deploy the coordinator (Docker + Cloudflare Tunnel)
 
 The stack is Postgres + the coordinator release + a [Cloudflare

@@ -19,7 +19,14 @@ defmodule Coordinator.ApiRouterTest do
   setup do
     # Default to an open door; individual tests opt into a key.
     Application.delete_env(:coordinator, :api_token)
-    on_exit(fn -> Application.delete_env(:coordinator, :api_token) end)
+    Application.delete_env(:coordinator, :require_api_token)
+
+    on_exit(fn ->
+      Application.delete_env(:coordinator, :api_token)
+      Application.delete_env(:coordinator, :require_api_token)
+      Repo.delete_all(Coordinator.ApiToken)
+    end)
+
     :ok
   end
 
@@ -126,6 +133,30 @@ defmodule Coordinator.ApiRouterTest do
     assert post("/v1/chat/completions", msg, [{"authorization", "Bearer wrong"}]).status == 401
     # Correct key passes auth (then 504s: no worker — proves it got past the gate).
     assert post("/v1/chat/completions", msg, [{"authorization", "Bearer secret-key"}]).status == 504
+  end
+
+  test "an admin-issued DB key authorizes when require_api_token is on" do
+    Application.put_env(:coordinator, :require_api_token, true)
+    {:ok, plaintext, _} = Coordinator.ApiTokens.create("test-key")
+    msg = %{"messages" => [%{"role" => "user", "content" => "hi"}], "timeout_ms" => 150}
+
+    # No credential -> blocked.
+    assert post("/v1/chat/completions", msg).status == 401
+    # Bad credential -> blocked.
+    assert post("/v1/chat/completions", msg, [{"authorization", "Bearer nope"}]).status == 401
+    # Valid DB key passes the gate (then 504s: no worker connected).
+    assert post("/v1/chat/completions", msg, [{"authorization", "Bearer " <> plaintext}]).status ==
+             504
+  end
+
+  test "a revoked DB key no longer authorizes" do
+    Application.put_env(:coordinator, :require_api_token, true)
+    {:ok, plaintext, record} = Coordinator.ApiTokens.create("revoke-me")
+    :ok = Coordinator.ApiTokens.revoke(record.id)
+    msg = %{"messages" => [%{"role" => "user", "content" => "hi"}], "timeout_ms" => 150}
+
+    assert post("/v1/chat/completions", msg, [{"authorization", "Bearer " <> plaintext}]).status ==
+             401
   end
 
   # Poll a function until it returns non-nil (the just-created job appears).

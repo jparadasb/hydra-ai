@@ -28,6 +28,47 @@ case System.get_env("HYDRA_API_CAPABILITY") do
   cap -> config :coordinator, :api_capability, cap
 end
 
+# Enforce a gateway key even when no env master (HYDRA_API_TOKEN) is set — so admin-issued keys
+# from the /admin console alone can gate the front-door. Recommended on a public tunnel.
+config :coordinator, :require_api_token, System.get_env("HYDRA_REQUIRE_API_TOKEN") == "true"
+
+# ---- Admin console (/admin): GitHub OAuth login + Oban dashboard --------------------------
+
+# Override the prod default: set HYDRA_ADMIN_AUTH=false to open /admin without login (do NOT do
+# this on a public tunnel). Only takes effect if explicitly "false".
+if System.get_env("HYDRA_ADMIN_AUTH") == "false" do
+  config :coordinator, :admin_auth_required, false
+end
+
+# GitHub OAuth app credentials for admin login (Coordinator.Web.AuthController). Register an
+# OAuth app whose callback is <HYDRA_ADMIN_BASE_URL>/auth/github/callback.
+case System.get_env("HYDRA_GITHUB_CLIENT_ID") do
+  id when id in [nil, ""] -> :ok
+  id -> config :coordinator, :github_client_id, id
+end
+
+case System.get_env("HYDRA_GITHUB_CLIENT_SECRET") do
+  secret when secret in [nil, ""] -> :ok
+  secret -> config :coordinator, :github_client_secret, secret
+end
+
+# Comma-separated GitHub logins allowed into /admin. Empty => nobody (fail closed).
+case System.get_env("HYDRA_ADMIN_GITHUB_USERS") do
+  users when users in [nil, ""] ->
+    :ok
+
+  users ->
+    logins = users |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
+    config :coordinator, :admin_github_users, logins
+end
+
+# Public base URL of the coordinator, used to build the OAuth callback URL. Set this behind a
+# tunnel/proxy (e.g. https://hydrai.lambdatauri.dev) so the redirect_uri matches the GitHub app.
+case System.get_env("HYDRA_ADMIN_BASE_URL") do
+  url when url in [nil, ""] -> :ok
+  url -> config :coordinator, :admin_base_url, url
+end
+
 # Production database + Oban configuration, resolved at boot from the environment.
 # DB_ADAPTER selects the backend (and MUST match the value used when the release was built,
 # since the repo adapter is compiled in — see Coordinator.Repo).

@@ -169,27 +169,38 @@ defmodule Coordinator.ApiRouter do
 
   # ---- auth + helpers -----------------------------------------------------------------------
 
-  # Gateway access control. If `:api_token` is unset the door is open (loopback dev); when set,
-  # require `Authorization: Bearer <token>` and compare in constant time.
+  # Gateway access control. A request is authorized by EITHER the legacy env master key
+  # (`:api_token`, constant-time compared) OR an admin-issued key from the `api_tokens` table
+  # (`Coordinator.ApiTokens`, looked up by hash). The door is only *enforced* when a credential
+  # is required — i.e. an env master key is set, or `:require_api_token` is true (set that in
+  # prod so admin-issued keys alone can gate the door). Otherwise it stays open for loopback dev.
   defp authorize(conn) do
-    case Application.get_env(:coordinator, :api_token) do
-      nil ->
-        :ok
+    presented =
+      case get_req_header(conn, "authorization") do
+        ["Bearer " <> token] -> token
+        _ -> nil
+      end
 
-      "" ->
-        :ok
-
-      expected ->
-        case get_req_header(conn, "authorization") do
-          ["Bearer " <> presented] ->
-            if Plug.Crypto.secure_compare(presented, expected),
-              do: :ok,
-              else: {:error, 401, "invalid api key"}
-
-          _ ->
-            {:error, 401, "missing bearer token"}
-        end
+    cond do
+      valid_credential?(presented) -> :ok
+      auth_required?() and is_nil(presented) -> {:error, 401, "missing bearer token"}
+      auth_required?() -> {:error, 401, "invalid api key"}
+      true -> :ok
     end
+  end
+
+  defp valid_credential?(nil), do: false
+
+  defp valid_credential?(presented) do
+    master = Application.get_env(:coordinator, :api_token)
+
+    (is_binary(master) and master != "" and Plug.Crypto.secure_compare(presented, master)) or
+      Coordinator.ApiTokens.verify(presented) == :ok
+  end
+
+  defp auth_required? do
+    master = Application.get_env(:coordinator, :api_token)
+    (is_binary(master) and master != "") or Application.get_env(:coordinator, :require_api_token, false)
   end
 
   defp resolve_timeout(conn, params) do

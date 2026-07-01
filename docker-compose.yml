@@ -39,6 +39,17 @@ services:
       # what connected workers advertise (built-in adapters serve "text.extract_json").
       HYDRA_API_TOKEN: ${HYDRA_API_TOKEN:-}
       HYDRA_API_CAPABILITY: ${HYDRA_API_CAPABILITY:-}
+      # Enforce a gateway key even without HYDRA_API_TOKEN, so admin-issued keys alone gate the
+      # front-door (recommended on the public tunnel). Set "true" to require a bearer.
+      HYDRA_REQUIRE_API_TOKEN: ${HYDRA_REQUIRE_API_TOKEN:-}
+      # Admin console (/admin): issue API keys + Oban dashboard. Protected by GitHub OAuth in
+      # prod. Register an OAuth app whose callback is <HYDRA_ADMIN_BASE_URL>/auth/github/callback.
+      HYDRA_ADMIN_BASE_URL: ${HYDRA_ADMIN_BASE_URL:-}
+      HYDRA_GITHUB_CLIENT_ID: ${HYDRA_GITHUB_CLIENT_ID:-}
+      HYDRA_GITHUB_CLIENT_SECRET: ${HYDRA_GITHUB_CLIENT_SECRET:-}
+      HYDRA_ADMIN_GITHUB_USERS: ${HYDRA_ADMIN_GITHUB_USERS:-}
+      # Set "false" to open /admin without login (do NOT on a public tunnel).
+      HYDRA_ADMIN_AUTH: ${HYDRA_ADMIN_AUTH:-}
     depends_on:
       postgres:
         condition: service_healthy

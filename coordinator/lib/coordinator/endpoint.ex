@@ -12,12 +12,27 @@ defmodule Coordinator.Endpoint do
     longpoll: false
   )
 
-  # HTTP API: parse JSON bodies, then dispatch to the front-door router.
+  # LiveView socket — used by the Oban dashboard mounted under /admin (Coordinator.Web.Router).
+  socket("/live", Phoenix.LiveView.Socket, websocket: true, longpoll: false)
+
+  # Signed session, required by the admin console: GitHub-OAuth login state + CSRF protection.
+  # No provider secret is ever placed here; only the admin's GitHub login.
+  @session_options [
+    store: :cookie,
+    key: "_hydra_admin",
+    signing_salt: "hydra-admin-session",
+    same_site: "Lax"
+  ]
+
+  plug(Plug.Session, @session_options)
+
+  # Parse JSON (API) and form bodies (admin console). `pass: ["*/*"]` lets unmatched content
+  # types (e.g. LiveView/Oban socket upgrades) fall through untouched.
   plug(Plug.Parsers,
-    parsers: [:json],
-    pass: ["application/json"],
+    parsers: [:urlencoded, :multipart, :json],
+    pass: ["*/*"],
     json_decoder: Jason
   )
 
-  plug(Coordinator.ApiRouter)
+  plug(Coordinator.Web.Router)
 end
