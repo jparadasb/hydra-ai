@@ -1,0 +1,82 @@
+name: coordinator — build & deploy
+
+# Builds the coordinator release image, pushes it to OCIR (multiarch), then bumps the image
+# tag in the lambdatauri-cluster-fleet GitOps repo so Flux rolls it out.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'coordinator/**'
+      - '.github/workflows/coordinator.yml'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ${{ secrets.OCI_REGION }}.ocir.io
+  IMAGE: ${{ secrets.OCI_REGION }}.ocir.io/${{ secrets.OCI_TENANCY_NAMESPACE }}/${{ secrets.OCI_REPO_COORDINATOR || 'hydra-coordinator' }}
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.meta.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Short SHA
+        id: meta
+        run: echo "sha=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to OCIR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.OCI_USERNAME }}
+          password: ${{ secrets.OCI_AUTH_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: coordinator
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.meta.outputs.sha }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          echo "### Coordinator image pushed" >> $GITHUB_STEP_SUMMARY
+          echo "\`${{ env.IMAGE }}:${{ steps.meta.outputs.sha }}\`" >> $GITHUB_STEP_SUMMARY
+
+  bump-fleet:
+    needs: build-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fleet repo
+        uses: actions/checkout@v4
+        with:
+          repository: jparadasb/lambdatauri-cluster-fleet
+          token: ${{ secrets.FLEET_GITHUB_TOKEN }}
+
+      - name: Bump image tag in deployment.yaml
+        env:
+          SHA: ${{ needs.build-push.outputs.sha }}
+        run: |
+          sed -i "s|\(ocir\.io/[^/]*/hydra-coordinator\):.*|\1:${SHA}|g" \
+            clusters/tauri/apps/hydra/deployment.yaml
+
+      - name: Commit & push
+        env:
+          SHA: ${{ needs.build-push.outputs.sha }}
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name  "github-actions[bot]"
+          git add clusters/tauri/apps/hydra/deployment.yaml
+          git diff --cached --quiet || git commit -m "chore: bump hydra-coordinator image to ${SHA}"
+          git push

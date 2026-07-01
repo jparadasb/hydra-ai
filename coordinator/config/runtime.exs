@@ -107,4 +107,13 @@ if config_env() == :prod do
   if secret = System.get_env("SECRET_KEY_BASE") do
     config :coordinator, Coordinator.Endpoint, secret_key_base: secret
   end
+
+  # Public host, used behind an ingress/proxy. Sets the endpoint URL (so generated URLs and the
+  # OAuth callback default are correct) and constrains LiveView/socket origin checking to that
+  # host — required for the /admin Oban dashboard's LiveView to connect through the ingress.
+  if host = System.get_env("PHX_HOST") do
+    config :coordinator, Coordinator.Endpoint,
+      url: [host: host, scheme: "https", port: 443],
+      check_origin: ["https://#{host}"]
+  end
 end
