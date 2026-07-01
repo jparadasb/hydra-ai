@@ -34,8 +34,19 @@ defmodule Coordinator.WorkerRegistry do
 
   def list(server \\ __MODULE__), do: GenServer.call(server, :list)
 
-  @doc "Route a job against the currently-registered workers."
+  @doc "Route a job against the currently-registered workers (no reservation)."
   def route(server \\ __MODULE__, job), do: Router.route(job, list(server))
+
+  @doc """
+  Atomically route a job AND reserve the chosen worker by incrementing its `inflight`. Done in
+  one GenServer call so concurrent lease workers see the updated load and spread across workers
+  instead of all picking the same (equally-scored) node. Pair every `{:ok, worker}` with a
+  `release/2` when the job finishes.
+  """
+  def reserve(server \\ __MODULE__, job), do: GenServer.call(server, {:reserve, job})
+
+  @doc "Release a reservation: decrement a worker's `inflight` (floored at 0)."
+  def release(server \\ __MODULE__, worker_id), do: GenServer.call(server, {:release, worker_id})
 
   # ---- Server ----
 
@@ -61,10 +72,11 @@ defmodule Coordinator.WorkerRegistry do
   def handle_call({:update_signals, id, signals}, _from, state) do
     case Map.fetch(state.workers, id) do
       {:ok, %Worker{} = w} ->
+        # `inflight` is tracked server-side (reserve/release), not taken from signals, so the
+        # two mechanisms don't clobber each other.
         updated = %Worker{
           w
-          | inflight: Map.get(signals, "inflight", w.inflight),
-            avg_latency_ms: Map.get(signals, "avg_latency_ms", w.avg_latency_ms),
+          | avg_latency_ms: Map.get(signals, "avg_latency_ms", w.avg_latency_ms),
             available: Map.get(signals, "available", w.available)
         }
 
@@ -72,6 +84,28 @@ defmodule Coordinator.WorkerRegistry do
 
       :error ->
         {:reply, {:error, :unknown_worker}, state}
+    end
+  end
+
+  def handle_call({:reserve, job}, _from, state) do
+    case Router.route(job, Map.values(state.workers)) do
+      {:ok, %Worker{} = worker} ->
+        reserved = %Worker{worker | inflight: worker.inflight + 1}
+        {:reply, {:ok, reserved}, %{state | workers: Map.put(state.workers, worker.worker_id, reserved)}}
+
+      {:error, _} = err ->
+        {:reply, err, state}
+    end
+  end
+
+  def handle_call({:release, id}, _from, state) do
+    case Map.fetch(state.workers, id) do
+      {:ok, %Worker{} = w} ->
+        released = %Worker{w | inflight: max(w.inflight - 1, 0)}
+        {:reply, :ok, %{state | workers: Map.put(state.workers, id, released)}}
+
+      :error ->
+        {:reply, :ok, state}
     end
   end
 

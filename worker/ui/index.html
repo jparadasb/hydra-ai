@@ -23,18 +23,43 @@
     <main id="console" class="console hidden">
       <nav class="rail">
         <div class="brand small"><span class="dot"></span> hydra</div>
-        <button class="tab active" data-tab="mode">Mode</button>
+        <button class="tab active" data-tab="run">Run</button>
+        <button class="tab" data-tab="mode">Mode</button>
         <button class="tab" data-tab="providers">Providers</button>
         <button class="tab" data-tab="privacy">Privacy</button>
         <button class="tab" data-tab="usage">Usage</button>
         <div class="rail-foot">
+          <div class="runstate"><span id="rail-dot" class="dot off"></span> <span id="rail-label" class="muted">stopped</span></div>
           <div id="worker-id" class="mono muted"></div>
         </div>
       </nav>
 
       <div class="panel">
+        <!-- RUN -->
+        <section id="tab-run" class="view">
+          <h1>Run</h1>
+          <p class="muted">Connect to the coordinator and process leased jobs.</p>
+          <div class="add-row">
+            <input id="r-url" placeholder="coordinator URL — blank uses config / default" />
+            <button id="start-worker" class="primary">Start</button>
+            <button id="stop-worker" class="danger">Stop</button>
+          </div>
+          <div class="status-card">
+            <div class="status-head"><span id="run-dot" class="dot off"></span> <b id="run-state">stopped</b></div>
+            <dl class="status-grid">
+              <dt>Connected</dt><dd id="run-connected">no</dd>
+              <dt>Jobs processed</dt><dd id="run-jobs">0</dd>
+              <dt>Started</dt><dd id="run-started">—</dd>
+              <dt>Last error</dt><dd id="run-error" class="mono">—</dd>
+            </dl>
+          </div>
+          <p class="fine">Identity is derived from this machine and proven with a local device
+            key (created on first start, never leaves this machine). The coordinator pins it on
+            first connect.</p>
+        </section>
+
         <!-- MODE -->
-        <section id="tab-mode" class="view">
+        <section id="tab-mode" class="view hidden">
           <h1>Execution mode</h1>
           <p class="muted">How this worker processes AI jobs.</p>
           <div class="choices">

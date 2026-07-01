@@ -32,12 +32,17 @@ defmodule Coordinator.MixProject do
     [
       {:phoenix, "~> 1.7"},
       {:phoenix_pubsub, "~> 2.1"},
+      {:phoenix_live_view, "~> 1.0"},
       {:jason, "~> 1.4"},
       {:bandit, "~> 1.5"},
       {:ecto_sql, "~> 3.12"},
       {:ecto_sqlite3, "~> 0.17"},
       {:postgrex, "~> 0.19"},
-      {:oban, "~> 2.18"}
+      {:oban, "~> 2.18"},
+      # Real Oban dashboard for the /admin job view (LiveView, self-served assets).
+      {:oban_web, "~> 2.11"},
+      # HTTP client for the GitHub OAuth token exchange + user lookup (admin login only).
+      {:req, "~> 0.5"}
     ]
   end
 end

@@ -4,7 +4,11 @@
 //! `[join_ref, ref, topic, event, payload]`) and is always compiled + unit-tested. The
 //! networked [`CoordinatorClient`] (feature `transport`) joins `worker:<id>`, sends the
 //! registration payload, receives `"job"` leases, runs each through [`crate::gateway::Gateway`],
-//! and replies with a `"result"`. No token is ever sent — only the registration + results.
+//! and replies with a `"result"`.
+//!
+//! Provider tokens are *never* sent — only the registration + results. The single optional
+//! secret on this link is the **join token** (a shared fleet secret), presented as the
+//! `token` query param to authenticate the connection itself. Empty/absent => no auth.
 
 /// Phoenix v2 message framing. Pure (de)serialization; no networking.
 pub mod framing {
@@ -84,6 +88,21 @@ pub mod framing {
         )
     }
 
+    /// Percent-encode a value for safe use in a URL query string. Keeps the RFC 3986
+    /// unreserved set (`A-Z a-z 0-9 - _ . ~`); everything else becomes `%XX`.
+    pub fn percent_encode(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        for b in s.bytes() {
+            match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    out.push(b as char)
+                }
+                _ => out.push_str(&format!("%{b:02X}")),
+            }
+        }
+        out
+    }
+
     /// A heartbeat keepalive on the `phoenix` topic.
     pub fn heartbeat(msg_ref: &str) -> PhoenixMsg {
         PhoenixMsg::new(
@@ -133,6 +152,13 @@ pub mod framing {
             assert!(PhoenixMsg::decode("not json").is_none());
             assert!(PhoenixMsg::decode(r#"["too","short"]"#).is_none());
         }
+
+        #[test]
+        fn percent_encode_keeps_unreserved_escapes_rest() {
+            assert_eq!(percent_encode("abcXYZ-0_9.~"), "abcXYZ-0_9.~");
+            assert_eq!(percent_encode("a b&c=d/e"), "a%20b%26c%3Dd%2Fe");
+            assert_eq!(percent_encode("tok+/="), "tok%2B%2F%3D");
+        }
     }
 }
 
@@ -147,7 +173,7 @@ mod networked {
 
     use futures_util::{SinkExt, StreamExt};
     use serde_json::Value;
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, Semaphore};
     use tokio_tungstenite::tungstenite::Message;
 
     use super::framing::{self, PhoenixMsg};
@@ -162,19 +188,51 @@ mod networked {
         /// Non-secret registration payload (see [`crate::registration::WorkerRegistration`]).
         pub registration: Value,
         pub heartbeat: Duration,
+        /// Optional shared join token. Presented as the `token` query param to authenticate
+        /// the connection. `None`/empty => connect without auth (open coordinator).
+        pub join_token: Option<String>,
+        /// Optional signed device-key challenge (Ed25519 TOFU). When set, the coordinator
+        /// verifies the signature and pins the public key to this `worker_id` on first sight.
+        pub auth: Option<crate::identity::AuthParams>,
+        /// Max jobs executed in parallel. Leased jobs run in spawned tasks bounded by this; the
+        /// reader stays responsive (so disconnects are detected promptly) while at most this many
+        /// `gateway.execute` calls run at once. Must be >= 1.
+        pub max_parallel_jobs: usize,
     }
 
-    /// Connect, join `worker:<id>`, then process leased jobs until the socket closes.
-    pub async fn connect_and_run(config: ClientConfig, gateway: Arc<Gateway>) -> Result<()> {
+    /// Connect, join `worker:<id>`, then process leased jobs until the socket closes. Updates
+    /// `status` (connected flag + jobs-processed counter) for the UI to poll.
+    pub async fn connect_and_run(
+        config: ClientConfig,
+        gateway: Arc<Gateway>,
+        status: Arc<crate::worker_run::RunStatus>,
+    ) -> Result<()> {
         let topic = format!("worker:{}", config.worker_id);
-        let url = format!(
+        let mut url = format!(
             "{}/worker/websocket?vsn=2.0.0",
             config.base_url.trim_end_matches('/')
         );
+        if let Some(tok) = config.join_token.as_deref().filter(|t| !t.is_empty()) {
+            url.push_str("&token=");
+            url.push_str(&framing::percent_encode(tok));
+        }
+        if let Some(a) = &config.auth {
+            url.push_str("&worker_id=");
+            url.push_str(&framing::percent_encode(&a.worker_id));
+            url.push_str("&pubkey=");
+            url.push_str(&framing::percent_encode(&a.pubkey));
+            url.push_str("&ts=");
+            url.push_str(&a.ts.to_string());
+            url.push_str("&nonce=");
+            url.push_str(&framing::percent_encode(&a.nonce));
+            url.push_str("&sig=");
+            url.push_str(&framing::percent_encode(&a.sig));
+        }
 
         let (ws, _resp) = tokio_tungstenite::connect_async(&url)
             .await
             .map_err(|e| Error::Other(format!("ws connect: {e}")))?;
+        status.mark_connected(true);
         let (mut sink, mut stream) = ws.split();
 
         // Outbound channel: heartbeat + results funnel through one writer.
@@ -212,7 +270,14 @@ mod networked {
             }
         });
 
-        // Reader loop: run leased jobs and reply with results.
+        // Bounds how many jobs execute concurrently. The reader never blocks on it: each job is
+        // spawned and acquires a permit inside its task, so the loop keeps reading the socket
+        // (heartbeat replies, Close frames) while at most `max_parallel_jobs` run at once.
+        let sem = Arc::new(Semaphore::new(config.max_parallel_jobs.max(1)));
+
+        // Reader loop: dispatch leased jobs to bounded background tasks; each replies with its
+        // own result. Running jobs in tasks (not inline) lets a worker process many leases in
+        // parallel instead of head-of-line blocking on one slow inference.
         while let Some(msg) = stream.next().await {
             let text = match msg {
                 Ok(Message::Text(t)) => t,
@@ -224,20 +289,36 @@ mod networked {
             };
             if pm.event == "job" && pm.topic == topic {
                 if let Ok(job) = serde_json::from_value::<Job>(pm.payload.clone()) {
-                    let result = gateway.execute(&job).await;
-                    let payload = serde_json::to_value(&result).unwrap_or(Value::Null);
-                    let out = PhoenixMsg::new(
-                        Some("1".into()),
-                        Some(next_ref()),
-                        &topic,
-                        "result",
-                        payload,
-                    );
-                    tx.send(out.encode()).ok();
+                    let gateway = Arc::clone(&gateway);
+                    let status = Arc::clone(&status);
+                    let sem = Arc::clone(&sem);
+                    let tx = tx.clone();
+                    let topic = topic.clone();
+                    let next_ref = next_ref.clone();
+                    tokio::spawn(async move {
+                        // Wait for a free slot; if the semaphore is gone we're shutting down.
+                        let Ok(_permit) = sem.acquire_owned().await else {
+                            return;
+                        };
+                        let result = gateway.execute(&job).await;
+                        let payload = serde_json::to_value(&result).unwrap_or(Value::Null);
+                        let out = PhoenixMsg::new(
+                            Some("1".into()),
+                            Some(next_ref()),
+                            &topic,
+                            "result",
+                            payload,
+                        );
+                        // Send fails silently if the socket already closed; the coordinator
+                        // re-leases the job on lease timeout.
+                        tx.send(out.encode()).ok();
+                        status.incr_jobs();
+                    });
                 }
             }
         }
 
+        status.mark_connected(false);
         heartbeat.abort();
         writer.abort();
         Ok(())

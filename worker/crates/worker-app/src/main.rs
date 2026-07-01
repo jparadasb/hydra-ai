@@ -16,10 +16,12 @@ use worker_core::types::{ExecutionMode, PrivacyLevel};
 use worker_tauri::dto::{ProviderView, TestResult, UsageRow};
 use worker_tauri::support;
 
-/// Holds the vault passphrase for this session, set via [`unlock`].
+/// Holds the vault passphrase for this session (set via [`unlock`]) and the background worker
+/// runner (Start/Stop).
 #[derive(Default)]
 struct AppState {
     pass: Mutex<Option<String>>,
+    runner: worker_tauri::Runner,
 }
 
 impl AppState {
@@ -151,6 +153,30 @@ fn usage(state: State<'_, AppState>, period: Option<String>) -> Result<Vec<Usage
     Ok(support::build_commands(pass).usage(period))
 }
 
+/// Start processing jobs: connect to the coordinator and run the gateway loop in the
+/// background. `coordinator_url` overrides config/env when provided. Requires the vault to be
+/// unlocked. Async so the inner task spawns within Tauri's Tokio runtime.
+#[tauri::command]
+async fn start_worker(
+    state: State<'_, AppState>,
+    coordinator_url: Option<String>,
+) -> Result<(), String> {
+    let pass = state.passphrase()?;
+    state.runner.start(pass, coordinator_url)
+}
+
+/// Stop the running worker (disconnects + halts the lease loop).
+#[tauri::command]
+fn stop_worker(state: State<'_, AppState>) {
+    state.runner.stop();
+}
+
+/// Live worker run status for the UI to poll (running / connected / jobs / last error).
+#[tauri::command]
+fn worker_status(state: State<'_, AppState>) -> worker_core::worker_run::RunStatusView {
+    state.runner.status()
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(AppState::default())
@@ -164,7 +190,10 @@ fn main() {
             rotate_provider,
             remove_provider,
             set_privacy,
-            usage
+            usage,
+            start_worker,
+            stop_worker,
+            worker_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running hydra-worker app");

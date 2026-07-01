@@ -5,6 +5,9 @@ config :coordinator, Coordinator.Endpoint,
   url: [host: "localhost"],
   render_errors: [formats: [], layout: false],
   pubsub_server: Coordinator.PubSub,
+  # LiveView (Oban dashboard under /admin) signing salt. Not a secret on its own; the endpoint
+  # secret_key_base (overridden via env in prod) is what actually signs the session.
+  live_view: [signing_salt: "hydra-liveview-salt"],
   # Channels carry no secrets and no signed-session state, but the endpoint still needs a
   # key base. Overridden via env in prod.
   secret_key_base: String.duplicate("hydra-dev-secret-key-base-not-for-prod", 2)

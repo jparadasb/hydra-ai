@@ -52,15 +52,96 @@ registers, is leased a job, runs it through the gateway, and returns a secret-fr
 
 ```sh
 cd worker
-cargo build -p worker-cli
-export HYDRA_VAULT_PASSPHRASE=...                # or be prompted (no-echo)
-./target/debug/hydra-worker init --mode both
+cargo build -p worker-cli --release
+export HYDRA_VAULT_PASSPHRASE=...                       # or be prompted (no-echo)
+./target/release/hydra-worker init --mode both
 HYDRA_PROVIDER_TOKEN=sk-... hydra-worker provider add openai
-hydra-worker run                                 # connects to the coordinator, processes jobs
+HYDRA_COORDINATOR_URL=wss://hydra.example.com hydra-worker run
 ```
 
 Desktop app: `worker/crates/worker-app` (`cargo tauri dev`) — see its `SETUP.md` for the
 WebView system deps.
+
+### Where the coordinator URL comes from
+
+The worker resolves which coordinator to connect to in this order (first wins):
+
+1. `HYDRA_COORDINATOR_URL` environment variable (runtime)
+2. `coordinator_url` in the worker's `config.json`
+3. a URL **baked at build time** (see below)
+4. built-in default `ws://127.0.0.1:4000`
+
+Use `ws://` on a LAN/loopback and `wss://` for a public (tunneled) coordinator.
+
+### Build-time worker configuration (ship a pre-pointed binary)
+
+To hand someone a binary that already targets your coordinator — no env vars, no `init` — set
+the values **in the build environment**; they are compiled into the binary via `option_env!`:
+
+```sh
+cd worker
+HYDRA_COORDINATOR_URL=wss://hydra.example.com \
+HYDRA_JOIN_TOKEN=<optional-fallback-shared-secret> \
+  cargo build -p worker-cli --release
+```
+
+| build env var          | bakes in                                              | needed? |
+|------------------------|-------------------------------------------------------|---------|
+| `HYDRA_COORDINATOR_URL`| default coordinator URL (overridable at runtime)      | optional |
+| `HYDRA_JOIN_TOKEN`     | fallback shared join token                             | optional — device auth is preferred |
+
+Notes:
+- **Device auth needs nothing baked.** The `worker_id` and Ed25519 device key are created at
+  first `run` (see [Worker authentication](#worker-authentication)). A plain
+  `cargo build -p worker-cli` already produces a working, self-enrolling worker.
+- A baked value is a **default**, still overridable at runtime by the env var or `config.json`.
+- Anything baked is recoverable from the binary (`strings`); only bake non-sensitive defaults
+  (the URL) or a low-value fallback secret. Rotating a baked value means rebuilding.
+- Pure-Rust build: Rust ≥ 1.80 + network for crates. No system crypto/SSL libs (rustls,
+  `ed25519-dalek`, `sha2` are all pure Rust).
+
+## Worker authentication
+
+A worker connects with **just the coordinator URL** plus a self-issued identity — no token to
+copy around:
+
+- Its `worker_id` is derived from stable machine characteristics (same box ⇒ same id, zero
+  config). The id is an identifier, **not** a secret.
+- On first run it generates an **Ed25519 device key** (`0600`, never leaves the machine, same
+  rule as provider tokens) and signs `worker_id|ts|nonce` on each connect.
+- The coordinator verifies the signature and **pins the public key** to that `worker_id` on
+  first contact (trust-on-first-use). Later connects must present the same key; a different
+  key for an enrolled id is rejected, and a revoked key is refused.
+
+Set `HYDRA_REQUIRE_DEVICE_AUTH=true` on the coordinator to reject any worker without a device
+key (recommended once the coordinator is publicly reachable). An optional shared
+`HYDRA_JOIN_TOKEN` is the fallback for non-device clients. Pinned keys live in the
+`worker_keys` table; revoke a worker with `Coordinator.DeviceAuth.revoke(worker_id)`.
+
+## Admin console (`/admin`)
+
+The coordinator serves an admin console alongside the OpenAI-compatible front-door:
+
+- **Issue API keys** — mint gateway keys that authorize callers of `POST /v1/chat/completions`.
+  Each key's plaintext is shown **once** at creation; only its SHA-256 hash is stored (a DB or
+  backup leak never yields a usable key). Keys are revocable. These are **not** provider tokens
+  — they only gate who may submit jobs. Set `HYDRA_REQUIRE_API_TOKEN=true` so admin-issued keys
+  alone gate the door even without a shared `HYDRA_API_TOKEN`.
+- **Oban dashboard** at `/admin/oban` — the real Oban Web UI for tracking jobs, queues, and
+  retries.
+
+**Access is protected by GitHub OAuth in prod, and open on loopback dev.** To enable it:
+
+1. Register a GitHub **OAuth app** with Authorization callback URL
+   `<HYDRA_ADMIN_BASE_URL>/auth/github/callback` (e.g.
+   `https://hydrai.lambdatauri.dev/auth/github/callback`).
+2. Set `HYDRA_GITHUB_CLIENT_ID`, `HYDRA_GITHUB_CLIENT_SECRET`, `HYDRA_ADMIN_BASE_URL`, and
+   `HYDRA_ADMIN_GITHUB_USERS` (comma-separated allowlist of GitHub logins). An empty allowlist
+   admits nobody (fail closed).
+
+Enforcement is on automatically in prod; set `HYDRA_ADMIN_AUTH=false` to open `/admin` without
+login (never on a public tunnel). The OAuth access token is used once server-side to read the
+user's login and is never persisted.
 
 ## Deploy the coordinator (Docker + Cloudflare Tunnel)
 

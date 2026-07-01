@@ -8,8 +8,6 @@ defmodule Coordinator.IntegrationTest do
 
   alias Coordinator.{WorkerChannel, WorkerRegistry}
 
-  @worker_id "w-itest"
-
   setup_all do
     bin = Path.expand("../../worker/target/debug/hydra-worker", __DIR__)
 
@@ -28,14 +26,18 @@ defmodule Coordinator.IntegrationTest do
     tmp = Path.join(System.tmp_dir!(), "hydra-itest-#{System.unique_integer([:positive])}")
     File.mkdir_p!(Path.join(tmp, "cfg/worker"))
 
+    # The worker derives its own machine-based worker_id and proves it with a device key, so
+    # we don't pin one here — we discover whichever id it registers.
     File.write!(
       Path.join(tmp, "cfg/worker/config.json"),
       Jason.encode!(%{
-        worker_id: @worker_id,
+        worker_id: "ignored-overridden-by-machine-id",
         execution_mode: "both",
         coordinator_url: "ws://127.0.0.1:4002"
       })
     )
+
+    existing = MapSet.new(WorkerRegistry.list(), & &1.worker_id)
 
     env = [
       {~c"XDG_CONFIG_HOME", String.to_charlist(Path.join(tmp, "cfg"))},
@@ -48,8 +50,10 @@ defmodule Coordinator.IntegrationTest do
 
     Phoenix.PubSub.subscribe(Coordinator.PubSub, "job_results")
 
-    # Wait for the worker to register over the socket.
-    assert wait_for_worker(@worker_id, 50), "worker did not register within timeout"
+    # Wait for the worker to register over the socket (device-authenticated), capturing the
+    # machine-derived worker_id it chose.
+    worker_id = wait_for_new_worker(existing, 50)
+    assert worker_id, "worker did not register within timeout"
 
     # Use a capability the worker does not advertise so the gateway rejects immediately —
     # this keeps the e2e deterministic (no dependency on a live model's inference latency)
@@ -62,7 +66,7 @@ defmodule Coordinator.IntegrationTest do
       "payload" => %{"messages" => [%{"role" => "user", "content" => "hi"}]}
     }
 
-    WorkerChannel.lease(@worker_id, job)
+    WorkerChannel.lease(worker_id, job)
 
     assert_receive {:job_result, result}, 15_000
     assert result["job_id"] == "itest-job-1"
@@ -78,14 +82,16 @@ defmodule Coordinator.IntegrationTest do
     File.rm_rf(tmp)
   end
 
-  defp wait_for_worker(_id, 0), do: false
+  defp wait_for_new_worker(_existing, 0), do: nil
 
-  defp wait_for_worker(id, tries) do
-    if Enum.any?(WorkerRegistry.list(), &(&1.worker_id == id)) do
-      true
-    else
-      Process.sleep(100)
-      wait_for_worker(id, tries - 1)
+  defp wait_for_new_worker(existing, tries) do
+    case Enum.find(WorkerRegistry.list(), &(&1.worker_id not in existing)) do
+      %{worker_id: id} ->
+        id
+
+      nil ->
+        Process.sleep(100)
+        wait_for_new_worker(existing, tries - 1)
     end
   end
 end

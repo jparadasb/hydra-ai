@@ -30,7 +30,10 @@ defmodule Coordinator.LeaseWorker do
   defp lease(record) do
     domain = Jobs.to_domain(record)
 
-    case WorkerRegistry.route(domain) do
+    # reserve/2 routes AND bumps the chosen worker's inflight atomically, so concurrent lease
+    # jobs spread across workers instead of all landing on the same equally-scored node. The
+    # reservation is released when the result arrives (Coordinator.WorkerSession.handle_result).
+    case WorkerRegistry.reserve(domain) do
       {:ok, worker} ->
         lease_id = Jobs.gen_lease_id()
         {:ok, record} = Jobs.mark_leased(record, worker.worker_id, lease_id)

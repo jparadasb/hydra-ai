@@ -11,6 +11,7 @@ pub mod config;
 pub mod coordinator_client;
 pub mod error;
 pub mod gateway;
+pub mod identity;
 pub mod limits;
 pub mod privacy;
 pub mod registration;
@@ -18,6 +19,8 @@ pub mod runtime;
 pub mod types;
 pub mod usage;
 pub mod vault;
+#[cfg(feature = "transport")]
+pub mod worker_run;
 
 pub use adapter::{AdapterRegistry, ProviderAdapter};
 pub use config::{Limits, Preference, PrivacyPrefs, RoutingPolicy, WorkerConfig};

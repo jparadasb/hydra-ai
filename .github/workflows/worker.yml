@@ -1,0 +1,116 @@
+name: worker — build binaries & desktop apps
+
+# Builds the headless `hydra-worker` CLI for macOS / Windows / Linux, plus the Tauri desktop
+# app bundles. Artifacts are uploaded per-build; on a tag push (v*) they are attached to a
+# GitHub Release.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'worker/**'
+      - '.github/workflows/worker.yml'
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  # ---- headless CLI binary (worker-cli) ----------------------------------------------------
+  cli:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: worker
+
+      - name: Build hydra-worker
+        working-directory: worker
+        run: cargo build -p worker-cli --release --target ${{ matrix.target }}
+
+      - name: Stage binary
+        shell: bash
+        working-directory: worker
+        run: |
+          mkdir -p dist
+          src="target/${{ matrix.target }}/release/hydra-worker"
+          if [ -f "${src}.exe" ]; then
+            cp "${src}.exe" "dist/hydra-worker-${{ matrix.target }}.exe"
+          else
+            cp "${src}" "dist/hydra-worker-${{ matrix.target }}"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hydra-worker-${{ matrix.target }}
+          path: worker/dist/*
+          if-no-files-found: error
+
+  # ---- Tauri desktop app (worker-app) ------------------------------------------------------
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+          - os: macos-latest
+          - os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux desktop dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf build-essential curl wget file libssl-dev libxdo-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: worker/crates/worker-app
+
+      - name: Build desktop bundles
+        uses: tauri-apps/tauri-action@v0
+        with:
+          projectPath: worker/crates/worker-app
+          # No signing secrets configured yet -> unsigned bundles. Add per-OS signing later.
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('hydra-worker {0}', github.ref_name) || '' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hydra-worker-desktop-${{ matrix.os }}
+          path: |
+            worker/crates/worker-app/target/release/bundle/**
+            worker/crates/worker-app/target/*/release/bundle/**
+          if-no-files-found: warn

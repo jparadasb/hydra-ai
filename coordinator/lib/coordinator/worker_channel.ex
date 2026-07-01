@@ -14,6 +14,10 @@ defmodule Coordinator.WorkerChannel do
   @impl true
   def join("worker:" <> worker_id, payload, socket) do
     cond do
+      # A device-authenticated socket may only join its own authenticated worker's topic.
+      socket.assigns[:auth_worker_id] && socket.assigns.auth_worker_id != worker_id ->
+        {:error, %{reason: "worker_id_auth_mismatch"}}
+
       payload["worker_id"] != worker_id ->
         {:error, %{reason: "worker_id_mismatch"}}
 
