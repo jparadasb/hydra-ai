@@ -1,0 +1,83 @@
+name: release — create & push a version tag
+
+# Manually cut a release: create an annotated v<X.Y.Z> tag at a chosen commit, push it, then
+# kick the worker build on that tag so it produces the permanent GitHub Release.
+#
+# Why the explicit dispatch at the end: a tag pushed with the default GITHUB_TOKEN does NOT
+# trigger other workflows (GitHub blocks that to prevent recursion), so worker.yml's tag path
+# would otherwise never fire. We dispatch it on the new tag ref instead.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (with or without leading v), e.g. 0.1.1 or v0.1.1'
+        required: true
+        type: string
+      ref:
+        description: 'Commit/branch to tag (default: main)'
+        required: false
+        default: main
+        type: string
+      # A prerelease is expressed in the version itself (e.g. 0.1.1-rc.1); softprops in
+      # worker.yml auto-marks the GitHub Release as a prerelease when the tag is a semver
+      # prerelease, so there is no separate flag here.
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # push the tag
+      actions: write    # dispatch worker.yml
+    steps:
+      - name: Checkout the target ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: Normalize & validate the version
+        id: v
+        run: |
+          raw="${{ inputs.version }}"
+          # strip a single leading v, then require semver (X.Y.Z with optional -prerelease).
+          ver="${raw#v}"
+          if ! echo "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::'$raw' is not a valid semver (expected X.Y.Z or X.Y.Z-rc.1)"
+            exit 1
+          fi
+          echo "tag=v$ver" >> "$GITHUB_OUTPUT"
+
+      - name: Fail if the tag already exists
+        run: |
+          tag="${{ steps.v.outputs.tag }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "::error::tag $tag already exists on origin"
+            exit 1
+          fi
+
+      - name: Create & push the annotated tag
+        run: |
+          tag="${{ steps.v.outputs.tag }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "Release $tag"
+          git push origin "refs/tags/$tag"
+          echo "Pushed $tag at $(git rev-parse --short HEAD)"
+
+      - name: Trigger the worker release build on the new tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ steps.v.outputs.tag }}"
+          gh workflow run worker.yml --ref "$tag"
+          echo "Dispatched worker.yml on $tag — it will build binaries and cut the release."
+
+      - name: Summary
+        run: |
+          {
+            echo "### Release tag ${{ steps.v.outputs.tag }} created"
+            echo ""
+            echo "- ref: \`${{ inputs.ref }}\` ($(git rev-parse --short HEAD))"
+            echo "- worker.yml dispatched on the tag to build binaries + desktop bundles"
+          } >> "$GITHUB_STEP_SUMMARY"
