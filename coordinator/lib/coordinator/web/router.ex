@@ -16,7 +16,9 @@ defmodule Coordinator.Web.Router do
   import Oban.Web.Router
 
   pipeline :browser do
-    plug(:accepts, ["html"])
+    # "json" included because the dashboard polls /admin/stats with `Accept: application/json`
+    # from the same session; html-only here made Phoenix answer those fetches with 406.
+    plug(:accepts, ["html", "json"])
     plug(:fetch_session)
     plug(:protect_from_forgery)
     plug(:put_secure_browser_headers)

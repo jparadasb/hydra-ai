@@ -209,11 +209,11 @@ defmodule Coordinator.Web.DashboardController do
               credentials: 'same-origin',
               cache: 'no-store'
             });
+            if (!resp.ok) { note('stats error HTTP ' + resp.status); return; }
             if (resp.redirected || (resp.headers.get('content-type') || '').indexOf('json') < 0) {
               note('session expired — reload the page to log in again');
               return;
             }
-            if (!resp.ok) { note('stats error HTTP ' + resp.status); return; }
             s = await resp.json();
           } catch (e) { note('stats fetch failed: ' + e.message); return; }
 

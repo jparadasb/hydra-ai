@@ -9,6 +9,7 @@ defmodule Coordinator.Web.RouterTest do
   """
   use ExUnit.Case, async: false
   import Phoenix.ConnTest
+  import Plug.Conn, only: [put_req_header: 3]
 
   alias Coordinator.{ApiToken, Repo}
 
@@ -94,7 +95,13 @@ defmodule Coordinator.Web.RouterTest do
     assert conn.resp_body =~ "chart-throughput"
     assert conn.resp_body =~ "Connected workers"
 
-    conn = get(build_conn(), "/admin/stats")
+    # The page's JS polls with an explicit JSON accept header; the browser pipeline must not
+    # 406 it (regression: `accepts ["html"]` rejected exactly this request in prod).
+    conn =
+      build_conn()
+      |> put_req_header("accept", "application/json")
+      |> get("/admin/stats")
+
     assert conn.status == 200
     stats = Jason.decode!(conn.resp_body)
     assert is_list(stats["workers"])
