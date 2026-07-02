@@ -44,7 +44,12 @@ fn unlock(state: State<'_, AppState>, passphrase: String) -> Result<bool, String
     Ok(true)
 }
 
-/// Current non-secret config for the UI (mode, providers, privacy, coordinator).
+/// Current non-secret config for the UI (mode, providers, routing, coordinator).
+///
+/// Note: which job privacy levels this worker *accepts* is set by the coordinator admin, not
+/// here, so it is not exposed. The worker-side privacy knob is `external_allowed_levels`: the
+/// privacy levels a job may be forwarded to an external provider at (local models are always
+/// allowed; sensitive/local_only never leave the machine).
 #[tauri::command]
 fn get_config() -> serde_json::Value {
     let cfg = support::ensure_config();
@@ -54,11 +59,12 @@ fn get_config() -> serde_json::Value {
         "coordinator_url": cfg.coordinator_url,
         "providers": cfg.providers.iter().map(|p| &p.name).collect::<Vec<_>>(),
         "routing_preference": pref_str(cfg.routing.preference),
-        "privacy": {
-            "accepted_job_levels": cfg.privacy.accepted_job_levels.iter().map(|l| level_str(*l)).collect::<Vec<_>>(),
-            "allow_private_jobs": cfg.privacy.allow_private_jobs,
-            "allow_sensitive_jobs": cfg.privacy.allow_sensitive_jobs,
-        }
+        "external_allowed_levels": cfg
+            .routing
+            .external_provider_allowed_privacy_levels
+            .iter()
+            .map(|l| level_str(*l))
+            .collect::<Vec<_>>(),
     })
 }
 
@@ -146,23 +152,28 @@ fn remove_provider(state: State<'_, AppState>, name: String) -> Result<(), Strin
     support::save_config(&cfg).map_err(|e| e.to_string())
 }
 
-/// Update privacy preferences + routing preference.
+/// Update the worker's routing: which privacy levels may be sent to an external provider, and
+/// the local/external preference. (Accepted job levels are admin-controlled and not set here.)
 #[tauri::command]
 fn set_privacy(
-    accepted_levels: Vec<String>,
-    allow_private: bool,
-    allow_sensitive: bool,
+    external_allowed_levels: Vec<String>,
     routing_preference: String,
 ) -> Result<(), String> {
     let mut cfg = support::ensure_config();
-    cfg.privacy.accepted_job_levels = accepted_levels
+    cfg.routing.external_provider_allowed_privacy_levels = external_allowed_levels
         .iter()
         .filter_map(|s| parse_level(s))
         .collect();
-    cfg.privacy.allow_private_jobs = allow_private;
-    cfg.privacy.allow_sensitive_jobs = allow_sensitive;
     cfg.routing.preference = parse_pref(&routing_preference)?;
     support::save_config(&cfg).map_err(|e| e.to_string())
+}
+
+/// Wipe the vault + configured providers (e.g. lost passphrase). Returns the UI to the gate.
+#[tauri::command]
+fn reset_vault(state: State<'_, AppState>) -> Result<(), String> {
+    support::reset_vault().map_err(|e| e.to_string())?;
+    *state.pass.lock().unwrap() = None;
+    Ok(())
 }
 
 /// Usage rows for the UI table.
@@ -210,6 +221,7 @@ fn main() {
             rotate_provider,
             remove_provider,
             set_privacy,
+            reset_vault,
             usage,
             start_worker,
             stop_worker,

@@ -50,6 +50,20 @@ pub fn provider_names() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Wipe the encrypted vault and forget configured providers — used by the UI "reset vault"
+/// action (e.g. when the passphrase is lost). The next unlock defines a fresh passphrase.
+pub fn reset_vault() -> std::io::Result<()> {
+    let path = EncryptedFileStore::default_path();
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    if let Some(mut cfg) = load_config() {
+        cfg.providers.clear();
+        let _ = save_config(&cfg);
+    }
+    Ok(())
+}
+
 /// Build the command surface backed by the default vault + usage store.
 pub fn build_commands(passphrase: impl Into<String>) -> Commands {
     let vault = Vault::new(Box::new(EncryptedFileStore::new(

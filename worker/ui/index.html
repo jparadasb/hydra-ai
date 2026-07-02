@@ -10,19 +10,20 @@
     <!-- Vault gate: shown until the session passphrase is entered. -->
     <section id="gate" class="gate">
       <div class="gate-card">
-        <div class="brand"><span class="dot"></span> hydra-worker</div>
+        <div class="brand"><img class="logo" src="logo.png" alt="" /> hydra-worker</div>
         <p class="muted">Local AI execution gateway. Unlock the vault to manage this node.</p>
         <label for="pass">Vault passphrase</label>
         <input id="pass" type="password" autocomplete="off" placeholder="••••••••" />
         <button id="unlock-btn" class="primary">Unlock</button>
         <p class="fine">Tokens are stored encrypted on this machine and never sent to the coordinator.</p>
+        <p class="fine"><a id="reset-link" href="#">Forgot your passphrase? Reset the vault</a></p>
       </div>
     </section>
 
     <!-- Main console: hidden until unlocked. -->
     <main id="console" class="console hidden">
       <nav class="rail">
-        <div class="brand small"><span class="dot"></span> hydra</div>
+        <div class="brand small"><img class="logo" src="logo.png" alt="" /> hydra</div>
         <button class="tab active" data-tab="run">Run</button>
         <button class="tab" data-tab="mode">Mode</button>
         <button class="tab" data-tab="providers">Providers</button>
@@ -95,17 +96,18 @@
 
         <!-- PRIVACY -->
         <section id="tab-privacy" class="view hidden">
-          <h1>Privacy</h1>
-          <p class="muted">Which jobs this worker accepts, and how it routes them.</p>
+          <h1>Privacy &amp; routing</h1>
+          <p class="muted">Which job privacy levels this worker is allowed to accept is set by
+            the <b>coordinator admin</b>, not here. These controls only govern how this worker
+            routes the jobs it is given.</p>
           <fieldset>
-            <legend>Accepted job levels</legend>
-            <label><input type="checkbox" class="lvl" value="public" /> public</label>
-            <label><input type="checkbox" class="lvl" value="private" /> private</label>
-            <label><input type="checkbox" class="lvl" value="sensitive" /> sensitive</label>
-            <label><input type="checkbox" class="lvl" value="local_only" /> local_only</label>
+            <legend>Send to external providers</legend>
+            <p class="fine">Privacy levels a job may be forwarded to a third-party provider at.
+              Local models are always allowed. Sensitive and local-only jobs never leave this
+              machine, regardless of this setting.</p>
+            <label><input type="checkbox" class="ext" value="public" /> public</label>
+            <label><input type="checkbox" class="ext" value="private" /> private</label>
           </fieldset>
-          <label class="row"><input type="checkbox" id="allow-private" /> Allow private jobs on external providers (only if the job permits)</label>
-          <label class="row"><input type="checkbox" id="allow-sensitive" /> Allow sensitive jobs on external providers</label>
           <label class="row">Routing preference
             <select id="pref">
               <option value="prefer_local">prefer local</option>
@@ -114,7 +116,7 @@
               <option value="local_only">local only</option>
             </select>
           </label>
-          <button id="save-privacy" class="primary">Save privacy</button>
+          <button id="save-privacy" class="primary">Save</button>
         </section>
 
         <!-- USAGE -->

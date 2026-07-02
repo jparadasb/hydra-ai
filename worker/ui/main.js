@@ -38,6 +38,16 @@ $("#pass").addEventListener("keydown", (e) => {
   if (e.key === "Enter") $("#unlock-btn").click();
 });
 
+// Reset the vault from the gate (e.g. a lost/forgotten passphrase). Wipes stored tokens.
+$("#reset-link").addEventListener("click", async (e) => {
+  e.preventDefault();
+  if (!confirm("Reset the vault? This deletes all stored provider tokens on this machine. You'll set a new passphrase on next unlock."))
+    return;
+  await call("reset_vault");
+  $("#pass").value = "";
+  toast("vault reset — set a new passphrase to continue");
+});
+
 // ---- Tab switching ----
 $$(".tab").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -56,9 +66,8 @@ async function loadConfig() {
   $("#worker-id").textContent = cfg.worker_id;
   const m = $(`input[name=mode][value=${cfg.execution_mode}]`);
   if (m) m.checked = true;
-  $$(".lvl").forEach((c) => (c.checked = cfg.privacy.accepted_job_levels.includes(c.value)));
-  $("#allow-private").checked = cfg.privacy.allow_private_jobs;
-  $("#allow-sensitive").checked = cfg.privacy.allow_sensitive_jobs;
+  const ext = cfg.external_allowed_levels || [];
+  $$(".ext").forEach((c) => (c.checked = ext.includes(c.value)));
   $("#pref").value = cfg.routing_preference;
   if (cfg.coordinator_url && !$("#r-url").value) $("#r-url").placeholder = cfg.coordinator_url;
 }
@@ -116,12 +125,10 @@ $("#save-mode").addEventListener("click", async () => {
 
 $("#save-privacy").addEventListener("click", async () => {
   await call("set_privacy", {
-    accepted_levels: $$(".lvl").filter((c) => c.checked).map((c) => c.value),
-    allow_private: $("#allow-private").checked,
-    allow_sensitive: $("#allow-sensitive").checked,
+    external_allowed_levels: $$(".ext").filter((c) => c.checked).map((c) => c.value),
     routing_preference: $("#pref").value,
   });
-  toast("privacy saved");
+  toast("routing saved");
 });
 
 // ---- Providers ----
