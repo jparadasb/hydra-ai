@@ -64,7 +64,7 @@ defmodule Coordinator.Web.TokenController do
       button{padding:.4rem .7rem;cursor:pointer} nav a{margin-right:1rem}
     </style></head><body>
     <h1>hydra coordinator — API keys</h1>
-    <nav><a href="/admin/oban">Oban dashboard →</a><a href="/auth/logout">Log out (#{esc(conn.assigns[:current_admin])})</a></nav>
+    <nav><a href="/admin/dashboard">Dashboard →</a><a href="/admin/oban">Oban dashboard →</a><a href="/auth/logout">Log out (#{esc(conn.assigns[:current_admin])})</a></nav>
     #{reveal(new_token)}
     <h2>Issue a key</h2>
     <form method="post" action="/admin/tokens">

@@ -40,6 +40,10 @@ defmodule Coordinator.Web.Router do
     get("/", TokenController, :index)
     post("/tokens", TokenController, :create)
     post("/tokens/:id/revoke", TokenController, :revoke)
+
+    # Operational dashboard: workers connected vs pending/processed jobs (+ JSON it polls).
+    get("/dashboard", DashboardController, :index)
+    get("/stats", DashboardController, :stats)
   end
 
   # The Oban dashboard (LiveView, self-served assets). Same auth gate as the rest of /admin.

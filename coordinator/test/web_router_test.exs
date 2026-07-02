@@ -88,6 +88,20 @@ defmodule Coordinator.Web.RouterTest do
     assert redirected_to(conn) == "/auth/github"
   end
 
+  test "dashboard page and stats JSON render under /admin" do
+    conn = get(build_conn(), "/admin/dashboard")
+    assert conn.status == 200
+    assert conn.resp_body =~ "chart-throughput"
+    assert conn.resp_body =~ "Connected workers"
+
+    conn = get(build_conn(), "/admin/stats")
+    assert conn.status == 200
+    stats = Jason.decode!(conn.resp_body)
+    assert is_list(stats["workers"])
+    assert is_map(stats["jobs"])
+    assert is_list(stats["throughput"])
+  end
+
   test "when admin auth is enforced, anonymous callers are redirected to GitHub login" do
     Application.put_env(:coordinator, :admin_auth_required, true)
     Application.put_env(:coordinator, :github_client_id, "cid")
