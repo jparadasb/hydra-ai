@@ -14,11 +14,15 @@ defmodule Coordinator.Web.DashboardController do
   import Plug.Conn
 
   def stats(conn, _params) do
-    json(conn, Coordinator.Stats.snapshot())
+    conn
+    |> put_resp_header("cache-control", "no-store")
+    |> json(Coordinator.Stats.snapshot())
   end
 
   def index(conn, _params) do
-    html(conn, page())
+    conn
+    |> put_resp_header("cache-control", "no-store")
+    |> html(page())
   end
 
   defp page do
@@ -110,33 +114,40 @@ defmodule Coordinator.Web.DashboardController do
       </div>
 
       <script>
+        // Resilient by construction: the stat cards and workers table always render, even if
+        // the Chart.js CDN is blocked (adblock/privacy shields) — charts are created lazily and
+        // guarded. Any fetch/render problem is surfaced in the footer instead of dying silently.
         const fmtHour = iso => new Date(iso).toLocaleTimeString([], {hour: '2-digit'});
+        const note = msg => { document.getElementById('updated-at').textContent = msg; };
+        let throughputChart = null, statusChart = null;
 
-        const throughputChart = new Chart(document.getElementById('chart-throughput'), {
-          type: 'bar',
-          data: { labels: [], datasets: [
-            { label: 'done',   data: [], backgroundColor: 'rgba(52,211,153,0.8)', stack: 's' },
-            { label: 'failed', data: [], backgroundColor: 'rgba(251,113,133,0.8)', stack: 's' }
-          ]},
-          options: {
-            responsive: true,
-            scales: {
-              x: { stacked: true, ticks: { color: '#64748b' }, grid: { display: false } },
-              y: { stacked: true, beginAtZero: true, ticks: { color: '#64748b', precision: 0 }, grid: { color: '#1e293b' } }
-            },
-            plugins: { legend: { labels: { color: '#94a3b8' } } }
-          }
-        });
-
-        const statusChart = new Chart(document.getElementById('chart-status'), {
-          type: 'doughnut',
-          data: { labels: ['pending', 'leased', 'done', 'failed'], datasets: [{
-            data: [0, 0, 0, 0],
-            backgroundColor: ['rgba(251,191,36,0.85)', 'rgba(56,189,248,0.85)', 'rgba(52,211,153,0.85)', 'rgba(251,113,133,0.85)'],
-            borderColor: '#0f172a'
-          }]},
-          options: { responsive: true, plugins: { legend: { position: 'bottom', labels: { color: '#94a3b8' } } } }
-        });
+        function ensureCharts() {
+          if (throughputChart || typeof Chart === 'undefined') return;
+          throughputChart = new Chart(document.getElementById('chart-throughput'), {
+            type: 'bar',
+            data: { labels: [], datasets: [
+              { label: 'done',   data: [], backgroundColor: 'rgba(52,211,153,0.8)', stack: 's' },
+              { label: 'failed', data: [], backgroundColor: 'rgba(251,113,133,0.8)', stack: 's' }
+            ]},
+            options: {
+              responsive: true,
+              scales: {
+                x: { stacked: true, ticks: { color: '#64748b' }, grid: { display: false } },
+                y: { stacked: true, beginAtZero: true, ticks: { color: '#64748b', precision: 0 }, grid: { color: '#1e293b' } }
+              },
+              plugins: { legend: { labels: { color: '#94a3b8' } } }
+            }
+          });
+          statusChart = new Chart(document.getElementById('chart-status'), {
+            type: 'doughnut',
+            data: { labels: ['pending', 'leased', 'done', 'failed'], datasets: [{
+              data: [0, 0, 0, 0],
+              backgroundColor: ['rgba(251,191,36,0.85)', 'rgba(56,189,248,0.85)', 'rgba(52,211,153,0.85)', 'rgba(251,113,133,0.85)'],
+              borderColor: '#0f172a'
+            }]},
+            options: { responsive: true, plugins: { legend: { position: 'bottom', labels: { color: '#94a3b8' } } } }
+          });
+        }
 
         function cell(text, cls) {
           const td = document.createElement('td');
@@ -145,14 +156,7 @@ defmodule Coordinator.Web.DashboardController do
           return td;
         }
 
-        async function refresh() {
-          let s;
-          try {
-            const resp = await fetch('/admin/stats', { headers: { accept: 'application/json' } });
-            if (!resp.ok) return;
-            s = await resp.json();
-          } catch (_) { return; }
-
+        function renderCardsAndTable(s) {
           const workers = s.workers || [];
           const jobs = s.jobs || {};
           document.getElementById('stat-workers').textContent = workers.length;
@@ -160,21 +164,13 @@ defmodule Coordinator.Web.DashboardController do
           for (const k of ['pending', 'leased', 'done', 'failed'])
             document.getElementById('stat-' + k).textContent = jobs[k] ?? 0;
 
-          const tp = s.throughput || [];
-          throughputChart.data.labels = tp.map(b => fmtHour(b.hour));
-          throughputChart.data.datasets[0].data = tp.map(b => b.done);
-          throughputChart.data.datasets[1].data = tp.map(b => b.failed);
-          throughputChart.update('none');
-
-          statusChart.data.datasets[0].data = ['pending', 'leased', 'done', 'failed'].map(k => jobs[k] ?? 0);
-          statusChart.update('none');
-
           const body = document.getElementById('workers-body');
           body.replaceChildren();
           if (workers.length === 0) {
             const tr = document.createElement('tr');
-            tr.appendChild(cell('No workers connected.', 'text-slate-500'));
-            tr.firstChild.colSpan = 7;
+            const td = cell('No workers connected.', 'text-slate-500');
+            td.colSpan = 7;
+            tr.appendChild(td);
             body.appendChild(tr);
           }
           for (const w of workers) {
@@ -186,15 +182,45 @@ defmodule Coordinator.Web.DashboardController do
             tr.appendChild(cell((w.capabilities || []).join(', '), 'text-slate-400 text-xs'));
             tr.appendChild(cell(String(w.inflight), 'text-right'));
             tr.appendChild(cell(Math.round(w.avg_latency_ms) + ' ms', 'text-right text-slate-400'));
-            const status = cell(w.available ? 'available' : 'busy',
-              w.available ? 'text-emerald-400' : 'text-amber-400');
-            status.classList.remove('pr-4');
-            tr.appendChild(status);
+            tr.appendChild(cell(w.available ? 'available' : 'busy',
+              w.available ? 'text-emerald-400' : 'text-amber-400'));
             body.appendChild(tr);
           }
+        }
 
-          document.getElementById('updated-at').textContent =
-            'updated ' + new Date().toLocaleTimeString();
+        function renderCharts(s) {
+          ensureCharts();
+          if (!throughputChart) return;
+          const jobs = s.jobs || {};
+          const tp = s.throughput || [];
+          throughputChart.data.labels = tp.map(b => fmtHour(b.hour));
+          throughputChart.data.datasets[0].data = tp.map(b => b.done);
+          throughputChart.data.datasets[1].data = tp.map(b => b.failed);
+          throughputChart.update('none');
+          statusChart.data.datasets[0].data = ['pending', 'leased', 'done', 'failed'].map(k => jobs[k] ?? 0);
+          statusChart.update('none');
+        }
+
+        async function refresh() {
+          let s;
+          try {
+            const resp = await fetch('/admin/stats', {
+              headers: { accept: 'application/json' },
+              credentials: 'same-origin',
+              cache: 'no-store'
+            });
+            if (resp.redirected || (resp.headers.get('content-type') || '').indexOf('json') < 0) {
+              note('session expired — reload the page to log in again');
+              return;
+            }
+            if (!resp.ok) { note('stats error HTTP ' + resp.status); return; }
+            s = await resp.json();
+          } catch (e) { note('stats fetch failed: ' + e.message); return; }
+
+          try { renderCardsAndTable(s); } catch (e) { note('render error: ' + e.message); return; }
+          try { renderCharts(s); } catch (e) { note('chart error: ' + e.message); return; }
+          note('updated ' + new Date().toLocaleTimeString() +
+               (throughputChart ? '' : ' · charts unavailable (CDN blocked?)'));
         }
 
         refresh();
