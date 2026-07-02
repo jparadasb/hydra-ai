@@ -6,12 +6,14 @@
 
 pub mod anthropic;
 pub mod gemini;
+pub mod gemini_oauth;
 pub mod local_openai;
 pub mod ollama;
 pub mod openai_compatible;
 
 pub use anthropic::AnthropicAdapter;
 pub use gemini::GeminiAdapter;
+pub use gemini_oauth::GeminiCodeAssistAdapter;
 pub use local_openai::LocalOpenAiAdapter;
 pub use ollama::OllamaAdapter;
 pub use openai_compatible::{OpenAICompatibleAdapter, Pricing};
@@ -38,12 +40,27 @@ use crate::vault::Secret;
 
 /// Build an external-provider adapter for `provider`, using `token`. `base_url` overrides the
 /// default (required for `custom`). The token is moved into the adapter and never escapes it.
+///
+/// A vault value that parses as an OAuth credential blob (`provider login`) selects the
+/// matching OAuth adapter; a plain string is treated as a static API key as before.
 pub fn build_external_adapter(
     provider: &str,
     base_url: Option<String>,
     token: Secret,
     client: reqwest::Client,
 ) -> Result<Arc<dyn ProviderAdapter>> {
+    if let Some(oauth) = crate::oauth::OAuthTokens::from_vault_value(token.expose()) {
+        return match oauth.flavor.as_str() {
+            crate::oauth::FLAVOR_GOOGLE_CODE_ASSIST => Ok(Arc::new(match base_url {
+                Some(b) => GeminiCodeAssistAdapter::with_base_url(b, oauth, client),
+                None => GeminiCodeAssistAdapter::new(oauth, client),
+            })),
+            other => Err(Error::Other(format!(
+                "unsupported oauth credential flavor '{other}' for provider '{provider}'"
+            ))),
+        };
+    }
+
     match provider {
         "anthropic" | "claude" => Ok(Arc::new(match base_url {
             Some(b) => AnthropicAdapter::with_base_url(b, token, client),
@@ -65,5 +82,46 @@ pub fn build_external_adapter(
                 other, base, token, client,
             )))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oauth::{OAuthTokens, FLAVOR_GOOGLE_CODE_ASSIST};
+
+    #[test]
+    fn oauth_blob_selects_code_assist_adapter_and_plain_key_stays_static() {
+        let client = reqwest::Client::new();
+
+        let blob = OAuthTokens {
+            flavor: FLAVOR_GOOGLE_CODE_ASSIST.into(),
+            access_token: "ya29.x".into(),
+            refresh_token: None,
+            expires_at_unix: 0,
+            project_id: Some("p".into()),
+        }
+        .to_vault_value();
+
+        let oauth = build_external_adapter("gemini", None, Secret::new(blob), client.clone())
+            .expect("oauth adapter builds");
+        assert_eq!(oauth.name(), "gemini");
+        assert!(oauth.uses_external_provider());
+
+        // A plain key still yields the static-key Gemini adapter (same name, api-key path).
+        let plain = build_external_adapter("gemini", None, Secret::new("AIzaKey"), client.clone())
+            .expect("static adapter builds");
+        assert_eq!(plain.name(), "gemini");
+
+        // Unknown OAuth flavor is refused rather than silently treated as an API key.
+        let bad = OAuthTokens {
+            flavor: "mystery".into(),
+            access_token: "t".into(),
+            refresh_token: None,
+            expires_at_unix: 0,
+            project_id: None,
+        }
+        .to_vault_value();
+        assert!(build_external_adapter("gemini", None, Secret::new(bad), client).is_err());
     }
 }

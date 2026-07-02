@@ -28,9 +28,23 @@ defmodule Coordinator.WorkerSession do
   def handle_register(payload, pid \\ nil, registry \\ WorkerRegistry) do
     with :ok <- SecretGuard.verify(payload),
          :ok <- validate_registration(payload) do
-      sanitized = SecretGuard.sanitize(payload)
+      sanitized = payload |> SecretGuard.sanitize() |> apply_admin_privacy()
       WorkerRegistry.register(registry, sanitized, pid)
     end
+  end
+
+  # Privacy acceptance is decided by the admin (`Coordinator.WorkerPolicies`), not the
+  # worker: whatever levels the registration declares are replaced with the admin-granted
+  # ones (public-only until an admin raises it).
+  defp apply_admin_privacy(%{"worker_id" => worker_id} = payload) do
+    levels = Coordinator.WorkerPolicies.accepted_levels(worker_id)
+
+    Map.update(
+      payload,
+      "privacy",
+      %{"accepted_job_levels" => levels},
+      &Map.put(&1, "accepted_job_levels", levels)
+    )
   end
 
   @doc "Handle an aggregated usage report (no secrets). Returns the sanitized report."

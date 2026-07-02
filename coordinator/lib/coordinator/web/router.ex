@@ -46,6 +46,12 @@ defmodule Coordinator.Web.Router do
     # Operational dashboard: workers connected vs pending/processed jobs (+ JSON it polls).
     get("/dashboard", DashboardController, :index)
     get("/stats", DashboardController, :stats)
+
+    # Enrolled workers: admin-granted privacy levels + device-key revoke/restore.
+    get("/workers", WorkerController, :index)
+    post("/workers/:id/policy", WorkerController, :policy)
+    post("/workers/:id/revoke", WorkerController, :revoke)
+    post("/workers/:id/restore", WorkerController, :restore)
   end
 
   # The Oban dashboard (LiveView, self-served assets). Same auth gate as the rest of /admin.

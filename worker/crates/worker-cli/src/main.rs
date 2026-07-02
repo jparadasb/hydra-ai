@@ -50,6 +50,12 @@ enum ProviderAction {
         #[arg(long)]
         base_url: Option<String>,
     },
+    /// Sign in with a browser instead of pasting a key (gemini: Google account,
+    /// openai: ChatGPT sign-in that mints an API key).
+    Login {
+        #[arg(value_parser = ["gemini", "google", "openai"])]
+        name: String,
+    },
     /// Test a provider's stored token against its API.
     Test {
         name: String,
@@ -164,6 +170,46 @@ async fn cmd_provider(action: ProviderAction) {
                     println!("Stored token for '{name}' ({fp}).");
                 }
                 Err(e) => eprintln!("vault error: {e}"),
+            }
+        }
+        ProviderAction::Login { name } => {
+            let http = reqwest::Client::new();
+            match name.as_str() {
+                "gemini" | "google" => match worker_core::oauth::login_google(&http).await {
+                    Ok(tokens) => {
+                        let project = tokens.project_id.clone().unwrap_or_default();
+                        let secret = Secret::new(tokens.to_vault_value());
+                        match vault.add("gemini", secret) {
+                            Ok(()) => {
+                                if let Some(mut cfg) = load_config() {
+                                    cfg.upsert_provider("gemini", None);
+                                    let _ = save_config(&cfg);
+                                }
+                                println!("Signed in to Google (Code Assist project '{project}').");
+                                println!("Stored OAuth credential for 'gemini'.");
+                            }
+                            Err(e) => eprintln!("vault error: {e}"),
+                        }
+                    }
+                    Err(e) => eprintln!("gemini login failed: {e}"),
+                },
+                _ => match worker_core::oauth::login_openai_mint_key(&http).await {
+                    Ok(api_key) => {
+                        let secret = Secret::new(api_key);
+                        let fp = secret.fingerprint();
+                        match vault.add("openai", secret) {
+                            Ok(()) => {
+                                if let Some(mut cfg) = load_config() {
+                                    cfg.upsert_provider("openai", None);
+                                    let _ = save_config(&cfg);
+                                }
+                                println!("Signed in with ChatGPT; minted API key ({fp}) stored for 'openai'.");
+                            }
+                            Err(e) => eprintln!("vault error: {e}"),
+                        }
+                    }
+                    Err(e) => eprintln!("openai login failed: {e}"),
+                },
             }
         }
         ProviderAction::Test { name, base_url } => {

@@ -40,6 +40,13 @@ defmodule Coordinator.DeviceAuth do
     :ok
   end
 
+  @doc "Restore a revoked worker's key so it may connect again."
+  def restore(worker_id) do
+    from(k in WorkerKey, where: k.worker_id == ^worker_id)
+    |> Repo.update_all(set: [status: "trusted", updated_at: DateTime.utc_now()])
+    :ok
+  end
+
   defp extract(params) do
     with worker_id when is_binary(worker_id) <- params["worker_id"],
          pubkey when is_binary(pubkey) <- params["pubkey"],

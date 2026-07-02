@@ -13,6 +13,7 @@ pub mod error;
 pub mod gateway;
 pub mod identity;
 pub mod limits;
+pub mod oauth;
 pub mod privacy;
 pub mod registration;
 pub mod runtime;

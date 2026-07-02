@@ -85,28 +85,7 @@ impl ProviderAdapter for GeminiAdapter {
     }
 
     async fn run_chat_completion(&self, req: ChatRequest) -> Result<ChatResponse> {
-        // Map roles: Gemini uses "user"/"model"; "system" → systemInstruction.
-        let mut contents = Vec::new();
-        let mut system = None;
-        for m in &req.messages {
-            match m.role.as_str() {
-                "system" => system = Some(m.content.clone()),
-                "assistant" | "model" => contents.push(json!({
-                    "role": "model", "parts": [{ "text": m.content }]
-                })),
-                _ => contents.push(json!({
-                    "role": "user", "parts": [{ "text": m.content }]
-                })),
-            }
-        }
-        let mut body = json!({ "contents": contents });
-        if let Some(s) = system {
-            body["systemInstruction"] = json!({ "parts": [{ "text": s }] });
-        }
-        if let Some(mt) = req.max_tokens {
-            body["generationConfig"] = json!({ "maxOutputTokens": mt });
-        }
-
+        let body = build_generate_content_body(&req);
         let url = format!("{}/models/{}:generateContent", self.base_url, req.model);
         let resp = self
             .client
@@ -116,24 +95,58 @@ impl ProviderAdapter for GeminiAdapter {
             .send()
             .await?;
         let value = parse_json(resp).await?;
+        Ok(parse_generate_content_response(&value, req.model))
+    }
+}
 
-        let content = value["candidates"][0]["content"]["parts"][0]["text"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
-        let usage = Usage {
-            input_tokens: value["usageMetadata"]["promptTokenCount"]
-                .as_u64()
-                .unwrap_or(0),
-            output_tokens: value["usageMetadata"]["candidatesTokenCount"]
-                .as_u64()
-                .unwrap_or(0),
-            ..Default::default()
-        };
-        Ok(ChatResponse {
-            model: req.model,
-            content,
-            usage,
-        })
+/// Build a Gemini `generateContent` request body from a normalized chat request.
+/// Roles map to "user"/"model"; "system" becomes `systemInstruction`. Shared with the
+/// Code Assist (OAuth) adapter, which wraps this same body in its own envelope.
+pub(crate) fn build_generate_content_body(req: &ChatRequest) -> serde_json::Value {
+    let mut contents = Vec::new();
+    let mut system = None;
+    for m in &req.messages {
+        match m.role.as_str() {
+            "system" => system = Some(m.content.clone()),
+            "assistant" | "model" => contents.push(json!({
+                "role": "model", "parts": [{ "text": m.content }]
+            })),
+            _ => contents.push(json!({
+                "role": "user", "parts": [{ "text": m.content }]
+            })),
+        }
+    }
+    let mut body = json!({ "contents": contents });
+    if let Some(s) = system {
+        body["systemInstruction"] = json!({ "parts": [{ "text": s }] });
+    }
+    if let Some(mt) = req.max_tokens {
+        body["generationConfig"] = json!({ "maxOutputTokens": mt });
+    }
+    body
+}
+
+/// Map a Gemini `generateContent` response body to the normalized chat response.
+pub(crate) fn parse_generate_content_response(
+    value: &serde_json::Value,
+    model: String,
+) -> ChatResponse {
+    let content = value["candidates"][0]["content"]["parts"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let usage = Usage {
+        input_tokens: value["usageMetadata"]["promptTokenCount"]
+            .as_u64()
+            .unwrap_or(0),
+        output_tokens: value["usageMetadata"]["candidatesTokenCount"]
+            .as_u64()
+            .unwrap_or(0),
+        ..Default::default()
+    };
+    ChatResponse {
+        model,
+        content,
+        usage,
     }
 }

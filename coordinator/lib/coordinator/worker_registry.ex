@@ -28,6 +28,15 @@ defmodule Coordinator.WorkerRegistry do
     GenServer.call(server, {:update_signals, worker_id, signals})
   end
 
+  @doc """
+  Apply an admin policy change (accepted privacy levels, string form) to a connected worker
+  immediately. No-op for workers not currently registered (they pick the policy up at their
+  next registration).
+  """
+  def update_accepted_levels(server \\ __MODULE__, worker_id, levels) when is_list(levels) do
+    GenServer.call(server, {:update_accepted_levels, worker_id, levels})
+  end
+
   def unregister(server \\ __MODULE__, worker_id) do
     GenServer.call(server, {:unregister, worker_id})
   end
@@ -80,6 +89,18 @@ defmodule Coordinator.WorkerRegistry do
             available: Map.get(signals, "available", w.available)
         }
 
+        {:reply, :ok, %{state | workers: Map.put(state.workers, id, updated)}}
+
+      :error ->
+        {:reply, {:error, :unknown_worker}, state}
+    end
+  end
+
+  def handle_call({:update_accepted_levels, id, levels}, _from, state) do
+    case Map.fetch(state.workers, id) do
+      {:ok, %Worker{} = w} ->
+        parsed = Enum.map(levels, &Coordinator.Job.parse_privacy/1)
+        updated = %Worker{w | accepted_job_levels: parsed}
         {:reply, :ok, %{state | workers: Map.put(state.workers, id, updated)}}
 
       :error ->

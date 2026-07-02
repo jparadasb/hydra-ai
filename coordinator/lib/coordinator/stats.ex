@@ -37,7 +37,8 @@ defmodule Coordinator.Stats do
         "capabilities" => w.models |> Enum.flat_map(& &1.capabilities) |> Enum.uniq() |> Enum.sort(),
         "inflight" => w.inflight,
         "avg_latency_ms" => w.avg_latency_ms,
-        "available" => w.available
+        "available" => w.available,
+        "accepted_job_levels" => Enum.map(w.accepted_job_levels, &to_string/1)
       }
     end)
     |> Enum.sort_by(& &1["worker_id"])

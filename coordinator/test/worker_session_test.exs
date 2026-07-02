@@ -1,10 +1,23 @@
 defmodule Coordinator.WorkerSessionTest do
-  use ExUnit.Case, async: true
-  alias Coordinator.{Job, WorkerRegistry, WorkerSession}
+  # async: false — handle_register now reads the admin policy from the repo.
+  use ExUnit.Case, async: false
+  alias Coordinator.{Job, Repo, WorkerKey, WorkerPolicies, WorkerRegistry, WorkerSession}
 
   setup do
     {:ok, reg} = WorkerRegistry.start_link(name: nil)
+    on_exit(fn -> Repo.delete_all(WorkerKey) end)
     %{reg: reg}
+  end
+
+  defp enroll(worker_id, levels) do
+    %WorkerKey{}
+    |> WorkerKey.changeset(%{
+      worker_id: worker_id,
+      public_key: Base.encode64(:crypto.strong_rand_bytes(32)),
+      status: "trusted",
+      accepted_job_levels: levels
+    })
+    |> Repo.insert!()
   end
 
   defp registration do
@@ -30,6 +43,46 @@ defmodule Coordinator.WorkerSessionTest do
 
     job = %Job{job_id: "j", capability: "text.extract_json", privacy: :public}
     assert {:ok, %{worker_id: "w-ext"}} = WorkerRegistry.route(reg, job)
+  end
+
+  test "worker-declared privacy levels are ignored: public-only until admin grants", %{reg: reg} do
+    # Registration declares public+private, but there is no admin grant.
+    assert {:ok, worker} = WorkerSession.handle_register(registration(), nil, reg)
+    assert worker.accepted_job_levels == [:public]
+
+    private = %Job{job_id: "j", capability: "text.extract_json", privacy: :private, allow_external_providers: true}
+    assert {:error, :no_eligible_worker} = WorkerRegistry.route(reg, private)
+  end
+
+  test "admin-granted levels apply at registration", %{reg: reg} do
+    enroll("w-ext", ["public", "private"])
+
+    assert {:ok, worker} = WorkerSession.handle_register(registration(), nil, reg)
+    assert worker.accepted_job_levels == [:public, :private]
+
+    private = %Job{job_id: "j", capability: "text.extract_json", privacy: :private, allow_external_providers: true}
+    assert {:ok, %{worker_id: "w-ext"}} = WorkerRegistry.route(reg, private)
+  end
+
+  test "admin policy change applies to a connected worker immediately", %{reg: reg} do
+    assert {:ok, _} = WorkerSession.handle_register(registration(), nil, reg)
+
+    assert :ok = WorkerRegistry.update_accepted_levels(reg, "w-ext", ["public", "private"])
+    assert [%{accepted_job_levels: [:public, :private]}] = WorkerRegistry.list(reg)
+
+    assert {:error, :unknown_worker} =
+             WorkerRegistry.update_accepted_levels(reg, "nope", ["public"])
+  end
+
+  test "set_accepted_levels persists for enrolled workers and rejects unknown ones" do
+    enroll("w-ext", ["public"])
+
+    assert {:ok, key} = WorkerPolicies.set_accepted_levels("w-ext", ["public", "sensitive"])
+    assert key.accepted_job_levels == ["public", "sensitive"]
+    assert WorkerPolicies.accepted_levels("w-ext") == ["public", "sensitive"]
+
+    assert {:error, :not_enrolled} = WorkerPolicies.set_accepted_levels("ghost", ["public"])
+    assert WorkerPolicies.accepted_levels("ghost") == ["public"]
   end
 
   test "refuses a registration carrying a token; nothing is registered", %{reg: reg} do

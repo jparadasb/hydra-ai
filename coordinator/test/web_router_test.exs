@@ -109,6 +109,40 @@ defmodule Coordinator.Web.RouterTest do
     assert is_list(stats["throughput"])
   end
 
+  test "workers admin page lists enrolled workers and saves a policy" do
+    key =
+      %Coordinator.WorkerKey{}
+      |> Coordinator.WorkerKey.changeset(%{
+        worker_id: "w-admin-test",
+        public_key: Base.encode64(:crypto.strong_rand_bytes(32)),
+        status: "trusted"
+      })
+      |> Repo.insert!()
+
+    on_exit(fn -> Repo.delete_all(Coordinator.WorkerKey) end)
+    assert key.accepted_job_levels == ["public"]
+
+    conn = get(build_conn(), "/admin/workers")
+    assert conn.status == 200
+    assert conn.resp_body =~ "w-admin-test"
+    assert conn.resp_body =~ "Accepted job levels"
+
+    csrf = csrf_token(conn.resp_body)
+
+    conn =
+      conn
+      |> recycle()
+      |> post("/admin/workers/w-admin-test/policy", %{
+        "_csrf_token" => csrf,
+        "levels" => ["public", "private"]
+      })
+
+    assert redirected_to(conn) == "/admin/workers"
+
+    assert Repo.get(Coordinator.WorkerKey, "w-admin-test").accepted_job_levels ==
+             ["public", "private"]
+  end
+
   test "when admin auth is enforced, anonymous callers are redirected to GitHub login" do
     Application.put_env(:coordinator, :admin_auth_required, true)
     Application.put_env(:coordinator, :github_client_id, "cid")

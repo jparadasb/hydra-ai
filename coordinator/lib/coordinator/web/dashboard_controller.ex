@@ -42,6 +42,7 @@ defmodule Coordinator.Web.DashboardController do
           <h1 class="text-xl font-semibold tracking-tight">hydra coordinator</h1>
           <nav class="space-x-4 text-sm text-slate-400">
             <a class="hover:text-white" href="/admin">API keys</a>
+            <a class="hover:text-white" href="/admin/workers">Workers</a>
             <a class="hover:text-white" href="/admin/oban">Oban</a>
             <a class="hover:text-white" href="/auth/logout">Log out</a>
           </nav>
@@ -97,13 +98,14 @@ defmodule Coordinator.Web.DashboardController do
                 <th class="py-2 pr-4">Mode</th>
                 <th class="py-2 pr-4">Models</th>
                 <th class="py-2 pr-4">Capabilities</th>
+                <th class="py-2 pr-4">Accepted</th>
                 <th class="py-2 pr-4 text-right">Inflight</th>
                 <th class="py-2 pr-4 text-right">Avg latency</th>
                 <th class="py-2">Status</th>
               </tr>
             </thead>
             <tbody id="workers-body">
-              <tr><td colspan="7" class="py-4 text-slate-500">Loading…</td></tr>
+              <tr><td colspan="8" class="py-4 text-slate-500">Loading…</td></tr>
             </tbody>
           </table>
         </div>
@@ -169,7 +171,7 @@ defmodule Coordinator.Web.DashboardController do
           if (workers.length === 0) {
             const tr = document.createElement('tr');
             const td = cell('No workers connected.', 'text-slate-500');
-            td.colSpan = 7;
+            td.colSpan = 8;
             tr.appendChild(td);
             body.appendChild(tr);
           }
@@ -180,6 +182,7 @@ defmodule Coordinator.Web.DashboardController do
             tr.appendChild(cell(w.execution_mode + (w.provider ? ' · ' + w.provider : '')));
             tr.appendChild(cell(String(w.models)));
             tr.appendChild(cell((w.capabilities || []).join(', '), 'text-slate-400 text-xs'));
+            tr.appendChild(cell((w.accepted_job_levels || []).join(', '), 'text-slate-400 text-xs'));
             tr.appendChild(cell(String(w.inflight), 'text-right'));
             tr.appendChild(cell(Math.round(w.avg_latency_ms) + ' ms', 'text-right text-slate-400'));
             tr.appendChild(cell(w.available ? 'available' : 'busy',
