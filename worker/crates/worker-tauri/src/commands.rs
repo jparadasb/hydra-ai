@@ -24,6 +24,17 @@ impl Commands {
         }
     }
 
+    /// Verify the session passphrase against the on-disk vault. Probing a name that does not
+    /// exist returns `Ok(None)` on the right passphrase (and on a fresh/absent vault), but a
+    /// decrypt error on the wrong one — so this cleanly rejects a bad unlock before any op
+    /// silently fails later.
+    pub fn verify_passphrase(&self) -> Result<(), String> {
+        self.vault
+            .get("__hydra_unlock_probe__")
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
     /// Store a provider token. The raw token enters here from the UI's secure input and is
     /// immediately moved into the vault; the UI gets back only a fingerprint.
     pub fn add_provider(&self, name: &str, raw_token: String) -> Result<ProviderView, String> {
@@ -175,9 +186,13 @@ mod tests {
     use worker_core::vault::EncryptedFileStore;
 
     fn commands(dir: &std::path::Path) -> Commands {
+        commands_with_pass(dir, "pass")
+    }
+
+    fn commands_with_pass(dir: &std::path::Path, pass: &str) -> Commands {
         let vault = Vault::new(Box::new(EncryptedFileStore::new(
             dir.join("vault.bin"),
-            "pass".into(),
+            pass.into(),
         )));
         let usage = JsonUsageStore::new(dir.join("usage.json")).unwrap();
         Commands::new(vault, usage)
@@ -206,6 +221,20 @@ mod tests {
         c.add_provider("openai", "sk-aaaa1111".into()).unwrap();
         c.remove_provider("openai").unwrap();
         assert!(c.list_providers(&["openai".into()]).is_empty());
+    }
+
+    #[test]
+    fn verify_passphrase_accepts_right_and_rejects_wrong() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create the vault with one passphrase and store something so a file exists.
+        commands_with_pass(dir.path(), "right")
+            .add_provider("openai", "sk-aaaa1111".into())
+            .unwrap();
+
+        // Right passphrase probes cleanly; a fresh/empty name is fine.
+        assert!(commands_with_pass(dir.path(), "right").verify_passphrase().is_ok());
+        // Wrong passphrase can't decrypt the existing vault -> rejected.
+        assert!(commands_with_pass(dir.path(), "wrong").verify_passphrase().is_err());
     }
 
     #[tokio::test]

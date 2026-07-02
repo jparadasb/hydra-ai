@@ -53,7 +53,10 @@ const OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OPENAI_ISSUER: &str = "https://auth.openai.com";
 const OPENAI_REDIRECT_PORT: u16 = 1455;
 const OPENAI_REDIRECT_PATH: &str = "/auth/callback";
-const OPENAI_SCOPES: &str = "openid profile email offline_access";
+// Match the Codex client's scopes exactly; the connectors scopes ride along with the
+// organization claim the api-key exchange needs.
+const OPENAI_SCOPES: &str =
+    "openid profile email offline_access api.connectors.read api.connectors.invoke";
 
 pub const FLAVOR_GOOGLE_CODE_ASSIST: &str = "google_code_assist";
 
@@ -485,7 +488,29 @@ pub async fn login_openai_mint_key(client: &reqwest::Client, mode: CaptureMode) 
         ])
         .send()
         .await?;
-    let exchange = expect_json(resp, "openai api-key exchange").await?;
+
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        // The mint only works for accounts that already have a platform (API) organization.
+        // A ChatGPT-only account has no org, so the id_token carries no organization_id.
+        if body.contains("organization_id") || body.contains("invalid_subject_token") {
+            return Err(Error::Other(
+                "Signed in, but no OpenAI API key could be minted: this account has no \
+                 platform organization. Create/enable API access at \
+                 https://platform.openai.com/ (Settings → Organization), then try again — or \
+                 add a key manually with `hydra-worker provider add openai`."
+                    .into(),
+            ));
+        }
+        return Err(Error::ProviderStatus {
+            status: status.as_u16(),
+            body: format!("openai api-key exchange: {}", crate::vault::redact(&body)),
+        });
+    }
+
+    let exchange: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| Error::Other(format!("openai api-key exchange: bad JSON: {e}")))?;
 
     exchange["access_token"]
         .as_str()

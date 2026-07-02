@@ -34,11 +34,14 @@ impl AppState {
     }
 }
 
-/// Unlock the vault for this session with the user's passphrase.
+/// Unlock the vault for this session. Rejects a passphrase that cannot decrypt an existing
+/// vault, so a wrong passphrase fails here rather than surfacing as a cryptic error on the
+/// first provider operation. A fresh/absent vault accepts any passphrase (it defines it).
 #[tauri::command]
-fn unlock(state: State<'_, AppState>, passphrase: String) -> bool {
+fn unlock(state: State<'_, AppState>, passphrase: String) -> Result<bool, String> {
+    support::build_commands(passphrase.clone()).verify_passphrase()?;
     *state.pass.lock().unwrap() = Some(passphrase);
-    true
+    Ok(true)
 }
 
 /// Current non-secret config for the UI (mode, providers, privacy, coordinator).
