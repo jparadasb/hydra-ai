@@ -88,6 +88,22 @@ fn add_provider(
     Ok(view)
 }
 
+/// Sign in to a provider with a browser (OAuth). `name` is `gemini` (Google / Code Assist) or
+/// `openai` (ChatGPT sign-in that mints an API key). Stores the credential in the vault and
+/// records the provider in config. Returns a masked fingerprint only.
+#[tauri::command]
+async fn login_provider(
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<ProviderView, String> {
+    let pass = state.passphrase()?;
+    let view = support::build_commands(pass).login_provider(&name).await?;
+    let mut cfg = support::ensure_config();
+    cfg.upsert_provider(&view.name, None);
+    support::save_config(&cfg).map_err(|e| e.to_string())?;
+    Ok(view)
+}
+
 /// Configured providers with masked fingerprints (never tokens).
 #[tauri::command]
 fn list_providers(state: State<'_, AppState>) -> Result<Vec<ProviderView>, String> {
@@ -185,6 +201,7 @@ fn main() {
             get_config,
             set_mode,
             add_provider,
+            login_provider,
             list_providers,
             test_provider,
             rotate_provider,

@@ -183,31 +183,58 @@ fn query_param(query: &str, key: &str) -> Option<String> {
 // Authorization-code capture (loopback + pasted-URL fallback)
 // ---------------------------------------------------------------------------
 
-/// Direct the user to `auth_url` and capture the authorization code. Completes on whichever
-/// comes first: the browser redirect hitting the loopback `listener`, or the user pasting
-/// the full redirect URL (`http://localhost:.../...?code=...`) on stdin. Verifies `state`.
-async fn capture_code(auth_url: &str, listener: TcpListener, expected_state: &str) -> Result<String> {
+/// How the authorization code is captured after the user consents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureMode {
+    /// Loopback redirect only. Use in a GUI (no console/stdin to paste into).
+    LoopbackOnly,
+    /// Loopback redirect, or a pasted redirect URL on stdin — for headless CLI use where
+    /// the browser runs on a different machine.
+    LoopbackOrPaste,
+}
+
+/// Direct the user to `auth_url` and capture the authorization code. Completes when the
+/// browser redirect hits the loopback `listener` — and, in [`CaptureMode::LoopbackOrPaste`],
+/// also if the user pastes the full redirect URL on stdin. Verifies `state`.
+async fn capture_code(
+    auth_url: &str,
+    listener: TcpListener,
+    expected_state: &str,
+    mode: CaptureMode,
+) -> Result<String> {
     println!("\nOpen this URL to sign in:\n\n  {auth_url}\n");
-    println!("If this machine has no browser, open it elsewhere and paste the final");
-    println!("localhost redirect URL here (the page will fail to load — that's fine):\n");
+    if mode == CaptureMode::LoopbackOrPaste {
+        println!("If this machine has no browser, open it elsewhere and paste the final");
+        println!("localhost redirect URL here (the page will fail to load — that's fine):\n");
+    }
     let _ = webbrowser::open(auth_url);
 
-    let stdin = tokio::io::BufReader::new(tokio::io::stdin());
-    let mut lines = stdin.lines();
-
-    let query = tokio::select! {
-        accepted = listener.accept() => {
-            let (mut stream, _) = accepted.map_err(|e| Error::Other(format!("loopback accept: {e}")))?;
+    let query = match mode {
+        CaptureMode::LoopbackOnly => {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .map_err(|e| Error::Other(format!("loopback accept: {e}")))?;
             read_request_query(&mut stream).await?
         }
-        line = lines.next_line() => {
-            let line = line
-                .map_err(|e| Error::Other(format!("stdin: {e}")))?
-                .ok_or_else(|| Error::Other("stdin closed before login completed".into()))?;
-            let line = line.trim();
-            line.split_once('?')
-                .map(|(_, q)| q.to_string())
-                .ok_or_else(|| Error::Other("pasted text has no ?code=... query".into()))?
+        CaptureMode::LoopbackOrPaste => {
+            let stdin = tokio::io::BufReader::new(tokio::io::stdin());
+            let mut lines = stdin.lines();
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (mut stream, _) = accepted.map_err(|e| Error::Other(format!("loopback accept: {e}")))?;
+                    read_request_query(&mut stream).await?
+                }
+                line = lines.next_line() => {
+                    let line = line
+                        .map_err(|e| Error::Other(format!("stdin: {e}")))?
+                        .ok_or_else(|| Error::Other("stdin closed before login completed".into()))?;
+                    let line = line.trim();
+                    line.split_once('?')
+                        .map(|(_, q)| q.to_string())
+                        .ok_or_else(|| Error::Other("pasted text has no ?code=... query".into()))?
+                }
+            }
         }
     };
 
@@ -264,7 +291,7 @@ async fn bind_loopback(port: u16) -> Result<(TcpListener, u16)> {
 // ---------------------------------------------------------------------------
 
 /// Full Google sign-in for Gemini: PKCE consent → token grant → Code Assist onboarding.
-pub async fn login_google(client: &reqwest::Client) -> Result<OAuthTokens> {
+pub async fn login_google(client: &reqwest::Client, mode: CaptureMode) -> Result<OAuthTokens> {
     let pkce = pkce();
     let state = random_state();
     let (listener, port) = bind_loopback(0).await?;
@@ -281,7 +308,7 @@ pub async fn login_google(client: &reqwest::Client) -> Result<OAuthTokens> {
         urlencode(&state),
     );
 
-    let code = capture_code(&auth_url, listener, &state).await?;
+    let code = capture_code(&auth_url, listener, &state, mode).await?;
 
     let resp = client
         .post(GOOGLE_TOKEN_URL)
@@ -412,7 +439,7 @@ async fn code_assist_onboard(client: &reqwest::Client, access_token: &str) -> Re
 // ---------------------------------------------------------------------------
 
 /// Sign in with ChatGPT and mint a standard OpenAI platform API key (the only thing kept).
-pub async fn login_openai_mint_key(client: &reqwest::Client) -> Result<String> {
+pub async fn login_openai_mint_key(client: &reqwest::Client, mode: CaptureMode) -> Result<String> {
     let pkce = pkce();
     let state = random_state();
     // The Codex client requires this exact loopback redirect.
@@ -428,7 +455,7 @@ pub async fn login_openai_mint_key(client: &reqwest::Client) -> Result<String> {
         urlencode(&state),
     );
 
-    let code = capture_code(&auth_url, listener, &state).await?;
+    let code = capture_code(&auth_url, listener, &state, mode).await?;
 
     let resp = client
         .post(format!("{OPENAI_ISSUER}/oauth/token"))

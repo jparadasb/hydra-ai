@@ -155,6 +155,22 @@ async function refreshProviders() {
   }
 }
 
+async function loginProvider(name, btn) {
+  const prev = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "opening browser…";
+  try {
+    const view = await call("login_provider", { name });
+    toast(`signed in: ${view.name} (${view.fingerprint})`);
+    refreshProviders();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prev;
+  }
+}
+$("#login-openai").addEventListener("click", (e) => loginProvider("openai", e.currentTarget));
+$("#login-gemini").addEventListener("click", (e) => loginProvider("gemini", e.currentTarget));
+
 $("#add-provider").addEventListener("click", async () => {
   const name = $("#p-name").value.trim();
   const baseUrl = $("#p-base").value.trim() || null;

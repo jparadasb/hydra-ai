@@ -74,10 +74,17 @@
         <section id="tab-providers" class="view hidden">
           <h1>Providers</h1>
           <p class="muted">Tokens are encrypted locally. The UI only ever sees a fingerprint.</p>
+          <div class="signin-row">
+            <span class="muted">Sign in with a browser:</span>
+            <button id="login-openai">Sign in with ChatGPT</button>
+            <button id="login-gemini">Sign in with Google (Gemini)</button>
+          </div>
+          <p class="fine">A browser window opens for consent; the credential is stored locally.
+            ChatGPT sign-in mints an OpenAI API key; Google sign-in uses Gemini Code Assist.</p>
           <div class="add-row">
             <input id="p-name" placeholder="provider (openai, anthropic, gemini, custom…)" />
             <input id="p-base" placeholder="base URL (required for custom)" />
-            <input id="p-token" type="password" placeholder="token (sk-…)" autocomplete="off" />
+            <input id="p-token" type="password" placeholder="or paste a token (sk-…)" autocomplete="off" />
             <button id="add-provider" class="primary">Add</button>
           </div>
           <table class="grid">

@@ -175,7 +175,12 @@ async fn cmd_provider(action: ProviderAction) {
         ProviderAction::Login { name } => {
             let http = reqwest::Client::new();
             match name.as_str() {
-                "gemini" | "google" => match worker_core::oauth::login_google(&http).await {
+                "gemini" | "google" => match worker_core::oauth::login_google(
+                    &http,
+                    worker_core::oauth::CaptureMode::LoopbackOrPaste,
+                )
+                .await
+                {
                     Ok(tokens) => {
                         let project = tokens.project_id.clone().unwrap_or_default();
                         let secret = Secret::new(tokens.to_vault_value());
@@ -193,7 +198,12 @@ async fn cmd_provider(action: ProviderAction) {
                     }
                     Err(e) => eprintln!("gemini login failed: {e}"),
                 },
-                _ => match worker_core::oauth::login_openai_mint_key(&http).await {
+                _ => match worker_core::oauth::login_openai_mint_key(
+                    &http,
+                    worker_core::oauth::CaptureMode::LoopbackOrPaste,
+                )
+                .await
+                {
                     Ok(api_key) => {
                         let secret = Secret::new(api_key);
                         let fp = secret.fingerprint();

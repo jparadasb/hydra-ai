@@ -104,6 +104,8 @@ button.danger { color: var(--danger); border-color: transparent; background: tra
 .add-row { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
 .add-row input { flex: 1; min-width: 140px; }
 .add-row button { flex: 0 0 auto; }
+.signin-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 12px 0; }
+.signin-row button:disabled { opacity: 0.6; cursor: default; }
 
 table.grid { width: 100%; border-collapse: collapse; }
 table.grid th {

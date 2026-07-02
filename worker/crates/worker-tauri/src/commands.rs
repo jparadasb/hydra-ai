@@ -2,6 +2,7 @@
 //! display-safe DTOs (see [`crate::dto`]).
 
 use worker_core::adapters::build_external_adapter;
+use worker_core::oauth::{self, CaptureMode};
 use worker_core::usage::{JsonUsageStore, UsageStore};
 use worker_core::vault::{Secret, Vault};
 
@@ -31,6 +32,45 @@ impl Commands {
         self.vault.add(name, secret).map_err(|e| e.to_string())?;
         Ok(ProviderView {
             name: name.to_string(),
+            fingerprint,
+            validated: false,
+        })
+    }
+
+    /// Sign in to a provider with a browser (OAuth), storing the resulting credential in the
+    /// vault. `gemini` uses a Google account (Code Assist); `openai` signs in with ChatGPT and
+    /// mints a platform API key. Loopback-only capture — the desktop browser redirects to the
+    /// local callback; there is no stdin paste fallback in the GUI. Returns a fingerprint only.
+    pub async fn login_provider(&self, name: &str) -> Result<ProviderView, String> {
+        // (canonical name, vault value, display fingerprint). Gemini stores a JSON OAuth blob,
+        // not a key, so we show a label rather than masking the JSON.
+        let (canonical, value, fingerprint) = match name {
+            "gemini" | "google" => {
+                let tokens = oauth::login_google(&self.http, CaptureMode::LoopbackOnly)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let label = match &tokens.project_id {
+                    Some(p) => format!("google-oauth · {p}"),
+                    None => "google-oauth".to_string(),
+                };
+                ("gemini", tokens.to_vault_value(), label)
+            }
+            "openai" | "chatgpt" => {
+                let key = oauth::login_openai_mint_key(&self.http, CaptureMode::LoopbackOnly)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let secret = Secret::new(key);
+                let fp = secret.fingerprint();
+                ("openai", secret.expose().to_string(), fp)
+            }
+            other => return Err(format!("provider '{other}' has no OAuth login")),
+        };
+
+        self.vault
+            .add(canonical, Secret::new(value))
+            .map_err(|e| e.to_string())?;
+        Ok(ProviderView {
+            name: canonical.to_string(),
             fingerprint,
             validated: false,
         })
@@ -166,5 +206,13 @@ mod tests {
         c.add_provider("openai", "sk-aaaa1111".into()).unwrap();
         c.remove_provider("openai").unwrap();
         assert!(c.list_providers(&["openai".into()]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn login_provider_rejects_unknown_provider_without_touching_the_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = commands(dir.path());
+        let err = c.login_provider("anthropic").await.unwrap_err();
+        assert!(err.contains("no OAuth login"), "{err}");
     }
 }
