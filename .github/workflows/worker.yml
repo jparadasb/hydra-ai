@@ -174,6 +174,9 @@ jobs:
           prerelease: true
           # Replace the whole asset set each run so stale binaries never linger.
           files: edge/*
+          # Auto-generate the changelog from commits/PRs the same way a real release does;
+          # GitHub appends it below the build-info body.
+          generate_release_notes: true
           body: |
             Rolling build of `hydra-worker` from the latest `main`.
 
