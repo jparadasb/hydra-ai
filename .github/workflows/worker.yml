@@ -1,8 +1,14 @@
 name: worker — build binaries & desktop apps
 
 # Builds the headless `hydra-worker` CLI for macOS / Windows / Linux, plus the Tauri desktop
-# app bundles. Artifacts are uploaded per-build; on a tag push (v*) they are attached to a
-# GitHub Release.
+# app bundles. Artifacts are uploaded per-build.
+#
+# Releases:
+#   * Tag push (v*)   -> a normal, permanent GitHub Release for that version (cli binaries via
+#                        softprops, desktop bundles via tauri-action).
+#   * Push to main    -> a single rolling **edge** prerelease that is overwritten every build,
+#                        so the newest binary always lives at a stable download URL:
+#                        https://github.com/<owner>/<repo>/releases/download/edge/hydra-worker-<target>
 
 on:
   push:
@@ -124,3 +130,56 @@ jobs:
             worker/crates/worker-app/target/release/bundle/**
             worker/crates/worker-app/target/*/release/bundle/**
           if-no-files-found: warn
+
+  # ---- rolling "edge" prerelease (every main build) ----------------------------------------
+  # Collects all per-target artifacts from this run and publishes them to a single, always-
+  # overwritten `edge` prerelease. Skipped for tag pushes (those cut a permanent release above).
+  edge-release:
+    needs: [cli, desktop]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts into a release dir
+        run: |
+          mkdir -p edge
+          # CLI binaries live directly under each hydra-worker-<target>/ artifact; desktop
+          # bundles are nested. Copy every regular file, keeping unique basenames.
+          find artifacts -type f \
+            \( -name 'hydra-worker-*' -o -name '*.deb' -o -name '*.AppImage' \
+               -o -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.msi' \
+               -o -name '*.exe' -o -name '*.rpm' \) \
+            -exec cp -f {} edge/ \;
+          echo "Staged for edge release:"
+          ls -la edge
+
+      - name: Move the edge tag to this commit
+        run: |
+          git tag -f edge
+          git push -f origin refs/tags/edge
+
+      - name: Publish/replace the edge prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: edge
+          name: hydra-worker (edge build)
+          prerelease: true
+          # Replace the whole asset set each run so stale binaries never linger.
+          files: edge/*
+          body: |
+            Rolling build of `hydra-worker` from the latest `main`.
+
+            * commit: ${{ github.sha }}
+            * built: ${{ github.run_id }} (${{ github.run_number }})
+
+            These binaries change on every push to `main` and are **not** a stable release —
+            use a `v*` tag release for that. Stable download URLs, e.g.
+            `…/releases/download/edge/hydra-worker-x86_64-unknown-linux-gnu`.
