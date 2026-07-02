@@ -159,6 +159,58 @@ defmodule Coordinator.ApiRouterTest do
              401
   end
 
+  describe "GET /v1/models" do
+    setup do
+      {:ok, _} =
+        Coordinator.WorkerRegistry.register(Coordinator.WorkerRegistry, %{
+          "worker_id" => "worker-models-test",
+          "execution_mode" => "local_model",
+          "provider" => %{"name" => "ollama"},
+          "models" => [
+            %{"name" => "llama3", "capabilities" => ["chat"], "uses_external_provider" => false},
+            %{"name" => "embed-x", "capabilities" => ["embeddings"], "uses_external_provider" => false}
+          ]
+        })
+
+      on_exit(fn -> Coordinator.WorkerRegistry.unregister("worker-models-test") end)
+      :ok
+    end
+
+    defp get_json(path, headers \\ []) do
+      conn = conn(:get, path)
+      conn = Enum.reduce(headers, conn, fn {k, v}, c -> put_req_header(c, k, v) end)
+      Coordinator.ApiRouter.call(conn, Coordinator.ApiRouter.init([]))
+    end
+
+    test "lists models advertised for the routing capability, OpenAI-shaped" do
+      conn = get_json("/v1/models")
+      assert conn.status == 200
+
+      body = Jason.decode!(conn.resp_body)
+      assert body["object"] == "list"
+      ids = Enum.map(body["data"], & &1["id"])
+      assert "llama3" in ids
+      # Models not serving the routing capability ("chat") are excluded.
+      refute "embed-x" in ids
+
+      model = Enum.find(body["data"], &(&1["id"] == "llama3"))
+      assert model["object"] == "model"
+      assert model["owned_by"] == "ollama"
+    end
+
+    test "fetches a single model by id, 404s an unknown one" do
+      assert get_json("/v1/models/llama3").status == 200
+      assert get_json("/v1/models/nope").status == 404
+    end
+
+    test "is behind the same bearer gate as chat completions" do
+      Application.put_env(:coordinator, :api_token, "secret-key")
+
+      assert get_json("/v1/models").status == 401
+      assert get_json("/v1/models", [{"authorization", "Bearer secret-key"}]).status == 200
+    end
+  end
+
   # Poll a function until it returns non-nil (the just-created job appears).
   defp wait_for(fun, tries \\ 100)
   defp wait_for(_fun, 0), do: flunk("job never appeared")

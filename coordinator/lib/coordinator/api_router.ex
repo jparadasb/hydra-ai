@@ -37,8 +37,54 @@ defmodule Coordinator.ApiRouter do
     end
   end
 
+  get "/v1/models" do
+    case authorize(conn) do
+      :ok -> json(conn, 200, %{"object" => "list", "data" => list_models()})
+      {:error, code, msg} -> error(conn, code, msg, "invalid_request_error")
+    end
+  end
+
+  get "/v1/models/:id" do
+    case authorize(conn) do
+      :ok ->
+        case Enum.find(list_models(), &(&1["id"] == id)) do
+          nil -> error(conn, 404, "model '#{id}' not found", "invalid_request_error")
+          model -> json(conn, 200, model)
+        end
+
+      {:error, code, msg} ->
+        error(conn, code, msg, "invalid_request_error")
+    end
+  end
+
   match _ do
     error(conn, 404, "unknown endpoint", "invalid_request_error")
+  end
+
+  # ---- models -------------------------------------------------------------------------------
+
+  # OpenAI-shaped model list, aggregated from the live worker registry: every model a connected
+  # worker advertises for the front-door's routing capability, deduped by name (first worker
+  # wins for `owned_by`). Reflects what a chat completion can actually be served by right now.
+  defp list_models do
+    capability = Application.get_env(:coordinator, :api_capability, "chat")
+    created = System.system_time(:second)
+
+    Coordinator.WorkerRegistry.list()
+    |> Enum.flat_map(fn worker ->
+      worker.models
+      |> Enum.filter(&(capability in &1.capabilities))
+      |> Enum.map(fn model ->
+        %{
+          "id" => model.name,
+          "object" => "model",
+          "created" => created,
+          "owned_by" => worker.provider_name || "hydra"
+        }
+      end)
+    end)
+    |> Enum.uniq_by(& &1["id"])
+    |> Enum.sort_by(& &1["id"])
   end
 
   # ---- chat completions ---------------------------------------------------------------------
