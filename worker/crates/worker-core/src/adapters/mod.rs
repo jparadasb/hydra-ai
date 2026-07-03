@@ -11,6 +11,7 @@ pub mod local_openai;
 pub mod ollama;
 pub mod openai_chatgpt;
 pub mod openai_compatible;
+pub(crate) mod tools;
 
 pub use anthropic::AnthropicAdapter;
 pub use gemini::GeminiAdapter;

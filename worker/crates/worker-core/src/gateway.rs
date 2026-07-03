@@ -190,12 +190,16 @@ impl Gateway {
                     r.commit_cost(cost);
                 }
                 self.record(&provider, &model, &resp.usage, cost, latency_ms, true);
+                let mut output = serde_json::json!({ "content": resp.content });
+                if let Some(calls) = &resp.tool_calls {
+                    output["tool_calls"] = serde_json::json!(calls);
+                }
                 JobResult {
                     job_id: job.job_id.clone(),
                     lease_id: job.lease_id.clone(),
                     status: JobStatus::Ok,
                     reason: None,
-                    output: Some(serde_json::json!({ "content": resp.content })),
+                    output: Some(output),
                     usage: Some(ResultUsage {
                         provider,
                         model,
@@ -257,6 +261,8 @@ fn parse_chat(model: &str, payload: &serde_json::Value) -> crate::error::Result<
             .get("temperature")
             .and_then(|v| v.as_f64())
             .map(|v| v as f32),
+        tools: payload.get("tools").filter(|v| !v.is_null()).cloned(),
+        tool_choice: payload.get("tool_choice").filter(|v| !v.is_null()).cloned(),
     })
 }
 

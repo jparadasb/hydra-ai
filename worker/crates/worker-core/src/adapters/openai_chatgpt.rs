@@ -15,10 +15,11 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
+use super::tools::{forced_function_name, function_defs};
 use crate::adapter::ProviderAdapter;
 use crate::error::{Error, Result};
 use crate::oauth::{refresh_openai, OAuthTokens};
-use crate::types::{ChatRequest, ChatResponse, ModelInfo, Usage};
+use crate::types::{ChatRequest, ChatResponse, ModelInfo, ToolCall, ToolCallFunction, Usage};
 
 const DEFAULT_BASE: &str = "https://chatgpt.com/backend-api/codex";
 const REFRESH_MARGIN_SECONDS: u64 = 60;
@@ -118,17 +119,19 @@ impl ProviderAdapter for ChatGptBackendAdapter {
             });
         }
 
-        let (content, usage) = parse_responses_sse(&text);
+        let (content, tool_calls, usage) = parse_responses_sse(&text);
         Ok(ChatResponse {
             model: req.model,
             content,
+            tool_calls,
             usage,
         })
     }
 }
 
 /// Map a normalized chat request into a Codex Responses request body. The system message
-/// becomes `instructions`; the rest become `input` messages.
+/// becomes `instructions`; the rest become `input` items — assistant tool calls as
+/// `function_call` items and `role:"tool"` results as `function_call_output` items.
 fn build_responses_body(req: &ChatRequest) -> Value {
     let mut instructions = String::new();
     let mut input = Vec::new();
@@ -140,9 +143,26 @@ fn build_responses_body(req: &ChatRequest) -> Value {
                 }
                 instructions.push_str(&m.content);
             }
-            "assistant" | "model" => input.push(json!({
-                "type": "message", "role": "assistant",
-                "content": [{ "type": "output_text", "text": m.content }]
+            "assistant" | "model" => {
+                if !m.content.is_empty() || m.tool_calls.is_none() {
+                    input.push(json!({
+                        "type": "message", "role": "assistant",
+                        "content": [{ "type": "output_text", "text": m.content }]
+                    }));
+                }
+                for c in m.tool_calls.as_deref().unwrap_or_default() {
+                    input.push(json!({
+                        "type": "function_call",
+                        "call_id": c.id,
+                        "name": c.function.name,
+                        "arguments": c.function.arguments,
+                    }));
+                }
+            }
+            "tool" => input.push(json!({
+                "type": "function_call_output",
+                "call_id": m.tool_call_id.clone().unwrap_or_default(),
+                "output": m.content,
             })),
             _ => input.push(json!({
                 "type": "message", "role": "user",
@@ -161,14 +181,34 @@ fn build_responses_body(req: &ChatRequest) -> Value {
     if let Some(mt) = req.max_tokens {
         body["max_output_tokens"] = json!(mt);
     }
+    if let Some(tools) = &req.tools {
+        // Responses flattens the OpenAI chat tool wrapper: {type, name, description, parameters}.
+        body["tools"] = json!(function_defs(tools)
+            .iter()
+            .map(|f| json!({
+                "type": "function",
+                "name": f.name,
+                "description": f.description.unwrap_or_default(),
+                "parameters": f.parameters.cloned().unwrap_or_else(|| json!({ "type": "object" })),
+            }))
+            .collect::<Vec<_>>());
+        if let Some(choice) = &req.tool_choice {
+            body["tool_choice"] = match forced_function_name(choice) {
+                Some(name) => json!({ "type": "function", "name": name }),
+                None => choice.clone(),
+            };
+        }
+    }
     body
 }
 
-/// Parse a Responses SSE stream (full body) into (text, usage). Prefers the terminal
-/// `response.completed` event's output; falls back to accumulated `output_text.delta`s.
-fn parse_responses_sse(body: &str) -> (String, Usage) {
+/// Parse a Responses SSE stream (full body) into (text, tool calls, usage). Prefers the
+/// terminal `response.completed` event's output; falls back to accumulated
+/// `output_text.delta`s.
+fn parse_responses_sse(body: &str) -> (String, Option<Vec<ToolCall>>, Usage) {
     let mut delta = String::new();
     let mut final_text: Option<String> = None;
+    let mut tool_calls = Vec::new();
     let mut usage = Usage::default();
 
     for line in body.lines() {
@@ -193,6 +233,7 @@ fn parse_responses_sse(body: &str) -> (String, Usage) {
             "response.completed" => {
                 let response = &ev["response"];
                 final_text = extract_output_text(response).or(final_text.take());
+                tool_calls = extract_function_calls(response);
                 usage = extract_usage(&response["usage"]);
             }
             _ => {}
@@ -200,7 +241,30 @@ fn parse_responses_sse(body: &str) -> (String, Usage) {
     }
 
     let content = final_text.filter(|s| !s.is_empty()).unwrap_or(delta);
-    (content, usage)
+    (content, (!tool_calls.is_empty()).then_some(tool_calls), usage)
+}
+
+/// Pull `function_call` output items from a Responses `response` object, in OpenAI chat shape.
+fn extract_function_calls(response: &Value) -> Vec<ToolCall> {
+    response["output"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter(|item| item["type"].as_str() == Some("function_call"))
+        .map(|item| ToolCall {
+            id: item["call_id"]
+                .as_str()
+                .or(item["id"].as_str())
+                .unwrap_or_default()
+                .to_string(),
+            kind: "function".to_string(),
+            function: ToolCallFunction {
+                name: item["name"].as_str().unwrap_or_default().to_string(),
+                arguments: item["arguments"].as_str().unwrap_or("{}").to_string(),
+            },
+        })
+        .collect()
 }
 
 /// Pull the concatenated assistant text from a Responses `response` object's `output` array.
@@ -256,10 +320,24 @@ mod tests {
             "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello there\"}]}],\"usage\":{\"input_tokens\":4,\"output_tokens\":2}}}\n\n",
             "data: [DONE]\n\n",
         );
-        let (text, usage) = parse_responses_sse(sse);
+        let (text, tool_calls, usage) = parse_responses_sse(sse);
         assert_eq!(text, "Hello there");
+        assert!(tool_calls.is_none());
         assert_eq!(usage.input_tokens, 4);
         assert_eq!(usage.output_tokens, 2);
+    }
+
+    #[test]
+    fn sse_parse_extracts_function_calls() {
+        let sse = concat!(
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_9\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"a.txt\\\"}\"}],\"usage\":{\"input_tokens\":4,\"output_tokens\":2}}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let (_text, tool_calls, _usage) = parse_responses_sse(sse);
+        let calls = tool_calls.expect("tool calls parsed");
+        assert_eq!(calls[0].id, "call_9");
+        assert_eq!(calls[0].function.name, "read_file");
+        assert_eq!(calls[0].function.arguments, "{\"path\":\"a.txt\"}");
     }
 
     #[test]
@@ -268,7 +346,7 @@ mod tests {
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"par\"}\n\n",
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"tial\"}\n\n",
         );
-        let (text, _usage) = parse_responses_sse(sse);
+        let (text, _tool_calls, _usage) = parse_responses_sse(sse);
         assert_eq!(text, "partial");
     }
 
@@ -297,11 +375,13 @@ mod tests {
             .run_chat_completion(ChatRequest {
                 model: "gpt-5".into(),
                 messages: vec![
-                    ChatMessage { role: "system".into(), content: "be brief".into() },
-                    ChatMessage { role: "user".into(), content: "hi".into() },
+                    ChatMessage { role: "system".into(), content: "be brief".into(), ..Default::default() },
+                    ChatMessage { role: "user".into(), content: "hi".into(), ..Default::default() },
                 ],
                 max_tokens: None,
                 temperature: None,
+                tools: None,
+                tool_choice: None,
             })
             .await
             .unwrap();

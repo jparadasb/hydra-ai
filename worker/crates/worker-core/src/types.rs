@@ -45,18 +45,77 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    /// OpenAI-shaped tool definitions (`[{"type":"function","function":{...}}]`), kept as raw
+    /// JSON: OpenAI-style backends take them verbatim, other adapters translate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<serde_json::Value>,
+    /// OpenAI-shaped tool choice: `"auto"`, `"none"`, `"required"`, or
+    /// `{"type":"function","function":{"name":...}}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: String,
+    /// Message text. OpenAI clients send `null` on assistant tool-call turns and sometimes an
+    /// array of content parts; both normalize to a plain string here.
+    #[serde(default, deserialize_with = "content_as_string")]
+    pub content: String,
+    /// Tool calls made on an assistant turn (OpenAI wire shape).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
+    /// For `role: "tool"` messages: which call this result answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+/// One tool invocation requested by the model (OpenAI wire shape).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    #[serde(rename = "type", default = "function_call_type")]
+    pub kind: String,
+    pub function: ToolCallFunction,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatMessage {
-    pub role: String,
-    pub content: String,
+pub struct ToolCallFunction {
+    pub name: String,
+    /// JSON-encoded arguments, as OpenAI emits them.
+    #[serde(default)]
+    pub arguments: String,
+}
+
+fn function_call_type() -> String {
+    "function".to_string()
+}
+
+/// Accept `"text"`, `null`, or `[{"type":"text","text":...}, ...]` for message content.
+fn content_as_string<'de, D>(de: D) -> std::result::Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(de)?;
+    Ok(match value {
+        serde_json::Value::String(s) => s,
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Array(parts) => parts
+            .iter()
+            .filter_map(|p| p["text"].as_str())
+            .collect::<Vec<_>>()
+            .join(""),
+        other => other.to_string(),
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatResponse {
     pub model: String,
     pub content: String,
+    /// Tool calls the model wants executed (only when the request offered tools).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
     pub usage: Usage,
 }
 

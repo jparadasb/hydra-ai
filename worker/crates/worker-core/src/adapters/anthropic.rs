@@ -6,9 +6,13 @@ use reqwest::Client;
 use serde_json::json;
 
 use super::openai_compatible::parse_json;
+use super::tools::{forced_function_name, function_defs, parse_arguments};
 use crate::adapter::ProviderAdapter;
 use crate::error::Result;
-use crate::types::{ChatRequest, ChatResponse, ModelInfo, Usage, VisionRequest, VisionResponse};
+use crate::types::{
+    ChatRequest, ChatResponse, ModelInfo, ToolCall, ToolCallFunction, Usage, VisionRequest,
+    VisionResponse,
+};
 use crate::vault::Secret;
 
 const API_VERSION: &str = "2023-06-01";
@@ -39,18 +43,73 @@ impl AnthropicAdapter {
             .header("anthropic-version", API_VERSION)
     }
 
-    /// Split out an optional leading system message; Anthropic wants it top-level.
+    /// Split out an optional leading system message (Anthropic wants it top-level) and map the
+    /// rest into Anthropic messages: assistant tool calls become `tool_use` content blocks and
+    /// OpenAI `role:"tool"` results become user-message `tool_result` blocks (consecutive tool
+    /// results merge into one user message, as the API requires).
     fn split_system(req: &ChatRequest) -> (Option<String>, serde_json::Value) {
         let mut system = None;
-        let mut msgs = Vec::new();
+        let mut msgs: Vec<serde_json::Value> = Vec::new();
         for m in &req.messages {
-            if m.role == "system" {
-                system = Some(m.content.clone());
-            } else {
-                msgs.push(json!({ "role": m.role, "content": m.content }));
+            match m.role.as_str() {
+                "system" => system = Some(m.content.clone()),
+                "assistant" if m.tool_calls.is_some() => {
+                    let mut blocks = Vec::new();
+                    if !m.content.is_empty() {
+                        blocks.push(json!({ "type": "text", "text": m.content }));
+                    }
+                    for c in m.tool_calls.as_deref().unwrap_or_default() {
+                        blocks.push(json!({
+                            "type": "tool_use",
+                            "id": c.id,
+                            "name": c.function.name,
+                            "input": parse_arguments(&c.function.arguments),
+                        }));
+                    }
+                    msgs.push(json!({ "role": "assistant", "content": blocks }));
+                }
+                "tool" => {
+                    let block = json!({
+                        "type": "tool_result",
+                        "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
+                        "content": m.content,
+                    });
+                    match msgs.last_mut().filter(|l| {
+                        l["role"] == "user" && l["content"][0]["type"] == "tool_result"
+                    }) {
+                        Some(last) => last["content"].as_array_mut().unwrap().push(block),
+                        None => msgs.push(json!({ "role": "user", "content": [block] })),
+                    }
+                }
+                _ => msgs.push(json!({ "role": m.role, "content": m.content })),
             }
         }
         (system, json!(msgs))
+    }
+}
+
+/// OpenAI tool definitions → Anthropic `tools` (`input_schema` instead of `parameters`).
+fn anthropic_tools(tools: &serde_json::Value) -> serde_json::Value {
+    json!(function_defs(tools)
+        .iter()
+        .map(|f| json!({
+            "name": f.name,
+            "description": f.description.unwrap_or_default(),
+            "input_schema": f.parameters.cloned().unwrap_or_else(|| json!({ "type": "object" })),
+        }))
+        .collect::<Vec<_>>())
+}
+
+/// OpenAI `tool_choice` → Anthropic `tool_choice`. `"none"` maps to no field (callers should
+/// simply not send tools for that case, but a bare auto is the safest fallback).
+fn anthropic_tool_choice(choice: &serde_json::Value) -> serde_json::Value {
+    if let Some(name) = forced_function_name(choice) {
+        return json!({ "type": "tool", "name": name });
+    }
+    match choice.as_str() {
+        Some("required") => json!({ "type": "any" }),
+        Some("none") => json!({ "type": "none" }),
+        _ => json!({ "type": "auto" }),
     }
 }
 
@@ -114,6 +173,12 @@ impl ProviderAdapter for AnthropicAdapter {
         if let Some(t) = req.temperature {
             body["temperature"] = json!(t);
         }
+        if let Some(tools) = &req.tools {
+            body["tools"] = anthropic_tools(tools);
+            if let Some(choice) = &req.tool_choice {
+                body["tool_choice"] = anthropic_tool_choice(choice);
+            }
+        }
 
         let resp = self
             .req(self.client.post(format!("{}/messages", self.base_url)))
@@ -122,10 +187,23 @@ impl ProviderAdapter for AnthropicAdapter {
             .await?;
         let value = parse_json(resp).await?;
 
-        let content = value["content"][0]["text"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
+        // Concatenate text blocks; map tool_use blocks back to the OpenAI call shape.
+        let mut content = String::new();
+        let mut tool_calls = Vec::new();
+        for block in value["content"].as_array().map(Vec::as_slice).unwrap_or_default() {
+            match block["type"].as_str() {
+                Some("text") => content.push_str(block["text"].as_str().unwrap_or_default()),
+                Some("tool_use") => tool_calls.push(ToolCall {
+                    id: block["id"].as_str().unwrap_or_default().to_string(),
+                    kind: "function".to_string(),
+                    function: ToolCallFunction {
+                        name: block["name"].as_str().unwrap_or_default().to_string(),
+                        arguments: block["input"].to_string(),
+                    },
+                }),
+                _ => {}
+            }
+        }
         let usage = Usage {
             input_tokens: value["usage"]["input_tokens"].as_u64().unwrap_or(0),
             output_tokens: value["usage"]["output_tokens"].as_u64().unwrap_or(0),
@@ -134,6 +212,7 @@ impl ProviderAdapter for AnthropicAdapter {
         Ok(ChatResponse {
             model: req.model,
             content,
+            tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
             usage,
         })
     }

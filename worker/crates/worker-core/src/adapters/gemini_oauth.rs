@@ -182,9 +182,12 @@ mod tests {
                 messages: vec![ChatMessage {
                     role: "user".into(),
                     content: "hi".into(),
+                    ..Default::default()
                 }],
                 max_tokens: None,
                 temperature: None,
+                tools: None,
+                tool_choice: None,
             })
             .await
             .unwrap();

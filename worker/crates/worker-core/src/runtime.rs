@@ -84,9 +84,12 @@ pub async fn benchmark(adapter: &dyn ProviderAdapter, model: &str) -> BenchmarkR
         messages: vec![ChatMessage {
             role: "user".into(),
             content: "Reply with the single word: ok".into(),
+            ..Default::default()
         }],
         max_tokens: Some(16),
         temperature: Some(0.0),
+        tools: None,
+        tool_choice: None,
     };
     let start = Instant::now();
     match adapter.run_chat_completion(req).await {

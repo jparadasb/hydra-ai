@@ -8,7 +8,7 @@ use serde_json::json;
 
 use crate::adapter::ProviderAdapter;
 use crate::error::{Error, Result};
-use crate::types::{ChatRequest, ChatResponse, ModelInfo, Usage};
+use crate::types::{ChatRequest, ChatResponse, ModelInfo, ToolCall, Usage};
 use crate::vault::Secret;
 
 /// Per-1M-token pricing used by `estimate_cost`, when known.
@@ -154,6 +154,12 @@ pub(crate) async fn oai_chat(
     if let Some(t) = req.temperature {
         body["temperature"] = json!(t);
     }
+    if let Some(tools) = &req.tools {
+        body["tools"] = tools.clone();
+    }
+    if let Some(choice) = &req.tool_choice {
+        body["tool_choice"] = choice.clone();
+    }
 
     let resp = auth(client.post(format!("{base_url}/chat/completions")), bearer)
         .json(&body)
@@ -161,10 +167,12 @@ pub(crate) async fn oai_chat(
         .await?;
     let value = parse_json(resp).await?;
 
-    let content = value["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
+    let message = &value["choices"][0]["message"];
+    let content = message["content"].as_str().unwrap_or_default().to_string();
+    // Same wire shape as ours, so this is a straight decode; absent/empty means no calls.
+    let tool_calls = serde_json::from_value::<Vec<ToolCall>>(message["tool_calls"].clone())
+        .ok()
+        .filter(|calls| !calls.is_empty());
     let usage = Usage {
         input_tokens: value["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
         output_tokens: value["usage"]["completion_tokens"].as_u64().unwrap_or(0),
@@ -173,6 +181,7 @@ pub(crate) async fn oai_chat(
     Ok(ChatResponse {
         model: req.model,
         content,
+        tool_calls,
         usage,
     })
 }

@@ -47,6 +47,18 @@ impl ProviderAdapter for FakeAdapter {
         Ok(ChatResponse {
             model: req.model,
             content: self.reply.into(),
+            // Echo tool requests back as a canned call, so tests can assert the
+            // tools → adapter → result round-trip through the gateway.
+            tool_calls: req.tools.as_ref().map(|_| {
+                vec![worker_core::types::ToolCall {
+                    id: "call_1".into(),
+                    kind: "function".into(),
+                    function: worker_core::types::ToolCallFunction {
+                        name: "get_weather".into(),
+                        arguments: "{\"city\":\"Berlin\"}".into(),
+                    },
+                }]
+            }),
             usage: Usage {
                 input_tokens: 5,
                 output_tokens: 3,
@@ -176,6 +188,33 @@ async fn requested_model_is_honored_over_default_ordering() {
     let usage = r.usage.unwrap();
     assert_eq!(usage.provider, "openai");
     assert_eq!(usage.model, "openai-model");
+}
+
+#[tokio::test]
+async fn tools_flow_through_payload_and_tool_calls_surface_in_output() {
+    let g = gateway_with(RoutingPolicy::default()).await;
+    let mut j = job(PrivacyLevel::Public, false);
+    j.payload = json!({
+        "messages": [{ "role": "user", "content": "weather?" }],
+        "tools": [{ "type": "function", "function": { "name": "get_weather", "parameters": {} } }],
+        "tool_choice": "auto"
+    });
+
+    let r = g.execute(&j).await;
+    assert_eq!(r.status, JobStatus::Ok);
+    let output = r.output.unwrap();
+    let call = &output["tool_calls"][0];
+    assert_eq!(call["id"], "call_1");
+    assert_eq!(call["type"], "function");
+    assert_eq!(call["function"]["name"], "get_weather");
+    assert_eq!(call["function"]["arguments"], "{\"city\":\"Berlin\"}");
+}
+
+#[tokio::test]
+async fn plain_chat_output_has_no_tool_calls_key() {
+    let g = gateway_with(RoutingPolicy::default()).await;
+    let r = g.execute(&job(PrivacyLevel::Public, false)).await;
+    assert!(r.output.unwrap().get("tool_calls").is_none());
 }
 
 #[tokio::test]

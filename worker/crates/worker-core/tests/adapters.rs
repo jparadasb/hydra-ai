@@ -18,10 +18,30 @@ fn chat(model: &str) -> ChatRequest {
         messages: vec![ChatMessage {
             role: "user".into(),
             content: "hi".into(),
+            ..Default::default()
         }],
         max_tokens: Some(64),
         temperature: None,
+        tools: None,
+        tool_choice: None,
     }
+}
+
+/// OpenAI-shaped tool definitions as an opencode-style client sends them.
+fn weather_tools() -> serde_json::Value {
+    json!([{
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the weather",
+            "parameters": {
+                "type": "object",
+                "properties": { "city": { "type": "string" } },
+                "required": ["city"],
+                "additionalProperties": false
+            }
+        }
+    }])
 }
 
 #[tokio::test]
@@ -103,6 +123,7 @@ async fn anthropic_chat_splits_system() {
         ChatMessage {
             role: "system".into(),
             content: "be terse".into(),
+            ..Default::default()
         },
     );
     let resp = a.run_chat_completion(req).await.unwrap();
@@ -200,4 +221,205 @@ async fn ollama_is_local_and_maps_counts() {
     assert_eq!(resp.content, "local-reply");
     assert_eq!(resp.usage.input_tokens, 20);
     assert_eq!(resp.usage.output_tokens, 8);
+}
+
+#[tokio::test]
+async fn openai_compatible_passes_tools_and_maps_tool_calls() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(wiremock::matchers::body_partial_json(json!({
+            "tools": weather_tools(),
+            "tool_choice": "auto"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "message": {
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_abc",
+                        "type": "function",
+                        "function": { "name": "get_weather", "arguments": "{\"city\":\"Berlin\"}" }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": { "prompt_tokens": 11, "completion_tokens": 6 }
+        })))
+        .mount(&server)
+        .await;
+
+    let a = OpenAICompatibleAdapter::new("openai", server.uri(), Secret::new("sk-t"), Client::new());
+    let mut req = chat("gpt-4.1-mini");
+    req.tools = Some(weather_tools());
+    req.tool_choice = Some(json!("auto"));
+    let resp = a.run_chat_completion(req).await.unwrap();
+
+    assert_eq!(resp.content, "");
+    let calls = resp.tool_calls.expect("tool calls mapped");
+    assert_eq!(calls[0].id, "call_abc");
+    assert_eq!(calls[0].function.name, "get_weather");
+    assert_eq!(calls[0].function.arguments, "{\"city\":\"Berlin\"}");
+}
+
+#[tokio::test]
+async fn ollama_translates_tool_arguments_between_object_and_string() {
+    let server = MockServer::start().await;
+    // Ollama returns `arguments` as a JSON object and has no call ids.
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .and(wiremock::matchers::body_partial_json(json!({
+            "tools": weather_tools()
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "message": {
+                "content": "",
+                "tool_calls": [{ "function": { "name": "get_weather", "arguments": { "city": "Berlin" } } }]
+            },
+            "prompt_eval_count": 5,
+            "eval_count": 3
+        })))
+        .mount(&server)
+        .await;
+
+    let a = OllamaAdapter::with_endpoint(server.uri(), Client::new());
+    let mut req = chat("qwen3:8b");
+    req.tools = Some(weather_tools());
+    let resp = a.run_chat_completion(req).await.unwrap();
+
+    let calls = resp.tool_calls.expect("tool calls mapped");
+    assert_eq!(calls[0].id, "call_0");
+    assert_eq!(calls[0].function.name, "get_weather");
+    // Object arguments come back JSON-encoded, as OpenAI clients expect.
+    assert_eq!(calls[0].function.arguments, "{\"city\":\"Berlin\"}");
+}
+
+#[tokio::test]
+async fn anthropic_translates_tools_and_tool_use_blocks() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/messages"))
+        .and(wiremock::matchers::body_partial_json(json!({
+            "tools": [{
+                "name": "get_weather",
+                "description": "Get the weather",
+                "input_schema": {
+                    "type": "object",
+                    "properties": { "city": { "type": "string" } },
+                    "required": ["city"],
+                    "additionalProperties": false
+                }
+            }],
+            "tool_choice": { "type": "auto" }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "content": [
+                { "type": "text", "text": "checking" },
+                { "type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": { "city": "Berlin" } }
+            ],
+            "stop_reason": "tool_use",
+            "usage": { "input_tokens": 9, "output_tokens": 4 }
+        })))
+        .mount(&server)
+        .await;
+
+    let a = AnthropicAdapter::with_base_url(server.uri(), Secret::new("sk-ant"), Client::new());
+    let mut req = chat("claude-x");
+    req.tools = Some(weather_tools());
+    req.tool_choice = Some(json!("auto"));
+    let resp = a.run_chat_completion(req).await.unwrap();
+
+    assert_eq!(resp.content, "checking");
+    let calls = resp.tool_calls.expect("tool_use mapped to tool calls");
+    assert_eq!(calls[0].id, "toolu_1");
+    assert_eq!(calls[0].function.name, "get_weather");
+    assert_eq!(calls[0].function.arguments, "{\"city\":\"Berlin\"}");
+}
+
+#[tokio::test]
+async fn anthropic_maps_tool_history_to_tool_use_and_tool_result_blocks() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/messages"))
+        .and(wiremock::matchers::body_partial_json(json!({
+            "messages": [
+                { "role": "user", "content": "hi" },
+                { "role": "assistant", "content": [
+                    { "type": "tool_use", "id": "call_1", "name": "get_weather", "input": { "city": "Berlin" } }
+                ]},
+                { "role": "user", "content": [
+                    { "type": "tool_result", "tool_use_id": "call_1", "content": "18C" }
+                ]}
+            ]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "content": [{ "type": "text", "text": "18 degrees" }],
+            "usage": { "input_tokens": 20, "output_tokens": 5 }
+        })))
+        .mount(&server)
+        .await;
+
+    let a = AnthropicAdapter::with_base_url(server.uri(), Secret::new("sk-ant"), Client::new());
+    let mut req = chat("claude-x");
+    req.messages.push(ChatMessage {
+        role: "assistant".into(),
+        content: "".into(),
+        tool_calls: Some(vec![worker_core::types::ToolCall {
+            id: "call_1".into(),
+            kind: "function".into(),
+            function: worker_core::types::ToolCallFunction {
+                name: "get_weather".into(),
+                arguments: "{\"city\":\"Berlin\"}".into(),
+            },
+        }]),
+        ..Default::default()
+    });
+    req.messages.push(ChatMessage {
+        role: "tool".into(),
+        content: "18C".into(),
+        tool_call_id: Some("call_1".into()),
+        ..Default::default()
+    });
+
+    let resp = a.run_chat_completion(req).await.unwrap();
+    assert_eq!(resp.content, "18 degrees");
+    assert!(resp.tool_calls.is_none());
+}
+
+#[tokio::test]
+async fn gemini_translates_function_declarations_and_calls() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/models/.*:generateContent$"))
+        .and(wiremock::matchers::body_partial_json(json!({
+            // additionalProperties must be scrubbed for Gemini's schema dialect.
+            "tools": [{ "functionDeclarations": [{
+                "name": "get_weather",
+                "description": "Get the weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "city": { "type": "string" } },
+                    "required": ["city"]
+                }
+            }]}],
+            "toolConfig": { "functionCallingConfig": { "mode": "AUTO" } }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "candidates": [{ "content": { "parts": [
+                { "functionCall": { "name": "get_weather", "args": { "city": "Berlin" } } }
+            ]}}],
+            "usageMetadata": { "promptTokenCount": 8, "candidatesTokenCount": 3 }
+        })))
+        .mount(&server)
+        .await;
+
+    let a = GeminiAdapter::with_base_url(server.uri(), Secret::new("AIza-t"), Client::new());
+    let mut req = chat("gemini-2.5-flash");
+    req.tools = Some(weather_tools());
+    req.tool_choice = Some(json!("auto"));
+    let resp = a.run_chat_completion(req).await.unwrap();
+
+    let calls = resp.tool_calls.expect("functionCall mapped");
+    assert_eq!(calls[0].function.name, "get_weather");
+    assert_eq!(calls[0].function.arguments, "{\"city\":\"Berlin\"}");
 }

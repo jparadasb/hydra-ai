@@ -6,9 +6,10 @@ use reqwest::Client;
 use serde_json::json;
 
 use super::openai_compatible::parse_json;
+use super::tools::parse_arguments;
 use crate::adapter::ProviderAdapter;
 use crate::error::Result;
-use crate::types::{ChatRequest, ChatResponse, ModelInfo, Usage};
+use crate::types::{ChatRequest, ChatResponse, ModelInfo, ToolCall, ToolCallFunction, Usage};
 
 pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:11434";
 
@@ -81,11 +82,15 @@ impl ProviderAdapter for OllamaAdapter {
     }
 
     async fn run_chat_completion(&self, req: ChatRequest) -> Result<ChatResponse> {
-        let body = json!({
+        let mut body = json!({
             "model": req.model,
-            "messages": req.messages,
+            "messages": build_messages(&req),
             "stream": false,
         });
+        // Ollama takes OpenAI-shaped tool definitions verbatim (it has no tool_choice knob).
+        if let Some(tools) = &req.tools {
+            body["tools"] = tools.clone();
+        }
         let resp = self
             .client
             .post(format!("{}/api/chat", self.endpoint))
@@ -98,6 +103,7 @@ impl ProviderAdapter for OllamaAdapter {
             .as_str()
             .unwrap_or_default()
             .to_string();
+        let tool_calls = parse_tool_calls(&value["message"]["tool_calls"]);
         let usage = Usage {
             input_tokens: value["prompt_eval_count"].as_u64().unwrap_or(0),
             output_tokens: value["eval_count"].as_u64().unwrap_or(0),
@@ -106,7 +112,53 @@ impl ProviderAdapter for OllamaAdapter {
         Ok(ChatResponse {
             model: req.model,
             content,
+            tool_calls,
             usage,
         })
     }
+}
+
+/// Ollama's message shape differs from OpenAI's in one spot: tool-call `arguments` is a JSON
+/// *object*, not an encoded string. It also has no call ids, so `tool_call_id` is dropped on
+/// the way in (tool results follow their call by position).
+fn build_messages(req: &ChatRequest) -> Vec<serde_json::Value> {
+    req.messages
+        .iter()
+        .map(|m| {
+            let mut msg = json!({ "role": m.role, "content": m.content });
+            if let Some(calls) = &m.tool_calls {
+                msg["tool_calls"] = json!(calls
+                    .iter()
+                    .map(|c| json!({
+                        "function": {
+                            "name": c.function.name,
+                            "arguments": parse_arguments(&c.function.arguments),
+                        }
+                    }))
+                    .collect::<Vec<_>>());
+            }
+            msg
+        })
+        .collect()
+}
+
+/// Map Ollama tool calls back to the OpenAI shape, synthesizing the ids Ollama doesn't have.
+fn parse_tool_calls(value: &serde_json::Value) -> Option<Vec<ToolCall>> {
+    let calls: Vec<ToolCall> = value
+        .as_array()?
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| {
+            let f = &c["function"];
+            Some(ToolCall {
+                id: format!("call_{i}"),
+                kind: "function".to_string(),
+                function: ToolCallFunction {
+                    name: f["name"].as_str()?.to_string(),
+                    arguments: f["arguments"].to_string(),
+                },
+            })
+        })
+        .collect();
+    (!calls.is_empty()).then_some(calls)
 }
