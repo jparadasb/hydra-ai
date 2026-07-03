@@ -83,10 +83,15 @@ mod tests {
 
     #[test]
     fn build_commands_roundtrips_a_provider() {
-        // Uses the default vault path with a temp passphrase; just checks the wiring holds.
+        // Isolate the config/vault dir so this never touches (or is broken by) a real vault at
+        // the user's default path. `directories` honors XDG_CONFIG_HOME on Linux.
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", tmp.path());
+        std::env::set_var("XDG_DATA_HOME", tmp.path());
+
         let cmds = build_commands("test-pass");
         let view = cmds.add_provider("smoke-test-provider", "sk-smoke-9999".into());
-        assert!(view.is_ok());
+        assert!(view.is_ok(), "wiring should round-trip in an isolated dir");
         let v = view.unwrap();
         assert_eq!(v.fingerprint, "sk-...9999");
         let _ = cmds.remove_provider("smoke-test-provider");

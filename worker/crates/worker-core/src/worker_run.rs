@@ -31,6 +31,10 @@ pub struct RunStatus {
     jobs_processed: AtomicU64,
     started_unix: AtomicI64,
     last_error: Mutex<Option<String>>,
+    // The coordinator URL + worker id this run resolved to, so the UI can show exactly which
+    // coordinator it is talking to (removes the "am I pointing at the right one?" ambiguity).
+    coordinator_url: Mutex<Option<String>>,
+    worker_id: Mutex<Option<String>>,
 }
 
 /// Serializable snapshot handed to the UI.
@@ -41,6 +45,10 @@ pub struct RunStatusView {
     pub jobs_processed: u64,
     pub started_unix: i64,
     pub last_error: Option<String>,
+    /// The coordinator URL this run is using (resolved from override/env/config/bake/default).
+    pub coordinator_url: Option<String>,
+    /// The machine-derived worker id this run presents.
+    pub worker_id: Option<String>,
 }
 
 impl RunStatus {
@@ -55,6 +63,12 @@ impl RunStatus {
         self.jobs_processed.store(0, Ordering::SeqCst);
         self.started_unix.store(now_unix(), Ordering::SeqCst);
         *self.last_error.lock().unwrap() = None;
+    }
+
+    /// Record which coordinator + identity this run resolved to (for the UI).
+    pub fn set_endpoint(&self, coordinator_url: String, worker_id: String) {
+        *self.coordinator_url.lock().unwrap() = Some(coordinator_url);
+        *self.worker_id.lock().unwrap() = Some(worker_id);
     }
 
     /// Set the live socket-connected flag.
@@ -88,6 +102,8 @@ impl RunStatus {
             jobs_processed: self.jobs_processed.load(Ordering::SeqCst),
             started_unix: self.started_unix.load(Ordering::SeqCst),
             last_error: self.last_error.lock().unwrap().clone(),
+            coordinator_url: self.coordinator_url.lock().unwrap().clone(),
+            worker_id: self.worker_id.lock().unwrap().clone(),
         }
     }
 }
@@ -128,6 +144,9 @@ pub async fn build_and_run(params: RunParams, status: Arc<RunStatus>) -> Result<
     cfg.worker_id = machine_worker_id();
     let url = resolve_coordinator_url(params.coordinator_url, &cfg);
     let join_token = resolve_join_token(params.join_token);
+    // Surface the resolved target to the UI immediately (before the connect attempt), so the
+    // user can confirm which coordinator this worker is pointing at.
+    status.set_endpoint(url.clone(), cfg.worker_id.clone());
 
     let vault = Vault::new(Box::new(EncryptedFileStore::new(
         EncryptedFileStore::default_path(),

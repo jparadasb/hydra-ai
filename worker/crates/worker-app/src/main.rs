@@ -56,7 +56,11 @@ fn get_config() -> serde_json::Value {
     json!({
         "worker_id": cfg.worker_id,
         "execution_mode": mode_str(cfg.execution_mode),
+        // The URL saved in config (may be null), plus what a run would actually resolve to
+        // (env / config / build-time bake / default) so the UI can show the effective target.
         "coordinator_url": cfg.coordinator_url,
+        "resolved_coordinator_url":
+            worker_core::worker_run::resolve_coordinator_url(None, &cfg),
         "providers": cfg.providers.iter().map(|p| &p.name).collect::<Vec<_>>(),
         "routing_preference": pref_str(cfg.routing.preference),
         "external_allowed_levels": cfg
@@ -66,6 +70,21 @@ fn get_config() -> serde_json::Value {
             .map(|l| level_str(*l))
             .collect::<Vec<_>>(),
     })
+}
+
+/// Persist the coordinator URL in config (blank clears it → falls back to env/bake/default).
+/// Returns the URL a run would now resolve to, so the UI can confirm the effective target.
+#[tauri::command]
+fn set_coordinator_url(url: String) -> Result<String, String> {
+    let mut cfg = support::ensure_config();
+    let trimmed = url.trim();
+    cfg.coordinator_url = if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    };
+    support::save_config(&cfg).map_err(|e| e.to_string())?;
+    Ok(worker_core::worker_run::resolve_coordinator_url(None, &cfg))
 }
 
 /// Choose execution mode: `local` | `provider` | `both`.
@@ -213,6 +232,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             unlock,
             get_config,
+            set_coordinator_url,
             set_mode,
             add_provider,
             login_provider,

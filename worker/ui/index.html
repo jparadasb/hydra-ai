@@ -40,14 +40,27 @@
         <section id="tab-run" class="view">
           <h1>Run</h1>
           <p class="muted">Connect to the coordinator and process leased jobs.</p>
+
+          <div class="coord-box">
+            <div class="coord-label">This worker will connect to:</div>
+            <div id="coord-effective" class="coord-url mono">—</div>
+          </div>
           <div class="add-row">
-            <input id="r-url" placeholder="coordinator URL — blank uses config / default" />
+            <input id="r-url" placeholder="coordinator URL e.g. wss://hydra.lambdatauri.dev" />
+            <button id="save-url">Save as default</button>
+          </div>
+          <p class="fine">Blank clears the saved URL (falls back to the built-in default). The box
+            above always shows the URL a run will actually use.</p>
+
+          <div class="add-row">
             <button id="start-worker" class="primary">Start</button>
             <button id="stop-worker" class="danger">Stop</button>
           </div>
           <div class="status-card">
             <div class="status-head"><span id="run-dot" class="dot off"></span> <b id="run-state">stopped</b></div>
             <dl class="status-grid">
+              <dt>Coordinator</dt><dd id="run-coord" class="mono">—</dd>
+              <dt>Worker id</dt><dd id="run-wid" class="mono">—</dd>
               <dt>Connected</dt><dd id="run-connected">no</dd>
               <dt>Jobs processed</dt><dd id="run-jobs">0</dd>
               <dt>Started</dt><dd id="run-started">—</dd>

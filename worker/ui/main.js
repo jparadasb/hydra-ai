@@ -69,13 +69,23 @@ async function loadConfig() {
   const ext = cfg.external_allowed_levels || [];
   $$(".ext").forEach((c) => (c.checked = ext.includes(c.value)));
   $("#pref").value = cfg.routing_preference;
-  if (cfg.coordinator_url && !$("#r-url").value) $("#r-url").placeholder = cfg.coordinator_url;
+  // Show the URL a run will actually use (resolved from config / env / bake / default), and
+  // prefill the input with the saved config value if any.
+  $("#coord-effective").textContent = cfg.resolved_coordinator_url || "(default)";
+  if (cfg.coordinator_url && !$("#r-url").value) $("#r-url").value = cfg.coordinator_url;
 }
+
+$("#save-url").addEventListener("click", async () => {
+  const resolved = await call("set_coordinator_url", { url: $("#r-url").value.trim() });
+  $("#coord-effective").textContent = resolved || "(default)";
+  toast("coordinator set: " + (resolved || "default"));
+});
 
 // ---- Run (start / stop / live status) ----
 $("#start-worker").addEventListener("click", async () => {
-  const url = $("#r-url").value.trim() || null;
-  await call("start_worker", { coordinator_url: url });
+  // Start uses the saved config URL (resolved) — no per-start override, so what you see in the
+  // "connect to" box is exactly what it uses. Save a URL first to change it.
+  await call("start_worker", { coordinator_url: null });
   toast("worker starting…");
   pollStatus();
 });
@@ -100,6 +110,8 @@ async function pollStatus() {
   const state = s.running ? (s.connected ? "connected" : "connecting…") : "stopped";
   const cls = s.running ? (s.connected ? "on" : "warn") : "off";
   $("#run-state").textContent = state;
+  if (s.coordinator_url) $("#run-coord").textContent = s.coordinator_url;
+  if (s.worker_id) $("#run-wid").textContent = s.worker_id;
   $("#run-connected").textContent = s.connected ? "yes" : "no";
   $("#run-jobs").textContent = s.jobs_processed;
   $("#run-started").textContent = s.running ? fmtTime(s.started_unix) : "—";
