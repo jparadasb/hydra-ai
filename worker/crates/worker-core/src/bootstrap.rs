@@ -52,3 +52,62 @@ pub fn build_registry(
 
     registry
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oauth::{OAuthTokens, FLAVOR_GOOGLE_CODE_ASSIST};
+    use crate::vault::{EncryptedFileStore, Secret};
+
+    // A worker configured with a Gemini OAuth provider must advertise that provider's models
+    // (with non-empty capabilities) in its catalog — i.e. build_registry -> adapter ->
+    // list_models produces the capabilities the coordinator routes on.
+    #[tokio::test]
+    async fn external_gemini_oauth_provider_advertises_capabilities() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::new(Box::new(EncryptedFileStore::new(
+            dir.path().join("vault.bin"),
+            "pass".into(),
+        )));
+
+        let blob = OAuthTokens {
+            flavor: FLAVOR_GOOGLE_CODE_ASSIST.into(),
+            access_token: "ya29.test".into(),
+            refresh_token: Some("1//r".into()),
+            expires_at_unix: crate::oauth::now_unix() + 3600,
+            project_id: Some("proj-1".into()),
+        }
+        .to_vault_value();
+        vault.add("gemini", Secret::new(blob)).unwrap();
+
+        let mut cfg = WorkerConfig::new("w-gemini", ExecutionMode::ExternalProvider);
+        cfg.upsert_provider("gemini", None);
+
+        let registry = build_registry(&cfg, &vault, reqwest::Client::new());
+        let adapter = registry.get("gemini").expect("gemini adapter must be registered");
+        let models = adapter.list_models().await.expect("Code Assist list_models is static");
+
+        assert!(!models.is_empty(), "gemini OAuth provider advertised no models");
+        assert!(
+            models.iter().all(|m| !m.capabilities.is_empty()),
+            "gemini models advertised empty capabilities"
+        );
+        assert!(models.iter().any(|m| m.capabilities.iter().any(|c| c == "chat")));
+    }
+
+    // Control: an ExternalProvider worker with NO providers in config builds no external
+    // adapter, so its catalog is empty — reproducing the "capabilities are empty" symptom.
+    #[tokio::test]
+    async fn external_worker_without_configured_provider_has_no_adapters() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::new(Box::new(EncryptedFileStore::new(
+            dir.path().join("vault.bin"),
+            "pass".into(),
+        )));
+        // execution_mode is external, but no providers configured.
+        let cfg = WorkerConfig::new("w-empty", ExecutionMode::ExternalProvider);
+
+        let registry = build_registry(&cfg, &vault, reqwest::Client::new());
+        assert!(registry.get("gemini").is_err(), "no provider should be registered");
+    }
+}
