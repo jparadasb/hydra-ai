@@ -114,7 +114,8 @@ defmodule Coordinator.ApiRouter do
           error(conn, 422, "job rejected: #{reason}", "invalid_request_error")
 
         {:ok, %{"reason" => reason}} ->
-          error(conn, 502, "worker error: #{reason}", "api_error")
+          {status, type} = classify_worker_error(reason)
+          error(conn, status, "worker error: #{reason}", type)
 
         {:ok, _} ->
           error(conn, 502, "worker returned no usable output", "api_error")
@@ -216,6 +217,25 @@ defmodule Coordinator.ApiRouter do
         "total_tokens" => input + output
       }
     }
+  end
+
+  # Map a worker error into an HTTP status + OpenAI error type. When the worker reports an
+  # upstream provider status (e.g. `provider returned status 429`), pass that through so
+  # clients see the real cause (rate limit, bad request) instead of a generic 502 — and so an
+  # edge proxy like Cloudflare, which masks 5xx bodies with its own error page, doesn't hide
+  # it. Upstream 5xx collapse to 502 (bad gateway); anything unrecognized stays 502.
+  defp classify_worker_error(reason) do
+    case Regex.run(~r/status (\d{3})/, to_string(reason)) do
+      [_, code] ->
+        case String.to_integer(code) do
+          429 -> {429, "rate_limit_error"}
+          c when c in 400..499 -> {c, "invalid_request_error"}
+          _ -> {502, "api_error"}
+        end
+
+      _ ->
+        {502, "api_error"}
+    end
   end
 
   # ---- OpenAI streaming (SSE) ---------------------------------------------------------------

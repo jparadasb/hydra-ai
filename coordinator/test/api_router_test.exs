@@ -125,6 +125,35 @@ defmodule Coordinator.ApiRouterTest do
     assert body["usage"]["total_tokens"] == 5
   end
 
+  test "an upstream provider 429 is passed through as 429, not masked as 502" do
+    nonce = "apirate-#{System.unique_integer([:positive])}"
+
+    task =
+      Task.async(fn ->
+        post("/v1/chat/completions", %{
+          "messages" => [%{"role" => "user", "content" => nonce}],
+          "model" => "gemini-2.5-pro",
+          "timeout_ms" => 5000
+        })
+      end)
+
+    job_id = wait_for(fn -> find_job_id(nonce) end)
+
+    Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {
+      :job_result,
+      %{
+        "job_id" => job_id,
+        "status" => "error",
+        "reason" => "provider_error: provider returned status 429: rate limited"
+      }
+    })
+
+    conn = Task.await(task, 6000)
+    assert conn.status == 429
+    body = Jason.decode!(conn.resp_body)
+    assert body["error"]["type"] == "rate_limit_error"
+  end
+
   test "stream:true returns an SSE chat.completion.chunk stream ending with [DONE]" do
     nonce = "apistream-#{System.unique_integer([:positive])}"
 
