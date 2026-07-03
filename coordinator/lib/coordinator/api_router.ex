@@ -30,6 +30,19 @@ defmodule Coordinator.ApiRouter do
     json(conn, 200, %{"status" => "ok"})
   end
 
+  # Public API documentation. `/openapi.json` is an OpenAPI 3.0 spec (import it straight into
+  # Postman: Import → Link → https://<host>/openapi.json), `/docs` renders it for humans. Both
+  # are unauthenticated so the docs are discoverable without a key.
+  get "/openapi.json" do
+    json(conn, 200, Coordinator.OpenApi.spec(server_url(conn)))
+  end
+
+  get "/docs" do
+    conn
+    |> put_resp_content_type("text/html")
+    |> send_resp(200, Coordinator.OpenApi.docs_html())
+  end
+
   post "/v1/chat/completions" do
     case authorize(conn) do
       :ok -> chat_completion(conn)
@@ -354,6 +367,21 @@ defmodule Coordinator.ApiRouter do
   defp parse_int(n) when is_integer(n), do: n
   defp parse_int(n) when is_binary(n), do: with({i, _} <- Integer.parse(n), do: i, else: (_ -> nil))
   defp parse_int(_), do: nil
+
+  # Public base URL as the client reached us (honoring the ingress/Cloudflare forwarded proto),
+  # so the OpenAPI `servers` entry points back at whatever host was used.
+  defp server_url(conn) do
+    proto =
+      case get_req_header(conn, "x-forwarded-proto") do
+        [p | _] -> p
+        _ -> to_string(conn.scheme)
+      end
+
+    host =
+      if conn.port in [80, 443, nil], do: conn.host, else: "#{conn.host}:#{conn.port}"
+
+    "#{proto}://#{host}"
+  end
 
   defp json(conn, status, body) do
     conn

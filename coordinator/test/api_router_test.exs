@@ -60,6 +60,38 @@ defmodule Coordinator.ApiRouterTest do
     assert Jason.decode!(conn.resp_body)["status"] == "ok"
   end
 
+  test "GET /openapi.json serves a public OpenAPI 3 spec importable by Postman" do
+    conn = conn(:get, "/openapi.json") |> Coordinator.ApiRouter.call(Coordinator.ApiRouter.init([]))
+    assert conn.status == 200
+    spec = Jason.decode!(conn.resp_body)
+    assert spec["openapi"] =~ "3.0"
+    assert spec["paths"]["/v1/chat/completions"]["post"]
+    assert spec["paths"]["/v1/models"]["get"]
+    assert spec["components"]["securitySchemes"]["bearerAuth"]["scheme"] == "bearer"
+    assert [%{"url" => url}] = spec["servers"]
+    assert url =~ "://"
+  end
+
+  test "GET /docs serves the human docs page (public)" do
+    conn = conn(:get, "/docs") |> Coordinator.ApiRouter.call(Coordinator.ApiRouter.init([]))
+    assert conn.status == 200
+    assert get_resp_header(conn, "content-type") |> hd() =~ "text/html"
+    assert conn.resp_body =~ "redoc"
+    assert conn.resp_body =~ "/openapi.json"
+  end
+
+  test "docs + spec stay public even when an API token is required" do
+    Application.put_env(:coordinator, :api_token, "secret-key")
+    on_exit(fn -> Application.delete_env(:coordinator, :api_token) end)
+
+    call = fn path -> conn(:get, path) |> Coordinator.ApiRouter.call(Coordinator.ApiRouter.init([])) end
+    assert call.("/openapi.json").status == 200
+    assert call.("/docs").status == 200
+    # …while the API itself still requires the bearer.
+    assert post("/v1/chat/completions", %{"messages" => [%{"role" => "user", "content" => "x"}]}).status ==
+             401
+  end
+
   test "unknown path 404s with an OpenAI-shaped error" do
     conn = post("/v1/nope", %{})
     assert conn.status == 404
