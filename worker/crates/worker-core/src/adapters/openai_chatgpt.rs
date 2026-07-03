@@ -184,6 +184,8 @@ fn build_responses_body(req: &ChatRequest) -> Value {
         }
     }
 
+    // NOTE: no `max_output_tokens` — the ChatGPT (Codex) backend rejects it with
+    // 400 "Unsupported parameter", so `req.max_tokens` is deliberately ignored here.
     let mut body = json!({
         "model": req.model,
         "instructions": instructions,
@@ -191,9 +193,6 @@ fn build_responses_body(req: &ChatRequest) -> Value {
         "stream": true,
         "store": false,
     });
-    if let Some(mt) = req.max_tokens {
-        body["max_output_tokens"] = json!(mt);
-    }
     if let Some(tools) = &req.tools {
         // Responses flattens the OpenAI chat tool wrapper: {type, name, description, parameters}.
         body["tools"] = json!(function_defs(tools)
