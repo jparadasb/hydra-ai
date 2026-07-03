@@ -13,6 +13,9 @@ defmodule Coordinator.Job do
           capability: String.t(),
           privacy: privacy(),
           allow_external_providers: boolean(),
+          # Requested model name (from the OpenAI `model` param), if any. Used to route the job
+          # to a worker that actually serves that model — see `Coordinator.Router`.
+          model: String.t() | nil,
           payload: map()
         }
 
@@ -21,6 +24,7 @@ defmodule Coordinator.Job do
             capability: nil,
             privacy: :public,
             allow_external_providers: false,
+            model: nil,
             payload: %{}
 
   def privacy_levels, do: @privacy_levels

@@ -125,6 +125,55 @@ defmodule Coordinator.ApiRouterTest do
     assert body["usage"]["total_tokens"] == 5
   end
 
+  test "stream:true returns an SSE chat.completion.chunk stream ending with [DONE]" do
+    nonce = "apistream-#{System.unique_integer([:positive])}"
+
+    task =
+      Task.async(fn ->
+        post("/v1/chat/completions", %{
+          "messages" => [%{"role" => "user", "content" => nonce}],
+          "model" => "llama3",
+          "stream" => true,
+          "timeout_ms" => 5000
+        })
+      end)
+
+    job_id = wait_for(fn -> find_job_id(nonce) end)
+
+    Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {
+      :job_result,
+      %{
+        "job_id" => job_id,
+        "status" => "ok",
+        "output" => %{"content" => "streamed hello"},
+        "usage" => %{"model" => "llama3", "input_tokens" => 4, "output_tokens" => 2}
+      }
+    })
+
+    conn = Task.await(task, 6000)
+    assert conn.status == 200
+    assert get_resp_header(conn, "content-type") |> hd() =~ "text/event-stream"
+
+    body = conn.resp_body
+    assert body =~ "chat.completion.chunk"
+    assert body =~ ~s("content":"streamed hello")
+    assert body =~ ~s("finish_reason":"stop")
+    assert body =~ "data: [DONE]"
+
+    # The content-carrying chunk parses as a valid streaming delta.
+    chunk =
+      body
+      |> String.split("\n\n", trim: true)
+      |> Enum.find_value(fn "data: " <> json ->
+        case Jason.decode(json) do
+          {:ok, %{"choices" => [%{"delta" => %{"content" => "streamed hello"}}]} = m} -> m
+          _ -> nil
+        end
+      end)
+
+    assert chunk["object"] == "chat.completion.chunk"
+  end
+
   test "bearer token required when :api_token is set" do
     Application.put_env(:coordinator, :api_token, "secret-key")
     msg = %{"messages" => [%{"role" => "user", "content" => "hi"}], "timeout_ms" => 150}

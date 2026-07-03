@@ -97,11 +97,16 @@ defmodule Coordinator.ApiRouter do
     # results we receive in the meantime are harmless.
     Phoenix.PubSub.subscribe(Coordinator.PubSub, "job_results")
 
+    stream? = params["stream"] in [true, "true"]
+
     with {:ok, messages} <- fetch_messages(params),
          timeout = resolve_timeout(conn, params),
          payload = build_payload(params, messages),
          {:ok, record} <- submit(payload) do
       case await_result(record.id, timeout) do
+        {:ok, %{"status" => "ok"} = result} when stream? ->
+          stream_completion(conn, record.id, params, result)
+
         {:ok, %{"status" => "ok"} = result} ->
           json(conn, 200, openai_completion(record.id, params, result))
 
@@ -211,6 +216,71 @@ defmodule Coordinator.ApiRouter do
         "total_tokens" => input + output
       }
     }
+  end
+
+  # ---- OpenAI streaming (SSE) ---------------------------------------------------------------
+
+  # Emit the completion as an OpenAI `chat.completion.chunk` SSE stream. The worker returns the
+  # full result in one shot (no token streaming end-to-end), so we frame it as a role delta, a
+  # single content delta, a finish chunk, an optional usage chunk, then `[DONE]`. This is what
+  # AI-SDK / OpenAI streaming clients (e.g. opencode) require: without it they wait on a stream
+  # that never arrives and end up with an empty message.
+  defp stream_completion(conn, job_id, params, result) do
+    content = get_in(result, ["output", "content"]) || ""
+    usage = result["usage"] || %{}
+    input = usage["input_tokens"] || 0
+    output = usage["output_tokens"] || 0
+    model = usage["model"] || params["model"] || "hydra"
+    id = "chatcmpl-" <> job_id
+    created = System.system_time(:second)
+
+    chunk_map = fn delta, finish ->
+      %{
+        "id" => id,
+        "object" => "chat.completion.chunk",
+        "created" => created,
+        "model" => model,
+        "choices" => [%{"index" => 0, "delta" => delta, "finish_reason" => finish}]
+      }
+    end
+
+    usage_chunk = %{
+      "id" => id,
+      "object" => "chat.completion.chunk",
+      "created" => created,
+      "model" => model,
+      "choices" => [],
+      "usage" => %{
+        "prompt_tokens" => input,
+        "completion_tokens" => output,
+        "total_tokens" => input + output
+      }
+    }
+
+    conn =
+      conn
+      |> put_resp_content_type("text/event-stream")
+      |> put_resp_header("cache-control", "no-cache")
+      # Ask nginx/proxies not to buffer, so chunks flush immediately (also avoids the proxy
+      # closing an idle-looking connection during a long generation).
+      |> put_resp_header("x-accel-buffering", "no")
+      |> send_chunked(200)
+
+    events =
+      [
+        chunk_map.(%{"role" => "assistant"}, nil),
+        chunk_map.(%{"content" => content}, nil),
+        chunk_map.(%{}, "stop"),
+        usage_chunk
+      ]
+      |> Enum.map(&("data: " <> Jason.encode!(&1) <> "\n\n"))
+
+    Enum.reduce_while(events ++ ["data: [DONE]\n\n"], conn, fn event, conn ->
+      case chunk(conn, event) do
+        {:ok, conn} -> {:cont, conn}
+        {:error, _} -> {:halt, conn}
+      end
+    end)
   end
 
   # ---- auth + helpers -----------------------------------------------------------------------

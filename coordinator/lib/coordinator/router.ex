@@ -24,9 +24,22 @@ defmodule Coordinator.Router do
   def route(%Job{} = job, workers) when is_list(workers) do
     workers
     |> Enum.filter(&eligible?(job, &1))
+    |> prefer_requested_model(job)
     |> case do
       [] -> {:error, :no_eligible_worker}
       eligible -> {:ok, Enum.min_by(eligible, &score(job, &1))}
+    end
+  end
+
+  # Honor the OpenAI `model` param: if any eligible worker actually serves the requested model,
+  # restrict routing to those workers (so `model: qwen…` doesn't get answered by gemma). If no
+  # connected worker serves it, fall back to all eligible workers (best-effort availability).
+  defp prefer_requested_model(eligible, %Job{model: nil}), do: eligible
+
+  defp prefer_requested_model(eligible, %Job{model: model} = job) do
+    case Enum.filter(eligible, &Worker.serves_model?(&1, job.capability, model)) do
+      [] -> eligible
+      with_model -> with_model
     end
   end
 

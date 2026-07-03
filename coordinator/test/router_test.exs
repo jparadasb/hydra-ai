@@ -43,6 +43,22 @@ defmodule Coordinator.RouterTest do
     assert {:ok, %{worker_id: "local"}} = Router.route(job(:public), [local, ext])
   end
 
+  test "requested model routes to a worker that serves it, over local preference" do
+    qwen = worker("qwen-box", models: [model(false)])
+    gpt = worker("gpt-box", models: [model(true)])
+    j = %{job(:public, true) | model: "gpt"}
+
+    # Without model preference, local (qwen-box) wins; requesting "gpt" flips it to gpt-box.
+    assert {:ok, %{worker_id: "gpt-box"}} = Router.route(j, [qwen, gpt])
+  end
+
+  test "requested model falls back to any capable worker when none serve it" do
+    qwen = worker("qwen-box", models: [model(false)])
+    j = %{job(:public, true) | model: "nonexistent-model"}
+    # No worker serves it -> best-effort route to a capable worker rather than failing.
+    assert {:ok, %{worker_id: "qwen-box"}} = Router.route(j, [qwen])
+  end
+
   test "local_only excludes external-only workers" do
     ext = worker("ext", models: [model(true)])
     assert {:error, :no_eligible_worker} = Router.route(job(:local_only), [ext])

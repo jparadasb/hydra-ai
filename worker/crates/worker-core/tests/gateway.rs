@@ -161,6 +161,24 @@ async fn private_routes_external_only_when_permitted() {
 }
 
 #[tokio::test]
+async fn requested_model_is_honored_over_default_ordering() {
+    // PreferLocal would normally pick the local "ollama-model"; requesting "openai-model"
+    // must route to that exact model instead (bug: gateway served whatever was first).
+    let g = gateway_with(RoutingPolicy::default()).await;
+    let mut j = job(PrivacyLevel::Public, true);
+    j.payload = json!({
+        "messages": [{ "role": "user", "content": "hi" }],
+        "model": "openai-model"
+    });
+
+    let r = g.execute(&j).await;
+    assert_eq!(r.status, JobStatus::Ok);
+    let usage = r.usage.unwrap();
+    assert_eq!(usage.provider, "openai");
+    assert_eq!(usage.model, "openai-model");
+}
+
+#[tokio::test]
 async fn result_carries_no_secret() {
     let g = gateway_with(RoutingPolicy::default()).await;
     let r = g.execute(&job(PrivacyLevel::Public, false)).await;

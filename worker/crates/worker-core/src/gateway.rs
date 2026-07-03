@@ -111,10 +111,20 @@ impl Gateway {
             usage: None,
         };
 
-        // 1. Pick the first candidate allowed by the privacy policy.
+        // 1. Pick the first candidate allowed by the privacy policy. If the job requested a
+        //    specific model, prefer the candidate serving that exact model (over the default
+        //    first-capable one) so `model: qwen…` isn't answered by whatever model happens to
+        //    be first. Falls back to any capable model when the requested one isn't available.
+        let requested_model = job.payload.get("model").and_then(|v| v.as_str());
+        let mut candidates = self.candidates_for(&job.capability);
+        if let Some(req) = requested_model {
+            // Stable sort keeps the local-first ordering within each group.
+            candidates.sort_by_key(|c| c.model.name != req);
+        }
+
         let mut chosen: Option<Candidate> = None;
         let mut last_denial: Option<&'static str> = None;
-        for cand in self.candidates_for(&job.capability) {
+        for cand in candidates {
             match privacy::check(
                 job.privacy,
                 job.allow_external_providers,

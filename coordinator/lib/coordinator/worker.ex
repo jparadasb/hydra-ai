@@ -63,6 +63,10 @@ defmodule Coordinator.Worker do
   def serves?(%__MODULE__{models: models}, capability),
     do: Enum.any?(models, &(capability in &1.capabilities))
 
+  @doc "Does this worker advertise a model named `model_name` that serves `capability`?"
+  def serves_model?(%__MODULE__{models: models}, capability, model_name),
+    do: Enum.any?(models, &(&1.name == model_name and capability in &1.capabilities))
+
   @doc "Is this worker external-only (no local model available)?"
   def external_only?(%__MODULE__{models: models}),
     do: models != [] and Enum.all?(models, & &1.uses_external_provider)

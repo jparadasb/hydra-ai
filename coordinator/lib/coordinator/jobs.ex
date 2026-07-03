@@ -44,6 +44,7 @@ defmodule Coordinator.Jobs do
       capability: r.capability,
       privacy: Job.parse_privacy(r.privacy),
       allow_external_providers: r.allow_external_providers,
+      model: r.payload["model"],
       payload: r.payload
     }
   end
