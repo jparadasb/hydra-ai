@@ -9,14 +9,20 @@ boundary.
 | module | role |
 |--------|------|
 | `Coordinator.SecretGuard`    | strips/rejects secret-shaped payloads (defense in depth) |
-| `Coordinator.Job`            | job + privacy levels (`public`/`private`/`sensitive`/`local_only`) |
+| `Coordinator.Job`            | job + privacy levels (`public`/`private`/`sensitive`/`local_only`) + requested model |
 | `Coordinator.Worker`         | a registered worker's non-secret capability snapshot |
-| `Coordinator.Router`         | privacy-aware routing + scheduling score |
-| `Coordinator.WorkerRegistry` | live in-memory worker set (GenServer; source of truth) |
+| `Coordinator.Router`         | privacy- and model-aware routing + scheduling score |
+| `Coordinator.Presence`       | cluster-wide connected-worker set (`Phoenix.Presence` + libcluster) |
+| `Coordinator.WorkerRegistry` | reads/writes the worker set via Presence (route/list + track/update) |
+| `Coordinator.WorkerPolicies` | admin-granted per-worker privacy levels (on `worker_keys`) |
 | `Coordinator.WorkerSession`  | channel-boundary logic (`WorkerChannel` wraps this) |
-| `Coordinator.WorkerChannel`  | per-worker Phoenix Channel (registration in, leases out) |
-| `Coordinator.Jobs`           | durable job/lease lifecycle (Ecto + SQLite) |
+| `Coordinator.WorkerChannel`  | per-worker Phoenix Channel (registration + presence + leases out) |
+| `Coordinator.DeviceAuth`     | Ed25519 trust-on-first-use device-key auth (`worker_keys`) |
+| `Coordinator.Jobs`           | durable job/lease lifecycle (Ecto) |
 | `Coordinator.LeaseWorker`    | Oban worker that assigns pending jobs via the Router |
+| `Coordinator.ApiRouter`      | OpenAI-compatible front-door (`/v1/*`, streaming, `/openapi.json`, `/docs`) |
+| `Coordinator.OpenApi`        | OpenAPI 3 spec + Redoc docs page for the public API |
+| `Coordinator.Web.*`          | admin console: API keys, workers, dashboard, Oban (GitHub-OAuth gated) |
 
 ## Durability
 
@@ -65,10 +71,14 @@ WebSocket, registers, is leased a job, and returns a secret-free result.
 | sensitive   | not external-provider by default (must have a local model) |
 | local_only  | must not use an external provider |
 
-## Remaining integration (production layer)
+Which levels a worker may accept is granted by an admin (`Coordinator.WorkerPolicies`,
+`/admin/workers`), not declared by the worker. Requested-model routing is layered on top: a
+job's `model` restricts eligibility to workers serving that model when any do.
 
-* **`WorkerChannel` (Phoenix.Channel)** — persistent worker link; `join`/`handle_in` delegate
-  to `Coordinator.WorkerSession`, which already runs `SecretGuard` on every inbound payload.
-* **Oban + Ecto/Postgres** — durable job + lease persistence and re-queue on worker
-  rejection/timeout. The routing decision (`Coordinator.Router`) is already implemented and
-  tested; this adds durability and the transport endpoint.
+## Public API + admin
+
+`Coordinator.ApiRouter` serves the OpenAI-compatible front-door: `POST /v1/chat/completions`
+(with `stream: true` SSE), `GET /v1/models[/{id}]`, `GET /health`, and public docs at
+`/openapi.json` (OpenAPI 3 — Postman-importable) + `/docs` (Redoc). The admin console
+(`Coordinator.Web.*`, GitHub-OAuth gated in prod) issues gateway API keys and shows
+workers/dashboard/Oban. See the root `README.md` for env config and clustering.

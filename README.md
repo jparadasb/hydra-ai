@@ -5,6 +5,10 @@ running on users' machines. Each worker is a **local AI execution gateway**: it 
 local model (Ollama / llama.cpp / LM Studio / vLLM) or call a user-owned external provider
 (OpenAI, Anthropic, Gemini, OpenRouter, Groq, Mistral, custom OpenAI-compatible).
 
+Callers use it through an **OpenAI-compatible API** (`POST /v1/chat/completions`, `/v1/models`,
+streaming) — see [OpenAI-compatible API](#openai-compatible-api). External providers can be
+added with a pasted key **or a browser sign-in** (Gemini via Google, OpenAI via ChatGPT).
+
 ## Core rule
 
 **Provider tokens never leave the worker.** The coordinator only ever sees capabilities and
@@ -38,6 +42,12 @@ proto/         shared wire schemas (no secret fields; serde + Ecto validate agai
 Enforced on the coordinator (`Coordinator.Router`) **and** re-checked on the worker
 (`worker-core::privacy`) — defense in depth.
 
+**Which levels a worker may accept is set by the admin, not the worker.** Every worker starts
+public-only; an admin raises it per worker in `/admin/workers`. Whatever a worker declares for
+itself is advisory and is overridden at registration (fail-safe). The coordinator also honors
+the requested **model**: a request for `model: X` routes to a worker that actually serves `X`
+(falling back to any capable worker if none do), and the worker runs that exact model.
+
 ## Build & test
 
 ```sh
@@ -55,9 +65,18 @@ cd worker
 cargo build -p worker-cli --release
 export HYDRA_VAULT_PASSPHRASE=...                       # or be prompted (no-echo)
 ./target/release/hydra-worker init --mode both
-HYDRA_PROVIDER_TOKEN=sk-... hydra-worker provider add openai
+HYDRA_PROVIDER_TOKEN=sk-... hydra-worker provider add openai   # paste a key, or:
+hydra-worker provider login gemini                     # browser sign-in (Google / Code Assist)
+hydra-worker provider login openai                     # browser sign-in with ChatGPT
 HYDRA_COORDINATOR_URL=wss://hydra.example.com hydra-worker run
 ```
+
+**Provider sign-in (`provider login`)** opens a browser (PKCE OAuth); on a headless box it
+prints the URL and you paste the redirect back. Tokens are stored in the local vault, never
+sent to the coordinator. `gemini` uses the Google Code Assist free tier; `openai` signs in
+with ChatGPT and uses the ChatGPT backend directly (no platform API key/organization needed).
+The desktop app exposes the same as **Sign in with ChatGPT / Google** buttons on the Providers
+screen.
 
 Desktop app: `worker/crates/worker-app` (`cargo tauri dev`) — see its `SETUP.md` for the
 WebView system deps.
@@ -118,17 +137,45 @@ key (recommended once the coordinator is publicly reachable). An optional shared
 `HYDRA_JOIN_TOKEN` is the fallback for non-device clients. Pinned keys live in the
 `worker_keys` table; revoke a worker with `Coordinator.DeviceAuth.revoke(worker_id)`.
 
+## OpenAI-compatible API
+
+The coordinator's public front-door speaks the OpenAI API, so existing clients/SDKs work by
+just pointing at it with a gateway key:
+
+| endpoint | notes |
+|----------|-------|
+| `POST /v1/chat/completions` | `messages`, `model`, `max_tokens`, `temperature`; `stream: true` returns an SSE `chat.completion.chunk` stream ending in `[DONE]` |
+| `GET /v1/models`, `GET /v1/models/{id}` | models currently servable by connected workers |
+| `GET /health` | liveness (public) |
+| `GET /openapi.json`, `GET /docs` | **API docs (public)** — OpenAPI 3 spec + Redoc page |
+
+```sh
+curl https://hydra.example.com/v1/chat/completions \
+  -H "Authorization: Bearer hydra_sk_..." -H "content-type: application/json" \
+  -d '{"model":"qwen3.6-35b-a3b","messages":[{"role":"user","content":"hello"}]}'
+```
+
+**Postman:** Import → Link → `https://hydra.example.com/openapi.json` generates the full
+collection; set the bearer token and go. Authenticate with a gateway key (below) — never a
+provider secret. An upstream provider error (e.g. a rate limit) is passed through with its real
+status (`429`, …), not masked as a generic `502`.
+
 ## Admin console (`/admin`)
 
-The coordinator serves an admin console alongside the OpenAI-compatible front-door:
+The coordinator serves an admin console alongside the front-door (GitHub-OAuth gated in prod,
+open on loopback dev):
 
-- **Issue API keys** — mint gateway keys that authorize callers of `POST /v1/chat/completions`.
+- **API keys** (`/admin`) — mint gateway keys that authorize callers of `POST /v1/chat/completions`.
   Each key's plaintext is shown **once** at creation; only its SHA-256 hash is stored (a DB or
   backup leak never yields a usable key). Keys are revocable. These are **not** provider tokens
   — they only gate who may submit jobs. Set `HYDRA_REQUIRE_API_TOKEN=true` so admin-issued keys
   alone gate the door even without a shared `HYDRA_API_TOKEN`.
-- **Oban dashboard** at `/admin/oban` — the real Oban Web UI for tracking jobs, queues, and
-  retries.
+- **Workers** (`/admin/workers`) — enrolled workers; grant each the job privacy levels it may
+  accept (public / private / sensitive / local_only), applied to a connected worker
+  immediately; revoke/restore its device key.
+- **Dashboard** (`/admin/dashboard`) — connected workers vs pending/leased/done/failed jobs,
+  with throughput charts.
+- **Oban dashboard** (`/admin/oban`) — the real Oban Web UI for tracking jobs, queues, retries.
 
 **Access is protected by GitHub OAuth in prod, and open on loopback dev.** To enable it:
 
@@ -163,7 +210,16 @@ The coordinator image (`coordinator/Dockerfile`) builds an Elixir release compil
 **Postgres** (`DB_ADAPTER=postgres`), runs migrations on start (`Coordinator.Release.migrate/0`),
 then serves the worker WebSocket on `:4000`. See `coordinator/README.md` for the
 SQLite ↔ Postgres backend switch and `STATUS.md` for the overall build state.
+
 ```
 docker compose logs -f coordinator     # watch migrations + boot
 docker compose ps                       # postgres / coordinator / cloudflared
 ```
+
+### Scaling to multiple replicas
+
+Connected-worker state lives in a cluster-wide `Phoenix.Presence` backed by libcluster, so >1
+coordinator replica presents one unified view (a worker connected to any replica shows on every
+dashboard). On Kubernetes: a headless Service for peer discovery plus
+`RELEASE_DISTRIBUTION=name`, `RELEASE_NODE=<name>@<pod-ip>`, a shared `RELEASE_COOKIE`, and
+`HYDRA_CLUSTER_SERVICE=<headless-svc>`. With no cluster env set it runs as a single node.

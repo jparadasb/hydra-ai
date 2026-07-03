@@ -26,21 +26,23 @@ Keychain / Credential Manager) instead — requires platform crypto libs.
 ```sh
 export HYDRA_VAULT_PASSPHRASE=...        # or you'll be prompted (no-echo)
 hydra-worker init --mode both            # local / provider / both
-HYDRA_PROVIDER_TOKEN=sk-... hydra-worker provider add openai   # or prompted
+HYDRA_PROVIDER_TOKEN=sk-... hydra-worker provider add openai   # paste a key, or:
+hydra-worker provider login gemini       # browser sign-in (Google / Code Assist free tier)
+hydra-worker provider login openai       # browser sign-in with ChatGPT (uses the ChatGPT backend)
 hydra-worker provider test openai        # validates against the API
 hydra-worker usage                       # per-provider/model table
-hydra-worker run                         # prints the (secret-free) registration payload
+hydra-worker run                         # connect to the coordinator and process leased jobs
 ```
 
-The token is read from a no-echo prompt or env, stored encrypted, and only ever shown as a
-masked fingerprint (`sk-...abcd`). It never appears in argv, logs, config, or the
-registration payload.
+A pasted token is read from a no-echo prompt or env, stored encrypted, and only ever shown as a
+masked fingerprint (`sk-...abcd`). `provider login` runs a PKCE OAuth flow in the browser (on a
+headless box it prints the URL and accepts the pasted redirect) and stores the OAuth credential
+in the vault. Nothing — key or OAuth token — appears in argv, logs, config, or the registration
+payload.
 
-## Remaining integration
+## Desktop app
 
-* **Coordinator transport** (`worker-core::coordinator_client`): persistent Phoenix Channel
-  client that joins, sends the registration payload, receives leases, runs them through
-  `Gateway::execute`, and returns results. The payload and gateway are done and tested; this
-  is the socket wiring.
-* **Desktop app shell** (`worker-tauri` + `ui/`): the Tauri runtime + web frontend wrapping
-  `commands::Commands`. The command layer is done and tested; this adds the webkit shell.
+`worker-app` (Tauri 2) + `ui/` wrap the tested `commands::Commands` layer: unlock the vault,
+choose mode, add/sign-in providers, set routing, watch run status (coordinator, worker id,
+jobs processed/failed, last error). Build with `cargo tauri dev` from `crates/worker-app` (needs
+the platform WebView deps). The command layer never returns a raw token — only fingerprints.
