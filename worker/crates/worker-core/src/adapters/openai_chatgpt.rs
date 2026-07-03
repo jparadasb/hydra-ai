@@ -24,8 +24,21 @@ use crate::types::{ChatRequest, ChatResponse, ModelInfo, ToolCall, ToolCallFunct
 const DEFAULT_BASE: &str = "https://chatgpt.com/backend-api/codex";
 const REFRESH_MARGIN_SECONDS: u64 = 60;
 
-/// Models the ChatGPT backend serves (no list endpoint). Adjust if your plan differs.
-const MODELS: &[&str] = &["gpt-5", "gpt-4o"];
+/// Models the ChatGPT backend serves for ChatGPT sign-in (it has no list endpoint, and the
+/// allowed set churns — retired ids get a 400 "not supported when using Codex with a ChatGPT
+/// account"). Override with `HYDRA_OPENAI_CHATGPT_MODELS` (comma-separated) without a rebuild.
+const DEFAULT_MODELS: &[&str] = &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"];
+
+fn chatgpt_models() -> Vec<String> {
+    match std::env::var("HYDRA_OPENAI_CHATGPT_MODELS") {
+        Ok(v) if !v.trim().is_empty() => v
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        _ => DEFAULT_MODELS.iter().map(|s| s.to_string()).collect(),
+    }
+}
 
 pub struct ChatGptBackendAdapter {
     base_url: String,
@@ -71,10 +84,10 @@ impl ProviderAdapter for ChatGptBackendAdapter {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        Ok(MODELS
-            .iter()
+        Ok(chatgpt_models()
+            .into_iter()
             .map(|name| ModelInfo {
-                name: (*name).to_string(),
+                name,
                 capabilities: vec![
                     "chat".into(),
                     "text.extract_json".into(),
@@ -394,7 +407,15 @@ mod tests {
     async fn lists_static_models_with_chat_capability() {
         let a = ChatGptBackendAdapter::with_base_url("http://x", tokens(), reqwest::Client::new());
         let models = a.list_models().await.unwrap();
-        assert!(models.iter().any(|m| m.name == "gpt-5"));
+        assert!(models.iter().any(|m| m.name == "gpt-5.5"));
         assert!(models.iter().all(|m| m.capabilities.contains(&"chat".to_string())));
+    }
+
+    #[test]
+    fn model_list_env_override_splits_and_trims() {
+        std::env::set_var("HYDRA_OPENAI_CHATGPT_MODELS", " gpt-6 , gpt-6-mini ");
+        let models = chatgpt_models();
+        std::env::remove_var("HYDRA_OPENAI_CHATGPT_MODELS");
+        assert_eq!(models, vec!["gpt-6".to_string(), "gpt-6-mini".to_string()]);
     }
 }
