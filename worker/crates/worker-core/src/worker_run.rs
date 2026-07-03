@@ -29,6 +29,7 @@ pub struct RunStatus {
     running: AtomicBool,
     connected: AtomicBool,
     jobs_processed: AtomicU64,
+    jobs_failed: AtomicU64,
     started_unix: AtomicI64,
     last_error: Mutex<Option<String>>,
     // The coordinator URL + worker id this run resolved to, so the UI can show exactly which
@@ -43,6 +44,9 @@ pub struct RunStatusView {
     pub running: bool,
     pub connected: bool,
     pub jobs_processed: u64,
+    /// Jobs that came back rejected/errored (e.g. a provider rate limit). `last_error` holds
+    /// the most recent reason.
+    pub jobs_failed: u64,
     pub started_unix: i64,
     pub last_error: Option<String>,
     /// The coordinator URL this run is using (resolved from override/env/config/bake/default).
@@ -61,6 +65,7 @@ impl RunStatus {
         self.running.store(true, Ordering::SeqCst);
         self.connected.store(false, Ordering::SeqCst);
         self.jobs_processed.store(0, Ordering::SeqCst);
+        self.jobs_failed.store(0, Ordering::SeqCst);
         self.started_unix.store(now_unix(), Ordering::SeqCst);
         *self.last_error.lock().unwrap() = None;
     }
@@ -78,6 +83,13 @@ impl RunStatus {
 
     pub fn incr_jobs(&self) {
         self.jobs_processed.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Record a failed job (rejected/errored). Bumps the failed counter and surfaces the
+    /// reason to the UI as `last_error` so provider errors (e.g. a 429 rate limit) are visible.
+    pub fn note_job_error(&self, reason: String) {
+        self.jobs_failed.fetch_add(1, Ordering::SeqCst);
+        *self.last_error.lock().unwrap() = Some(reason);
     }
 
     /// Record a transient error (e.g. a failed connect) without changing the running state —
@@ -100,6 +112,7 @@ impl RunStatus {
             running: self.running.load(Ordering::SeqCst),
             connected: self.connected.load(Ordering::SeqCst),
             jobs_processed: self.jobs_processed.load(Ordering::SeqCst),
+            jobs_failed: self.jobs_failed.load(Ordering::SeqCst),
             started_unix: self.started_unix.load(Ordering::SeqCst),
             last_error: self.last_error.lock().unwrap().clone(),
             coordinator_url: self.coordinator_url.lock().unwrap().clone(),
@@ -262,6 +275,12 @@ mod tests {
         let v = s.view();
         assert!(v.running && v.connected && v.jobs_processed == 2);
         assert!(v.started_unix > 0);
+
+        // A failed job bumps the counter and surfaces its reason as last_error.
+        s.note_job_error("job j1: provider returned status 429".into());
+        let v = s.view();
+        assert_eq!(v.jobs_failed, 1);
+        assert_eq!(v.last_error.as_deref(), Some("job j1: provider returned status 429"));
 
         s.mark_stopped(Some("boom".into()));
         let v = s.view();

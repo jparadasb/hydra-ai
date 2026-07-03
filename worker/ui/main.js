@@ -114,6 +114,8 @@ async function pollStatus() {
   if (s.worker_id) $("#run-wid").textContent = s.worker_id;
   $("#run-connected").textContent = s.connected ? "yes" : "no";
   $("#run-jobs").textContent = s.jobs_processed;
+  $("#run-failed").textContent = s.jobs_failed || 0;
+  $("#run-failed").className = (s.jobs_failed || 0) > 0 ? "status-bad" : "";
   $("#run-started").textContent = s.running ? fmtTime(s.started_unix) : "—";
   $("#run-error").textContent = s.last_error || "—";
   $("#run-error").className = "mono" + (s.last_error ? " status-bad" : "");

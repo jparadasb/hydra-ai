@@ -301,6 +301,18 @@ mod networked {
                             return;
                         };
                         let result = gateway.execute(&job).await;
+                        // Surface a failed job (rejected/errored — e.g. a provider rate limit)
+                        // to the UI status; the coordinator still gets the full result below.
+                        if !matches!(result.status, crate::types::JobStatus::Ok) {
+                            let reason = result.reason.clone().unwrap_or_default();
+                            // Log for headless workers (no UI); redact any token-shaped text.
+                            tracing::warn!(
+                                job = %result.job_id,
+                                "job failed: {}",
+                                crate::vault::redact(&reason)
+                            );
+                            status.note_job_error(format!("job {}: {}", result.job_id, reason));
+                        }
                         let payload = serde_json::to_value(&result).unwrap_or(Value::Null);
                         let out = PhoenixMsg::new(
                             Some("1".into()),
