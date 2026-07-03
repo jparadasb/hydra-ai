@@ -15,7 +15,10 @@ config :coordinator, Coordinator.Endpoint,
 config :phoenix, :json_library, Jason
 
 config :coordinator,
-  ecto_repos: [Coordinator.Repo]
+  ecto_repos: [Coordinator.Repo],
+  # libcluster topologies. Empty = single node (dev/test). Prod sets a Kubernetes.DNS
+  # topology from env in runtime.exs so the coordinator replicas cluster.
+  cluster_topologies: []
 
 config :coordinator, Oban,
   engine: Oban.Engines.Lite,

@@ -161,18 +161,16 @@ defmodule Coordinator.ApiRouterTest do
 
   describe "GET /v1/models" do
     setup do
-      {:ok, _} =
-        Coordinator.WorkerRegistry.register(Coordinator.WorkerRegistry, %{
-          "worker_id" => "worker-models-test",
-          "execution_mode" => "local_model",
-          "provider" => %{"name" => "ollama"},
-          "models" => [
-            %{"name" => "llama3", "capabilities" => ["chat"], "uses_external_provider" => false},
-            %{"name" => "embed-x", "capabilities" => ["embeddings"], "uses_external_provider" => false}
-          ]
-        })
+      Coordinator.WorkerTestHelper.track(%{
+        "worker_id" => "worker-models-test",
+        "execution_mode" => "local_model",
+        "provider" => %{"name" => "ollama"},
+        "models" => [
+          %{"name" => "llama3", "capabilities" => ["chat"], "uses_external_provider" => false},
+          %{"name" => "embed-x", "capabilities" => ["embeddings"], "uses_external_provider" => false}
+        ]
+      })
 
-      on_exit(fn -> Coordinator.WorkerRegistry.unregister("worker-models-test") end)
       :ok
     end
 

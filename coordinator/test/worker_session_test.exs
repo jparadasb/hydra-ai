@@ -1,12 +1,13 @@
 defmodule Coordinator.WorkerSessionTest do
-  # async: false — handle_register now reads the admin policy from the repo.
+  # async: false — handle_register reads admin policy from the repo, and workers are tracked in
+  # the shared cluster-wide Presence.
   use ExUnit.Case, async: false
   alias Coordinator.{Job, Repo, WorkerKey, WorkerPolicies, WorkerRegistry, WorkerSession}
+  import Coordinator.WorkerTestHelper
 
   setup do
-    {:ok, reg} = WorkerRegistry.start_link(name: nil)
     on_exit(fn -> Repo.delete_all(WorkerKey) end)
-    %{reg: reg}
+    :ok
   end
 
   defp enroll(worker_id, levels) do
@@ -28,7 +29,7 @@ defmodule Coordinator.WorkerSessionTest do
       "models" => [
         %{
           "name" => "gpt-4.1-mini",
-          "capabilities" => ["text.extract_json"],
+          "capabilities" => ["wsess.extract"],
           "uses_external_provider" => true
         }
       ],
@@ -36,71 +37,65 @@ defmodule Coordinator.WorkerSessionTest do
     }
   end
 
-  test "registers a clean worker and makes it routable", %{reg: reg} do
-    assert {:ok, worker} = WorkerSession.handle_register(registration(), nil, reg)
+  test "registers a clean worker and makes it routable" do
+    assert {:ok, worker} = WorkerSession.handle_register(registration())
     assert worker.worker_id == "w-ext"
-    assert [%{worker_id: "w-ext"}] = WorkerRegistry.list(reg)
+    track(worker)
+    assert Enum.any?(WorkerRegistry.list(), &(&1.worker_id == "w-ext"))
 
-    job = %Job{job_id: "j", capability: "text.extract_json", privacy: :public}
-    assert {:ok, %{worker_id: "w-ext"}} = WorkerRegistry.route(reg, job)
+    job = %Job{job_id: "j", capability: "wsess.extract", privacy: :public}
+    assert {:ok, %{worker_id: "w-ext"}} = WorkerRegistry.route(job)
   end
 
-  test "worker-declared privacy levels are ignored: public-only until admin grants", %{reg: reg} do
+  test "worker-declared privacy levels are ignored: public-only until admin grants" do
     # Registration declares public+private, but there is no admin grant.
-    assert {:ok, worker} = WorkerSession.handle_register(registration(), nil, reg)
+    assert {:ok, worker} = WorkerSession.handle_register(registration())
     assert worker.accepted_job_levels == [:public]
+    track(worker)
 
-    private = %Job{job_id: "j", capability: "text.extract_json", privacy: :private, allow_external_providers: true}
-    assert {:error, :no_eligible_worker} = WorkerRegistry.route(reg, private)
+    private = %Job{job_id: "j", capability: "wsess.extract", privacy: :private, allow_external_providers: true}
+    assert {:error, :no_eligible_worker} = WorkerRegistry.route(private)
   end
 
-  test "admin-granted levels apply at registration", %{reg: reg} do
+  test "admin-granted levels apply at registration" do
     enroll("w-ext", ["public", "private"])
 
-    assert {:ok, worker} = WorkerSession.handle_register(registration(), nil, reg)
+    assert {:ok, worker} = WorkerSession.handle_register(registration())
     assert worker.accepted_job_levels == [:public, :private]
+    track(worker)
 
-    private = %Job{job_id: "j", capability: "text.extract_json", privacy: :private, allow_external_providers: true}
-    assert {:ok, %{worker_id: "w-ext"}} = WorkerRegistry.route(reg, private)
+    private = %Job{job_id: "j", capability: "wsess.extract", privacy: :private, allow_external_providers: true}
+    assert {:ok, %{worker_id: "w-ext"}} = WorkerRegistry.route(private)
   end
 
-  test "admin policy change applies to a connected worker immediately", %{reg: reg} do
-    assert {:ok, _} = WorkerSession.handle_register(registration(), nil, reg)
-
-    assert :ok = WorkerRegistry.update_accepted_levels(reg, "w-ext", ["public", "private"])
-    assert [%{accepted_job_levels: [:public, :private]}] = WorkerRegistry.list(reg)
-
-    assert {:error, :unknown_worker} =
-             WorkerRegistry.update_accepted_levels(reg, "nope", ["public"])
-  end
-
-  test "set_accepted_levels persists for enrolled workers and rejects unknown ones" do
+  test "set_accepted_levels persists and broadcasts a live-apply to the worker's channel" do
     enroll("w-ext", ["public"])
+    # The worker's channel process subscribes to this control topic; stand in for it.
+    Phoenix.PubSub.subscribe(Coordinator.PubSub, "worker_control:w-ext")
 
     assert {:ok, key} = WorkerPolicies.set_accepted_levels("w-ext", ["public", "sensitive"])
     assert key.accepted_job_levels == ["public", "sensitive"]
     assert WorkerPolicies.accepted_levels("w-ext") == ["public", "sensitive"]
+    assert_receive {:set_accepted_levels, [:public, :sensitive]}
 
     assert {:error, :not_enrolled} = WorkerPolicies.set_accepted_levels("ghost", ["public"])
     assert WorkerPolicies.accepted_levels("ghost") == ["public"]
   end
 
-  test "refuses a registration carrying a token; nothing is registered", %{reg: reg} do
+  test "refuses a registration carrying a token; nothing is registered" do
     dirty = Map.put(registration(), "token", "sk-should-not-be-here-123")
-    assert {:error, :secret_key_present} = WorkerSession.handle_register(dirty, nil, reg)
-    assert [] = WorkerRegistry.list(reg)
+    assert {:error, :secret_key_present} = WorkerSession.handle_register(dirty)
+    refute Enum.any?(WorkerRegistry.list(), &(&1.worker_id == "w-ext"))
   end
 
-  test "drops a worker when its channel process goes down", %{reg: reg} do
-    pid = spawn(fn -> Process.sleep(:infinity) end)
-    assert {:ok, _} = WorkerSession.handle_register(registration(), pid, reg)
-    assert [_] = WorkerRegistry.list(reg)
+  test "drops a worker when its channel process goes down" do
+    {:ok, worker} = WorkerSession.handle_register(registration())
+    pid = track(worker)
+    assert Enum.any?(WorkerRegistry.list(), &(&1.worker_id == "w-ext"))
 
-    Process.exit(pid, :kill)
-    # allow the DOWN message to be processed
-    :sys.get_state(reg)
-    Process.sleep(20)
-    assert [] = WorkerRegistry.list(reg)
+    stop(pid)
+    wait_gone("w-ext")
+    refute Enum.any?(WorkerRegistry.list(), &(&1.worker_id == "w-ext"))
   end
 
   test "usage report passes only when secret-free" do

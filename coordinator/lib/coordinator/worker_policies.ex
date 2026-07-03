@@ -8,7 +8,7 @@ defmodule Coordinator.WorkerPolicies do
   (`Coordinator.WorkerSession`).
   """
 
-  alias Coordinator.{Repo, WorkerKey, WorkerRegistry}
+  alias Coordinator.{Job, Repo, WorkerKey}
 
   @default_levels ["public"]
 
@@ -49,7 +49,18 @@ defmodule Coordinator.WorkerPolicies do
         |> Repo.update()
         |> case do
           {:ok, updated} ->
-            WorkerRegistry.update_accepted_levels(worker_id, levels)
+            # Apply immediately to the connected worker wherever it is in the cluster: the
+            # worker's channel process subscribes to this control topic and updates its
+            # Presence snapshot. A worker that isn't connected picks the grant up at its next
+            # registration (which reads this same row).
+            parsed = Enum.map(levels, &Job.parse_privacy/1)
+
+            Phoenix.PubSub.broadcast(
+              Coordinator.PubSub,
+              "worker_control:#{worker_id}",
+              {:set_accepted_levels, parsed}
+            )
+
             {:ok, updated}
 
           {:error, _} = err ->

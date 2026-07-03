@@ -25,9 +25,8 @@ defmodule Coordinator.Stats do
   end
 
   @doc "Connected workers as plain maps (safe to render / serialize)."
-  def workers(registry \\ WorkerRegistry) do
-    registry
-    |> WorkerRegistry.list()
+  def workers do
+    WorkerRegistry.list()
     |> Enum.map(fn %Worker{} = w ->
       %{
         "worker_id" => w.worker_id,

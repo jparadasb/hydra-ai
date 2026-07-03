@@ -19,17 +19,24 @@ defmodule Coordinator.WorkerSession do
   that tries to push a token is refused, never registered.
   """
 
-  alias Coordinator.{SecretGuard, WorkerRegistry}
+  alias Coordinator.{SecretGuard, Worker}
 
   @doc """
   Handle a worker's registration. Rejects any payload carrying secret-shaped data, then
-  sanitizes (belt and suspenders) and registers the worker, monitoring `pid`.
+  sanitizes (belt and suspenders), overrides the declared privacy levels with the admin
+  grant, and returns the built `Coordinator.Worker` snapshot. The caller (the channel
+  process) tracks it in `Coordinator.Presence`.
   """
-  def handle_register(payload, pid \\ nil, registry \\ WorkerRegistry) do
+  def handle_register(payload) do
     with :ok <- SecretGuard.verify(payload),
          :ok <- validate_registration(payload) do
-      sanitized = payload |> SecretGuard.sanitize() |> apply_admin_privacy()
-      WorkerRegistry.register(registry, sanitized, pid)
+      worker =
+        payload
+        |> SecretGuard.sanitize()
+        |> apply_admin_privacy()
+        |> Worker.from_registration()
+
+      {:ok, worker}
     end
   end
 
@@ -58,13 +65,15 @@ defmodule Coordinator.WorkerSession do
   @doc """
   Handle a normalized job result from a worker. Broadcasts the (sanitized, secret-free)
   result on the `"job_results"` PubSub topic so schedulers/tests can observe completions.
+
+  The worker's inflight count is maintained by its channel process (which sees the job go out
+  and the result come back), not here — so there is no reservation to release.
   """
   def handle_result(payload) do
     case SecretGuard.verify(payload) do
       :ok ->
         clean = SecretGuard.sanitize(payload)
         persist_result(clean)
-        release_reservation(clean)
         Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {:job_result, clean})
         {:ok, clean}
 
@@ -72,20 +81,6 @@ defmodule Coordinator.WorkerSession do
         err
     end
   end
-
-  # This attempt is done, so free the worker's inflight slot (see WorkerRegistry.reserve/2). A
-  # requeued job simply reserves again when it is re-leased. Best-effort: unknown jobs are
-  # ignored (the worker may report a result for a job we don't persist).
-  defp release_reservation(%{"job_id" => job_id}) when is_binary(job_id) do
-    case Coordinator.Jobs.get(job_id) do
-      %{worker_id: wid} when is_binary(wid) -> Coordinator.WorkerRegistry.release(wid)
-      _ -> :ok
-    end
-  rescue
-    _ -> :ok
-  end
-
-  defp release_reservation(_), do: :ok
 
   # Record the result against the durable job, if it is one we are tracking.
   defp persist_result(%{"job_id" => job_id} = result) when is_binary(job_id) do

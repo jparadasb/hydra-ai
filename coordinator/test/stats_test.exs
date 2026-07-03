@@ -3,10 +3,10 @@ defmodule Coordinator.StatsTest do
   use ExUnit.Case, async: false
 
   alias Coordinator.Jobs.JobRecord
-  alias Coordinator.{Repo, Stats, WorkerRegistry}
+  alias Coordinator.{Repo, Stats}
+  import Coordinator.WorkerTestHelper
 
   setup do
-    for w <- WorkerRegistry.list(), do: WorkerRegistry.unregister(w.worker_id)
     on_exit(fn -> Repo.delete_all(JobRecord) end)
     :ok
   end
@@ -39,16 +39,13 @@ defmodule Coordinator.StatsTest do
   end
 
   test "workers reflects the live registry (no secrets, plain maps)" do
-    {:ok, _} =
-      WorkerRegistry.register(WorkerRegistry, %{
-        "worker_id" => "worker-stats-test",
-        "execution_mode" => "local_model",
-        "models" => [
-          %{"name" => "llama3", "capabilities" => ["chat"], "uses_external_provider" => false}
-        ]
-      })
-
-    on_exit(fn -> WorkerRegistry.unregister("worker-stats-test") end)
+    track(%{
+      "worker_id" => "worker-stats-test",
+      "execution_mode" => "local_model",
+      "models" => [
+        %{"name" => "llama3", "capabilities" => ["chat"], "uses_external_provider" => false}
+      ]
+    })
 
     assert [w] = Enum.filter(Stats.workers(), &(&1["worker_id"] == "worker-stats-test"))
     assert w["execution_mode"] == "local_model"

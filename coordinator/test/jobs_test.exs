@@ -6,35 +6,31 @@ defmodule Coordinator.JobsTest do
     engine: Oban.Engines.Lite,
     notifier: Oban.Notifiers.PG
 
-  alias Coordinator.{Jobs, LeaseWorker, WorkerRegistry}
+  alias Coordinator.{Jobs, LeaseWorker}
   alias Coordinator.Jobs.JobRecord
+  import Coordinator.WorkerTestHelper
 
   setup do
     Coordinator.Repo.delete_all(JobRecord)
     Coordinator.Repo.delete_all(Oban.Job)
-    for w <- WorkerRegistry.list(), do: WorkerRegistry.unregister(w.worker_id)
     :ok
   end
 
   defp register_local_worker(id) do
-    WorkerRegistry.register(
-      WorkerRegistry,
-      %{
-        "worker_id" => id,
-        "execution_mode" => "local_model",
-        "models" => [
-          %{
-            "name" => "qwen",
-            "capabilities" => ["text.extract_json"],
-            "uses_external_provider" => false
-          }
-        ],
-        "privacy" => %{
-          "accepted_job_levels" => ["public", "private", "sensitive", "local_only"]
+    track(%{
+      "worker_id" => id,
+      "execution_mode" => "local_model",
+      "models" => [
+        %{
+          "name" => "qwen",
+          "capabilities" => ["text.extract_json"],
+          "uses_external_provider" => false
         }
-      },
-      nil
-    )
+      ],
+      "privacy" => %{
+        "accepted_job_levels" => ["public", "private", "sensitive", "local_only"]
+      }
+    })
   end
 
   defp enqueue(privacy \\ "public") do

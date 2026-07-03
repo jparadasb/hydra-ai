@@ -69,6 +69,27 @@ case System.get_env("HYDRA_ADMIN_BASE_URL") do
   url -> config :coordinator, :admin_base_url, url
 end
 
+# BEAM clustering (libcluster). When HYDRA_CLUSTER_SERVICE names a headless k8s Service, the
+# coordinator replicas discover each other via that Service's DNS and form one cluster, so
+# Presence + PubSub span all replicas (the /admin dashboard sees every worker regardless of
+# which pod it connected to). Unset = single node. Requires RELEASE_DISTRIBUTION=name +
+# RELEASE_NODE=<basename>@<pod-ip> + a shared RELEASE_COOKIE across replicas.
+case System.get_env("HYDRA_CLUSTER_SERVICE") do
+  service when service in [nil, ""] ->
+    :ok
+
+  service ->
+    config :coordinator, :cluster_topologies,
+      hydra: [
+        strategy: Cluster.Strategy.Kubernetes.DNS,
+        config: [
+          service: service,
+          application_name: System.get_env("HYDRA_CLUSTER_NODE_BASENAME", "coordinator"),
+          polling_interval: 5_000
+        ]
+      ]
+end
+
 # Production database + Oban configuration, resolved at boot from the environment.
 # DB_ADAPTER selects the backend (and MUST match the value used when the release was built,
 # since the repo adapter is compiled in — see Coordinator.Repo).

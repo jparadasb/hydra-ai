@@ -30,10 +30,11 @@ defmodule Coordinator.LeaseWorker do
   defp lease(record) do
     domain = Jobs.to_domain(record)
 
-    # reserve/2 routes AND bumps the chosen worker's inflight atomically, so concurrent lease
-    # jobs spread across workers instead of all landing on the same equally-scored node. The
-    # reservation is released when the result arrives (Coordinator.WorkerSession.handle_result).
-    case WorkerRegistry.reserve(domain) do
+    # Route against the cluster-wide worker set (Presence-backed). Scoring uses each worker's
+    # live inflight (maintained by its channel process), so leases still spread across nodes.
+    # There is no hard reservation across the cluster: on the rare double-assignment the worker
+    # rejects the extra job and it is requeued (Oban max_attempts), same as any rejection.
+    case WorkerRegistry.route(domain) do
       {:ok, worker} ->
         lease_id = Jobs.gen_lease_id()
         {:ok, record} = Jobs.mark_leased(record, worker.worker_id, lease_id)

@@ -5,12 +5,10 @@ defmodule Coordinator.WorkerChannelTest do
   @endpoint Coordinator.Endpoint
 
   alias Coordinator.{WorkerChannel, WorkerRegistry, WorkerSocket}
+  import Coordinator.WorkerTestHelper
 
-  setup do
-    # Clean any leftover registrations between tests (shared named registry).
-    for w <- WorkerRegistry.list(), do: WorkerRegistry.unregister(w.worker_id)
-    :ok
-  end
+  # Channels are linked to the test process; each joined worker is untracked from Presence when
+  # its channel shuts down at the end of the test, so no manual cleanup is needed.
 
   defp registration(id) do
     %{
@@ -37,6 +35,7 @@ defmodule Coordinator.WorkerChannelTest do
     assert {:ok, %{registered: "w-chan"}, _socket} =
              join_worker("w-chan", registration("w-chan"))
 
+    wait_present("w-chan")
     assert Enum.any?(WorkerRegistry.list(), &(&1.worker_id == "w-chan"))
 
     job = %{

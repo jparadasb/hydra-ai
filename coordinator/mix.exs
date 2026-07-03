@@ -42,7 +42,9 @@ defmodule Coordinator.MixProject do
       # Real Oban dashboard for the /admin job view (LiveView, self-served assets).
       {:oban_web, "~> 2.11"},
       # HTTP client for the GitHub OAuth token exchange + user lookup (admin login only).
-      {:req, "~> 0.5"}
+      {:req, "~> 0.5"},
+      # Clusters the coordinator's BEAM nodes so >1 replica shares worker presence + PubSub.
+      {:libcluster, "~> 3.4"}
     ]
   end
 end
