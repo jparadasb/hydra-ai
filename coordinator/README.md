@@ -78,7 +78,9 @@ job's `model` restricts eligibility to workers serving that model when any do.
 ## Public API + admin
 
 `Coordinator.ApiRouter` serves the OpenAI-compatible front-door: `POST /v1/chat/completions`
-(with `stream: true` SSE), `GET /v1/models[/{id}]`, `GET /health`, and public docs at
+(with `stream: true` SSE and `tools`/`tool_choice` function calling — `tool_calls` come back
+in the message and as indexed stream deltas with `finish_reason: "tool_calls"`),
+`GET /v1/models[/{id}]`, `GET /health`, and public docs at
 `/openapi.json` (OpenAPI 3 — Postman-importable) + `/docs` (Redoc). The admin console
 (`Coordinator.Web.*`, GitHub-OAuth gated in prod) issues gateway API keys and shows
 workers/dashboard/Oban. See the root `README.md` for env config and clustering.

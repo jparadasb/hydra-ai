@@ -157,6 +157,114 @@ defmodule Coordinator.ApiRouterTest do
     assert body["usage"]["total_tokens"] == 5
   end
 
+  test "tools + tool_choice are forwarded into the job payload and tool_calls map back" do
+    nonce = "apitools-#{System.unique_integer([:positive])}"
+
+    tools = [
+      %{
+        "type" => "function",
+        "function" => %{
+          "name" => "get_weather",
+          "description" => "Get the weather",
+          "parameters" => %{"type" => "object", "properties" => %{"city" => %{"type" => "string"}}}
+        }
+      }
+    ]
+
+    tool_call = %{
+      "id" => "call_abc",
+      "type" => "function",
+      "function" => %{"name" => "get_weather", "arguments" => ~s({"city":"Berlin"})}
+    }
+
+    task =
+      Task.async(fn ->
+        post("/v1/chat/completions", %{
+          "messages" => [%{"role" => "user", "content" => nonce}],
+          "model" => "test-model",
+          "tools" => tools,
+          "tool_choice" => "auto",
+          "timeout_ms" => 5000
+        })
+      end)
+
+    job_id = wait_for(fn -> find_job_id(nonce) end)
+
+    # The durable job payload carries the tool definitions for the worker.
+    job = Repo.get!(JobRecord, job_id)
+    assert job.payload["tools"] == tools
+    assert job.payload["tool_choice"] == "auto"
+
+    Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {
+      :job_result,
+      %{
+        "job_id" => job_id,
+        "status" => "ok",
+        "output" => %{"content" => "", "tool_calls" => [tool_call]},
+        "usage" => %{"model" => "llama3", "input_tokens" => 6, "output_tokens" => 4}
+      }
+    })
+
+    conn = Task.await(task, 6000)
+    assert conn.status == 200
+    body = Jason.decode!(conn.resp_body)
+    choice = hd(body["choices"])
+    assert choice["finish_reason"] == "tool_calls"
+    assert choice["message"]["tool_calls"] == [tool_call]
+  end
+
+  test "stream:true frames tool_calls as indexed deltas with finish_reason tool_calls" do
+    nonce = "apistreamtools-#{System.unique_integer([:positive])}"
+
+    tool_call = %{
+      "id" => "call_str",
+      "type" => "function",
+      "function" => %{"name" => "get_weather", "arguments" => ~s({"city":"Berlin"})}
+    }
+
+    task =
+      Task.async(fn ->
+        post("/v1/chat/completions", %{
+          "messages" => [%{"role" => "user", "content" => nonce}],
+          "model" => "llama3",
+          "stream" => true,
+          "timeout_ms" => 5000
+        })
+      end)
+
+    job_id = wait_for(fn -> find_job_id(nonce) end)
+
+    Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {
+      :job_result,
+      %{
+        "job_id" => job_id,
+        "status" => "ok",
+        "output" => %{"content" => "", "tool_calls" => [tool_call]},
+        "usage" => %{"model" => "llama3", "input_tokens" => 4, "output_tokens" => 2}
+      }
+    })
+
+    conn = Task.await(task, 6000)
+    assert conn.status == 200
+    body = conn.resp_body
+    assert body =~ ~s("finish_reason":"tool_calls")
+    assert body =~ "data: [DONE]"
+
+    delta =
+      body
+      |> String.split("\n\n", trim: true)
+      |> Enum.find_value(fn "data: " <> json ->
+        case Jason.decode(json) do
+          {:ok, %{"choices" => [%{"delta" => %{"tool_calls" => [tc]}}]}} -> tc
+          _ -> nil
+        end
+      end)
+
+    assert delta["index"] == 0
+    assert delta["id"] == "call_str"
+    assert delta["function"]["arguments"] == ~s({"city":"Berlin"})
+  end
+
   test "an upstream provider 429 is passed through as 429, not masked as 502" do
     nonce = "apirate-#{System.unique_integer([:positive])}"
 

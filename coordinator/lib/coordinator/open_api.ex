@@ -160,10 +160,36 @@ defmodule Coordinator.OpenApi do
       "schemas" => %{
         "Message" => %{
           "type" => "object",
-          "required" => ["role", "content"],
+          "required" => ["role"],
           "properties" => %{
-            "role" => %{"type" => "string", "enum" => ["system", "user", "assistant"]},
-            "content" => %{"type" => "string"}
+            "role" => %{"type" => "string", "enum" => ["system", "user", "assistant", "tool"]},
+            "content" => %{"type" => "string", "nullable" => true},
+            "tool_calls" => %{
+              "type" => "array",
+              "items" => ref("ToolCall"),
+              "description" => "Present on assistant messages that requested tool calls."
+            },
+            "tool_call_id" => %{
+              "type" => "string",
+              "description" => "On `role: tool` messages: id of the call this result answers."
+            }
+          }
+        },
+        "ToolCall" => %{
+          "type" => "object",
+          "properties" => %{
+            "id" => %{"type" => "string"},
+            "type" => %{"type" => "string", "example" => "function"},
+            "function" => %{
+              "type" => "object",
+              "properties" => %{
+                "name" => %{"type" => "string"},
+                "arguments" => %{
+                  "type" => "string",
+                  "description" => "JSON-encoded arguments object."
+                }
+              }
+            }
           }
         },
         "ChatCompletionRequest" => %{
@@ -178,6 +204,15 @@ defmodule Coordinator.OpenApi do
             "messages" => %{"type" => "array", "items" => ref("Message"), "minItems" => 1},
             "max_tokens" => %{"type" => "integer"},
             "temperature" => %{"type" => "number"},
+            "tools" => %{
+              "type" => "array",
+              "description" =>
+                "OpenAI-shaped tool definitions (`{type: \"function\", function: {name, description, parameters}}`), forwarded to the worker's backend.",
+              "items" => %{"type" => "object"}
+            },
+            "tool_choice" => %{
+              "description" => "`auto` | `none` | `required` | `{type: \"function\", function: {name}}`."
+            },
             "stream" => %{"type" => "boolean", "default" => false},
             "timeout_ms" => %{"type" => "integer", "description" => "Per-request wait (ms)."}
           },
@@ -201,7 +236,11 @@ defmodule Coordinator.OpenApi do
                 "properties" => %{
                   "index" => %{"type" => "integer"},
                   "message" => ref("Message"),
-                  "finish_reason" => %{"type" => "string", "example" => "stop"}
+                  "finish_reason" => %{
+                    "type" => "string",
+                    "enum" => ["stop", "tool_calls"],
+                    "example" => "stop"
+                  }
                 }
               }
             },

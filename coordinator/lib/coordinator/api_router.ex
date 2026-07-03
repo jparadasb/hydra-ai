@@ -155,7 +155,9 @@ defmodule Coordinator.ApiRouter do
       "messages" => messages,
       "max_tokens" => params["max_tokens"],
       "temperature" => params["temperature"],
-      "model" => params["model"]
+      "model" => params["model"],
+      "tools" => params["tools"],
+      "tool_choice" => params["tool_choice"]
     }
     |> Enum.reject(fn {_k, v} -> is_nil(v) end)
     |> Map.new()
@@ -207,10 +209,17 @@ defmodule Coordinator.ApiRouter do
 
   defp openai_completion(job_id, params, result) do
     content = get_in(result, ["output", "content"]) || ""
+    tool_calls = tool_calls(result)
     usage = result["usage"] || %{}
     input = usage["input_tokens"] || 0
     output = usage["output_tokens"] || 0
     model = usage["model"] || params["model"] || "hydra"
+
+    message =
+      case tool_calls do
+        nil -> %{"role" => "assistant", "content" => content}
+        calls -> %{"role" => "assistant", "content" => content, "tool_calls" => calls}
+      end
 
     %{
       "id" => "chatcmpl-" <> job_id,
@@ -220,8 +229,8 @@ defmodule Coordinator.ApiRouter do
       "choices" => [
         %{
           "index" => 0,
-          "message" => %{"role" => "assistant", "content" => content},
-          "finish_reason" => "stop"
+          "message" => message,
+          "finish_reason" => finish_reason(tool_calls)
         }
       ],
       "usage" => %{
@@ -231,6 +240,17 @@ defmodule Coordinator.ApiRouter do
       }
     }
   end
+
+  # Tool calls the worker surfaced in the job output (already OpenAI-shaped), or nil.
+  defp tool_calls(result) do
+    case get_in(result, ["output", "tool_calls"]) do
+      [_ | _] = calls -> calls
+      _ -> nil
+    end
+  end
+
+  defp finish_reason(nil), do: "stop"
+  defp finish_reason(_calls), do: "tool_calls"
 
   # Map a worker error into an HTTP status + OpenAI error type. When the worker reports an
   # upstream provider status (e.g. `provider returned status 429`), pass that through so
@@ -255,11 +275,13 @@ defmodule Coordinator.ApiRouter do
 
   # Emit the completion as an OpenAI `chat.completion.chunk` SSE stream. The worker returns the
   # full result in one shot (no token streaming end-to-end), so we frame it as a role delta, a
-  # single content delta, a finish chunk, an optional usage chunk, then `[DONE]`. This is what
-  # AI-SDK / OpenAI streaming clients (e.g. opencode) require: without it they wait on a stream
-  # that never arrives and end up with an empty message.
+  # single content delta (plus tool-call deltas when the model requested tools), a finish
+  # chunk, an optional usage chunk, then `[DONE]`. This is what AI-SDK / OpenAI streaming
+  # clients (e.g. opencode) require: without it they wait on a stream that never arrives and
+  # end up with an empty message.
   defp stream_completion(conn, job_id, params, result) do
     content = get_in(result, ["output", "content"]) || ""
+    tool_calls = tool_calls(result)
     usage = result["usage"] || %{}
     input = usage["input_tokens"] || 0
     output = usage["output_tokens"] || 0
@@ -276,6 +298,20 @@ defmodule Coordinator.ApiRouter do
         "choices" => [%{"index" => 0, "delta" => delta, "finish_reason" => finish}]
       }
     end
+
+    # Streaming tool calls carry a per-choice `index` in each delta entry.
+    tool_call_deltas =
+      case tool_calls do
+        nil ->
+          []
+
+        calls ->
+          calls
+          |> Enum.with_index()
+          |> Enum.map(fn {call, i} -> chunk_map.(%{"tool_calls" => [Map.put(call, "index", i)]}, nil) end)
+      end
+
+    content_deltas = if content == "" and tool_calls != nil, do: [], else: [chunk_map.(%{"content" => content}, nil)]
 
     usage_chunk = %{
       "id" => id,
@@ -300,12 +336,10 @@ defmodule Coordinator.ApiRouter do
       |> send_chunked(200)
 
     events =
-      [
-        chunk_map.(%{"role" => "assistant"}, nil),
-        chunk_map.(%{"content" => content}, nil),
-        chunk_map.(%{}, "stop"),
-        usage_chunk
-      ]
+      ([chunk_map.(%{"role" => "assistant"}, nil)] ++
+         content_deltas ++
+         tool_call_deltas ++
+         [chunk_map.(%{}, finish_reason(tool_calls)), usage_chunk])
       |> Enum.map(&("data: " <> Jason.encode!(&1) <> "\n\n"))
 
     Enum.reduce_while(events ++ ["data: [DONE]\n\n"], conn, fn event, conn ->
