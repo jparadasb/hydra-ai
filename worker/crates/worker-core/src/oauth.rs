@@ -5,9 +5,10 @@
 //!     loopback), then Code Assist onboarding (`cloudcode-pa.googleapis.com`) for the
 //!     free-tier project. Yields [`OAuthTokens`] (flavor `google_code_assist`) stored in
 //!     the vault; the Code Assist adapter refreshes the access token as needed.
-//!   * **OpenAI** — "Sign in with ChatGPT" PKCE against `auth.openai.com` (the public
-//!     Codex client), then a token-exchange that **mints a standard platform API key**.
-//!     Only the key is kept; the regular OpenAI adapter uses it unchanged.
+//!   * **OpenAI** — "Sign in with ChatGPT" PKCE against `auth.openai.com` (the public Codex
+//!     client). The account's OAuth tokens are kept (flavor `openai_chatgpt`, with the
+//!     ChatGPT account id from the id_token) so the ChatGPT backend can be used directly —
+//!     no platform API key or organization required.
 //!
 //! Installed-app client ids/secrets below are public by design (RFC 8252 §8.5); PKCE is
 //! what protects the flow. Loopback capture auto-completes when a local browser exists;
@@ -59,6 +60,9 @@ const OPENAI_SCOPES: &str =
     "openid profile email offline_access api.connectors.read api.connectors.invoke";
 
 pub const FLAVOR_GOOGLE_CODE_ASSIST: &str = "google_code_assist";
+/// Sign in with ChatGPT: use the account's OAuth tokens directly against the ChatGPT backend
+/// (Codex Responses API) — for accounts without a platform API organization, so no key needed.
+pub const FLAVOR_OPENAI_CHATGPT: &str = "openai_chatgpt";
 
 /// OAuth credential blob stored (JSON-serialized) as a vault secret value. A vault entry is
 /// either a plain API key or this JSON — `from_vault_value` distinguishes.
@@ -73,6 +77,9 @@ pub struct OAuthTokens {
     /// Code Assist project id (Google flavor).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
+    /// ChatGPT workspace/account id sent as the `chatgpt-account-id` header (OpenAI flavor).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
 }
 
 impl OAuthTokens {
@@ -342,6 +349,7 @@ pub async fn login_google(client: &reqwest::Client, mode: CaptureMode) -> Result
         refresh_token,
         expires_at_unix,
         project_id: Some(project_id),
+        account_id: None,
     })
 }
 
@@ -375,6 +383,19 @@ pub async fn refresh_google(client: &reqwest::Client, tokens: &mut OAuthTokens) 
         tokens.refresh_token = Some(rotated.to_string());
     }
     Ok(())
+}
+
+/// Decode the `chatgpt_account_id` claim from an OpenAI id_token (JWT). The claim lives under
+/// `https://api.openai.com/auth` in the JWT payload (middle, base64url) segment.
+fn chatgpt_account_id_from_id_token(id_token: &str) -> Option<String> {
+    let payload_b64 = id_token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    claims["https://api.openai.com/auth"]["chatgpt_account_id"]
+        .as_str()
+        .map(String::from)
 }
 
 /// Code Assist onboarding: discover (or create, free tier) the managed project id the
@@ -441,8 +462,11 @@ async fn code_assist_onboard(client: &reqwest::Client, access_token: &str) -> Re
 // OpenAI — sign in with ChatGPT, mint a platform API key
 // ---------------------------------------------------------------------------
 
-/// Sign in with ChatGPT and mint a standard OpenAI platform API key (the only thing kept).
-pub async fn login_openai_mint_key(client: &reqwest::Client, mode: CaptureMode) -> Result<String> {
+/// Sign in with ChatGPT and keep the OAuth tokens to drive the ChatGPT backend (Codex
+/// Responses API) directly — no platform API key or organization required. Returns an
+/// `OAuthTokens` blob (flavor `openai_chatgpt`) carrying access/refresh + the ChatGPT
+/// account id from the id_token.
+pub async fn login_openai(client: &reqwest::Client, mode: CaptureMode) -> Result<OAuthTokens> {
     let pkce = pkce();
     let state = random_state();
     // The Codex client requires this exact loopback redirect.
@@ -472,50 +496,59 @@ pub async fn login_openai_mint_key(client: &reqwest::Client, mode: CaptureMode) 
         .send()
         .await?;
     let grant = expect_json(resp, "openai token grant").await?;
-    let id_token = grant["id_token"]
-        .as_str()
-        .ok_or_else(|| Error::Other("openai grant had no id_token".into()))?;
 
-    // RFC 8693 token exchange: id_token → platform API key.
+    let access_token = grant["access_token"]
+        .as_str()
+        .ok_or_else(|| Error::Other("openai grant had no access_token".into()))?
+        .to_string();
+    let refresh_token = grant["refresh_token"].as_str().map(String::from);
+    let expires_at_unix = now_unix() + grant["expires_in"].as_u64().unwrap_or(3600);
+    let account_id = grant["id_token"]
+        .as_str()
+        .and_then(chatgpt_account_id_from_id_token);
+
+    Ok(OAuthTokens {
+        flavor: FLAVOR_OPENAI_CHATGPT.into(),
+        access_token,
+        refresh_token,
+        expires_at_unix,
+        project_id: None,
+        account_id,
+    })
+}
+
+/// Refresh an OpenAI access token in place (ChatGPT-backend flavor). Errors without a refresh
+/// token.
+pub async fn refresh_openai(client: &reqwest::Client, tokens: &mut OAuthTokens) -> Result<()> {
+    let refresh = tokens
+        .refresh_token
+        .clone()
+        .ok_or_else(|| Error::MissingCredentials("openai oauth refresh token".into()))?;
+
     let resp = client
         .post(format!("{OPENAI_ISSUER}/oauth/token"))
         .form(&[
-            ("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange"),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh.as_str()),
             ("client_id", OPENAI_CLIENT_ID),
-            ("requested_token", "openai-api-key"),
-            ("subject_token", id_token),
-            ("subject_token_type", "urn:ietf:params:oauth:token-type:id_token"),
+            ("scope", "openid profile email"),
         ])
         .send()
         .await?;
+    let grant = expect_json(resp, "openai token refresh").await?;
 
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        // The mint only works for accounts that already have a platform (API) organization.
-        // A ChatGPT-only account has no org, so the id_token carries no organization_id.
-        if body.contains("organization_id") || body.contains("invalid_subject_token") {
-            return Err(Error::Other(
-                "Signed in, but no OpenAI API key could be minted: this account has no \
-                 platform organization. Create/enable API access at \
-                 https://platform.openai.com/ (Settings → Organization), then try again — or \
-                 add a key manually with `hydra-worker provider add openai`."
-                    .into(),
-            ));
-        }
-        return Err(Error::ProviderStatus {
-            status: status.as_u16(),
-            body: format!("openai api-key exchange: {}", crate::vault::redact(&body)),
-        });
-    }
-
-    let exchange: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| Error::Other(format!("openai api-key exchange: bad JSON: {e}")))?;
-
-    exchange["access_token"]
+    tokens.access_token = grant["access_token"]
         .as_str()
-        .map(String::from)
-        .ok_or_else(|| Error::Other("api-key exchange returned no key".into()))
+        .ok_or_else(|| Error::Other("openai refresh had no access_token".into()))?
+        .to_string();
+    tokens.expires_at_unix = now_unix() + grant["expires_in"].as_u64().unwrap_or(3600);
+    if let Some(rotated) = grant["refresh_token"].as_str() {
+        tokens.refresh_token = Some(rotated.to_string());
+    }
+    if let Some(id) = grant["id_token"].as_str().and_then(chatgpt_account_id_from_id_token) {
+        tokens.account_id = Some(id);
+    }
+    Ok(())
 }
 
 async fn expect_json(resp: reqwest::Response, what: &str) -> Result<serde_json::Value> {
@@ -551,6 +584,7 @@ mod tests {
             refresh_token: Some("1//refresh".into()),
             expires_at_unix: 42,
             project_id: Some("proj-123".into()),
+            account_id: None,
         };
         let value = tokens.to_vault_value();
         let parsed = OAuthTokens::from_vault_value(&value).expect("parses back");
@@ -567,5 +601,25 @@ mod tests {
         assert_eq!(query_param(q, "code").as_deref(), Some("4/0AX4Xf"));
         assert_eq!(query_param(q, "state").as_deref(), Some("ab cd"));
         assert_eq!(query_param(q, "missing"), None);
+    }
+
+    #[test]
+    fn extracts_chatgpt_account_id_from_id_token() {
+        // A JWT (header.payload.sig) whose payload carries the OpenAI auth claim.
+        let payload = serde_json::json!({
+            "https://api.openai.com/auth": { "chatgpt_account_id": "acct-xyz" }
+        });
+        let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+        let jwt = format!(
+            "{}.{}.{}",
+            b64(b"{\"alg\":\"none\"}"),
+            b64(serde_json::to_vec(&payload).unwrap().as_slice()),
+            b64(b"sig")
+        );
+        assert_eq!(
+            chatgpt_account_id_from_id_token(&jwt).as_deref(),
+            Some("acct-xyz")
+        );
+        assert_eq!(chatgpt_account_id_from_id_token("not-a-jwt"), None);
     }
 }

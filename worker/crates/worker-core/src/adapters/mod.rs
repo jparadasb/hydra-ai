@@ -9,11 +9,13 @@ pub mod gemini;
 pub mod gemini_oauth;
 pub mod local_openai;
 pub mod ollama;
+pub mod openai_chatgpt;
 pub mod openai_compatible;
 
 pub use anthropic::AnthropicAdapter;
 pub use gemini::GeminiAdapter;
 pub use gemini_oauth::GeminiCodeAssistAdapter;
+pub use openai_chatgpt::ChatGptBackendAdapter;
 pub use local_openai::LocalOpenAiAdapter;
 pub use ollama::OllamaAdapter;
 pub use openai_compatible::{OpenAICompatibleAdapter, Pricing};
@@ -54,6 +56,10 @@ pub fn build_external_adapter(
             crate::oauth::FLAVOR_GOOGLE_CODE_ASSIST => Ok(Arc::new(match base_url {
                 Some(b) => GeminiCodeAssistAdapter::with_base_url(b, oauth, client),
                 None => GeminiCodeAssistAdapter::new(oauth, client),
+            })),
+            crate::oauth::FLAVOR_OPENAI_CHATGPT => Ok(Arc::new(match base_url {
+                Some(b) => ChatGptBackendAdapter::with_base_url(b, oauth, client),
+                None => ChatGptBackendAdapter::new(oauth, client),
             })),
             other => Err(Error::Other(format!(
                 "unsupported oauth credential flavor '{other}' for provider '{provider}'"
@@ -100,6 +106,7 @@ mod tests {
             refresh_token: None,
             expires_at_unix: 0,
             project_id: Some("p".into()),
+            account_id: None,
         }
         .to_vault_value();
 
@@ -120,6 +127,7 @@ mod tests {
             refresh_token: None,
             expires_at_unix: 0,
             project_id: None,
+            account_id: None,
         }
         .to_vault_value();
         assert!(build_external_adapter("gemini", None, Secret::new(bad), client).is_err());

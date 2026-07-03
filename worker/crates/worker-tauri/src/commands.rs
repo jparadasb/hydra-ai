@@ -67,12 +67,14 @@ impl Commands {
                 ("gemini", tokens.to_vault_value(), label)
             }
             "openai" | "chatgpt" => {
-                let key = oauth::login_openai_mint_key(&self.http, CaptureMode::LoopbackOnly)
+                let tokens = oauth::login_openai(&self.http, CaptureMode::LoopbackOnly)
                     .await
                     .map_err(|e| e.to_string())?;
-                let secret = Secret::new(key);
-                let fp = secret.fingerprint();
-                ("openai", secret.expose().to_string(), fp)
+                let label = match &tokens.account_id {
+                    Some(a) => format!("chatgpt · {a}"),
+                    None => "chatgpt".to_string(),
+                };
+                ("openai", tokens.to_vault_value(), label)
             }
             other => return Err(format!("provider '{other}' has no OAuth login")),
         };

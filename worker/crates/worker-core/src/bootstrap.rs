@@ -76,6 +76,7 @@ mod tests {
             refresh_token: Some("1//r".into()),
             expires_at_unix: crate::oauth::now_unix() + 3600,
             project_id: Some("proj-1".into()),
+            account_id: None,
         }
         .to_vault_value();
         vault.add("gemini", Secret::new(blob)).unwrap();

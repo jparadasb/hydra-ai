@@ -198,22 +198,23 @@ async fn cmd_provider(action: ProviderAction) {
                     }
                     Err(e) => eprintln!("gemini login failed: {e}"),
                 },
-                _ => match worker_core::oauth::login_openai_mint_key(
+                _ => match worker_core::oauth::login_openai(
                     &http,
                     worker_core::oauth::CaptureMode::LoopbackOrPaste,
                 )
                 .await
                 {
-                    Ok(api_key) => {
-                        let secret = Secret::new(api_key);
-                        let fp = secret.fingerprint();
-                        match vault.add("openai", secret) {
+                    Ok(tokens) => {
+                        let acct = tokens.account_id.clone().unwrap_or_default();
+                        match vault.add("openai", Secret::new(tokens.to_vault_value())) {
                             Ok(()) => {
                                 if let Some(mut cfg) = load_config() {
                                     cfg.upsert_provider("openai", None);
                                     let _ = save_config(&cfg);
                                 }
-                                println!("Signed in with ChatGPT; minted API key ({fp}) stored for 'openai'.");
+                                println!(
+                                    "Signed in with ChatGPT (account {acct}); using the ChatGPT backend for 'openai'."
+                                );
                             }
                             Err(e) => eprintln!("vault error: {e}"),
                         }

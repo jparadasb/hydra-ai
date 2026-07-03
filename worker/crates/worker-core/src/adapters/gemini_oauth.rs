@@ -144,6 +144,7 @@ mod tests {
             // far future: no refresh attempted in tests
             expires_at_unix: crate::oauth::now_unix() + 3600,
             project_id: Some("proj-1".into()),
+            account_id: None,
         }
     }
 
