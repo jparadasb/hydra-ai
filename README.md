@@ -16,6 +16,22 @@ usage metadata, and routes jobs by capability / privacy / trust / cost / policy.
 non-serializable on the worker; the coordinator's `SecretGuard` strips/rejects any
 secret-shaped payload. Asserted by tests on both sides.
 
+## Provider terms & compliance
+
+Hydra is a **community compute coordinator** for local and open-weight model sharing — not an
+API resale platform, marketplace, or a way to pool provider quotas.
+
+**Local compute is shareable. Commercial API keys are private by default.** An external
+provider you configure (OpenAI, Anthropic, Gemini, …) is used **only for your own requests**:
+by default it serves `private` jobs only, and public/shared jobs run on local/open-weight
+models — your paid key is never used to answer arbitrary requesters. Sharing an external
+provider with a trusted org/community is opt-in and off by default.
+
+Hydra does **not** authorize users to share, resell, lease, transfer, sublicense, or pool
+third-party API credentials or API capacity in violation of provider terms. Do not enable
+external-provider sharing unless your provider terms allow others to use capacity from your
+account. You are responsible for your own compliance with each provider's terms.
+
 ## Layout
 
 ```

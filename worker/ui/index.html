@@ -102,6 +102,12 @@
             <input id="p-token" type="password" placeholder="or paste a token (sk-…)" autocomplete="off" />
             <button id="add-provider" class="primary">Add</button>
           </div>
+          <p class="notice">A provider key is used only for your own requests. By default it
+            serves <b>private</b> jobs only — public/shared jobs run on local models, never your
+            paid key. Don't enable sharing for a provider unless your provider terms allow others
+            to use capacity from your account. Hydra does not authorize sharing, reselling,
+            leasing, sublicensing, or pooling third-party API access in violation of provider
+            terms.</p>
           <table class="grid">
             <thead><tr><th>Provider</th><th>Fingerprint</th><th>Status</th><th></th></tr></thead>
             <tbody id="provider-rows"></tbody>

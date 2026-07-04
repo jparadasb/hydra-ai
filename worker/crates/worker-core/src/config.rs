@@ -30,7 +30,12 @@ impl Default for RoutingPolicy {
         Self {
             preference: Preference::PreferLocal,
             fallback_to_external_provider: false,
-            external_provider_allowed_privacy_levels: vec![PrivacyLevel::Public],
+            // Commercial API keys are private by default: an external provider may serve
+            // `private` jobs (whose owner opted in with `allow_external`) but never `public`
+            // ones. Public jobs run on local/open-weight models only, so a paid key is never
+            // used to answer requests from arbitrary requesters. Owners who genuinely intend
+            // to share can add `Public` back (desktop UI / config).
+            external_provider_allowed_privacy_levels: vec![PrivacyLevel::Private],
         }
     }
 }

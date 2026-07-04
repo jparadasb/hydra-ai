@@ -128,6 +128,22 @@ mod tests {
     }
 
     #[test]
+    fn default_policy_keeps_commercial_keys_private() {
+        // Compliance guarantee: out of the box, an external provider serves `private` jobs
+        // (owner opted in) but never `public` ones — a paid key is never used to answer
+        // arbitrary requesters. See config::RoutingPolicy::default.
+        let p = RoutingPolicy::default();
+        assert!(matches!(
+            check(PrivacyLevel::Public, true, true, &p),
+            Decision::Deny(_)
+        ));
+        assert_eq!(
+            check(PrivacyLevel::Private, true, true, &p),
+            Decision::Allow
+        );
+    }
+
+    #[test]
     fn public_follows_policy() {
         assert_eq!(
             check(

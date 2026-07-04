@@ -168,6 +168,7 @@ async fn cmd_provider(action: ProviderAction) {
                         let _ = save_config(&cfg);
                     }
                     println!("Stored token for '{name}' ({fp}).");
+                    print_external_provider_notice();
                 }
                 Err(e) => eprintln!("vault error: {e}"),
             }
@@ -192,6 +193,7 @@ async fn cmd_provider(action: ProviderAction) {
                                 }
                                 println!("Signed in to Google (Code Assist project '{project}').");
                                 println!("Stored OAuth credential for 'gemini'.");
+                                print_external_provider_notice();
                             }
                             Err(e) => eprintln!("vault error: {e}"),
                         }
@@ -215,6 +217,7 @@ async fn cmd_provider(action: ProviderAction) {
                                 println!(
                                     "Signed in with ChatGPT (account {acct}); using the ChatGPT backend for 'openai'."
                                 );
+                                print_external_provider_notice();
                             }
                             Err(e) => eprintln!("vault error: {e}"),
                         }
@@ -251,6 +254,21 @@ async fn cmd_provider(action: ProviderAction) {
             }
         }
     }
+}
+
+/// Printed after an external provider is added or signed in. Makes the sharing boundary
+/// explicit: by default the key answers only the owner's own (private) requests, and
+/// Hydra does not authorize pooling/reselling third-party API access.
+fn print_external_provider_notice() {
+    eprintln!(
+        "\n\
+         Note: this provider key is used only for your own requests. By default it serves\n\
+         private jobs only — public/shared jobs run on local models, never your paid key.\n\
+         Do not enable sharing for this provider unless your provider terms allow others to\n\
+         use capacity from your account. Hydra does not authorize sharing, reselling, leasing,\n\
+         transferring, sublicensing, or pooling third-party API access in violation of\n\
+         provider terms."
+    );
 }
 
 fn cmd_usage(period: Option<String>) {

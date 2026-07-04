@@ -103,7 +103,7 @@ fn job(privacy: PrivacyLevel, allow_external: bool) -> Job {
 
 #[tokio::test]
 async fn public_prefers_local_under_prefer_local() {
-    let g = gateway_with(RoutingPolicy::default()).await; // PreferLocal, external allowed for public
+    let g = gateway_with(RoutingPolicy::default()).await; // PreferLocal; public runs on local
     let r = g.execute(&job(PrivacyLevel::Public, false)).await;
     assert_eq!(r.status, JobStatus::Ok);
     assert_eq!(r.usage.unwrap().provider, "ollama");
@@ -176,7 +176,14 @@ async fn private_routes_external_only_when_permitted() {
 async fn requested_model_is_honored_over_default_ordering() {
     // PreferLocal would normally pick the local "ollama-model"; requesting "openai-model"
     // must route to that exact model instead (bug: gateway served whatever was first).
-    let g = gateway_with(RoutingPolicy::default()).await;
+    // Explicit policy: this test exercises model routing on a public+external job, so it
+    // must allow external for public (the default now permits external for private only).
+    let g = gateway_with(RoutingPolicy {
+        preference: Preference::PreferLocal,
+        fallback_to_external_provider: false,
+        external_provider_allowed_privacy_levels: vec![PrivacyLevel::Public, PrivacyLevel::Private],
+    })
+    .await;
     let mut j = job(PrivacyLevel::Public, true);
     j.payload = json!({
         "messages": [{ "role": "user", "content": "hi" }],
