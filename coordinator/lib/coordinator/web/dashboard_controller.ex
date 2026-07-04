@@ -2,7 +2,8 @@ defmodule Coordinator.Web.DashboardController do
   @moduledoc """
   Admin dashboard: connected workers vs pending/processed jobs, with charts.
 
-  * `GET /admin/dashboard` — static HTML shell (Tailwind + Chart.js via CDN, no asset build).
+  * `GET /admin/dashboard` — HTML shell from `Coordinator.Web.AdminLayout` (inline CSS, no
+    asset build; only Chart.js comes from a CDN and the page degrades gracefully without it).
   * `GET /admin/stats`     — JSON snapshot (`Coordinator.Stats`) the page polls every 5s.
 
   Both sit behind the `/admin` auth pipeline (GitHub OAuth in prod, open on loopback dev).
@@ -13,6 +14,8 @@ defmodule Coordinator.Web.DashboardController do
 
   import Plug.Conn
 
+  alias Coordinator.Web.AdminLayout
+
   def stats(conn, _params) do
     conn
     |> put_resp_header("cache-control", "no-store")
@@ -22,215 +25,188 @@ defmodule Coordinator.Web.DashboardController do
   def index(conn, _params) do
     conn
     |> put_resp_header("cache-control", "no-store")
-    |> html(page())
+    |> html(page(conn))
   end
 
-  defp page do
+  defp page(conn) do
+    AdminLayout.page(conn,
+      title: "dashboard",
+      active: :dashboard,
+      head_extra: ~s(<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>),
+      body: body()
+    )
+  end
+
+  defp body do
     """
-    <!DOCTYPE html>
-    <html class="h-full">
-    <head>
-      <meta charset="utf-8">
-      <title>hydra admin — dashboard</title>
-      <meta name="viewport" content="width=device-width, initial-scale=1">
-      <script src="https://cdn.tailwindcss.com"></script>
-      <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-    </head>
-    <body class="h-full bg-slate-950 text-slate-100 font-sans">
-      <div class="max-w-6xl mx-auto px-4 py-8">
-        <header class="flex items-baseline justify-between mb-8">
-          <h1 class="text-xl font-semibold tracking-tight">hydra coordinator</h1>
-          <nav class="space-x-4 text-sm text-slate-400">
-            <a class="hover:text-white" href="/admin">API keys</a>
-            <a class="hover:text-white" href="/admin/workers">Workers</a>
-            <a class="hover:text-white" href="/admin/oban">Oban</a>
-            <a class="hover:text-white" href="/auth/logout">Log out</a>
-          </nav>
-        </header>
+    <h1>Dashboard</h1>
+    <p class="lead">Connected workers and job flow. Auto-refreshes every 5 seconds.</p>
 
-        <!-- stat cards -->
-        <div class="grid grid-cols-2 md:grid-cols-6 gap-3 mb-8">
-          <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
-            <div class="text-xs uppercase tracking-wide text-slate-400">Workers</div>
-            <div id="stat-workers" class="text-3xl font-semibold mt-1">–</div>
-          </div>
-          <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
-            <div class="text-xs uppercase tracking-wide text-slate-400">Inflight</div>
-            <div id="stat-inflight" class="text-3xl font-semibold mt-1">–</div>
-          </div>
-          <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
-            <div class="text-xs uppercase tracking-wide text-amber-400">Pending</div>
-            <div id="stat-pending" class="text-3xl font-semibold mt-1">–</div>
-          </div>
-          <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
-            <div class="text-xs uppercase tracking-wide text-sky-400">Leased</div>
-            <div id="stat-leased" class="text-3xl font-semibold mt-1">–</div>
-          </div>
-          <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
-            <div class="text-xs uppercase tracking-wide text-emerald-400">Done</div>
-            <div id="stat-done" class="text-3xl font-semibold mt-1">–</div>
-          </div>
-          <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
-            <div class="text-xs uppercase tracking-wide text-rose-400">Failed</div>
-            <div id="stat-failed" class="text-3xl font-semibold mt-1">–</div>
-          </div>
-        </div>
+    <!-- stat cards -->
+    <div class="stats-grid">
+      <div class="stat"><div class="stat-label">Workers</div><div id="stat-workers" class="stat-value">–</div></div>
+      <div class="stat"><div class="stat-label">Inflight</div><div id="stat-inflight" class="stat-value">–</div></div>
+      <div class="stat"><div class="stat-label warn">Pending</div><div id="stat-pending" class="stat-value">–</div></div>
+      <div class="stat"><div class="stat-label sky">Leased</div><div id="stat-leased" class="stat-value">–</div></div>
+      <div class="stat"><div class="stat-label ok">Done</div><div id="stat-done" class="stat-value">–</div></div>
+      <div class="stat"><div class="stat-label bad">Failed</div><div id="stat-failed" class="stat-value">–</div></div>
+    </div>
 
-        <!-- charts -->
-        <div class="grid md:grid-cols-3 gap-3 mb-8">
-          <div class="md:col-span-2 rounded-xl bg-slate-900 border border-slate-800 p-4">
-            <h2 class="text-sm font-medium text-slate-300 mb-3">Processed jobs — last 24h</h2>
-            <canvas id="chart-throughput" height="110"></canvas>
-          </div>
-          <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
-            <h2 class="text-sm font-medium text-slate-300 mb-3">Job status</h2>
-            <canvas id="chart-status" height="110"></canvas>
-          </div>
-        </div>
-
-        <!-- workers table -->
-        <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
-          <h2 class="text-sm font-medium text-slate-300 mb-3">Connected workers</h2>
-          <table class="w-full text-sm">
-            <thead class="text-left text-xs uppercase tracking-wide text-slate-500">
-              <tr>
-                <th class="py-2 pr-4">Worker</th>
-                <th class="py-2 pr-4">Mode</th>
-                <th class="py-2 pr-4">Models</th>
-                <th class="py-2 pr-4">Capabilities</th>
-                <th class="py-2 pr-4">Accepted</th>
-                <th class="py-2 pr-4 text-right">Inflight</th>
-                <th class="py-2 pr-4 text-right">Avg latency</th>
-                <th class="py-2">Status</th>
-              </tr>
-            </thead>
-            <tbody id="workers-body">
-              <tr><td colspan="8" class="py-4 text-slate-500">Loading…</td></tr>
-            </tbody>
-          </table>
-        </div>
-
-        <p class="mt-4 text-xs text-slate-600">
-          Auto-refreshes every 5s · <span id="updated-at"></span>
-        </p>
+    <!-- charts -->
+    <div class="charts">
+      <div class="panel">
+        <h2 style="margin-top:0">Processed jobs — last 24h</h2>
+        <canvas id="chart-throughput" height="110"></canvas>
       </div>
+      <div class="panel">
+        <h2 style="margin-top:0">Job status</h2>
+        <canvas id="chart-status" height="110"></canvas>
+      </div>
+    </div>
 
-      <script>
-        // Resilient by construction: the stat cards and workers table always render, even if
-        // the Chart.js CDN is blocked (adblock/privacy shields) — charts are created lazily and
-        // guarded. Any fetch/render problem is surfaced in the footer instead of dying silently.
-        const fmtHour = iso => new Date(iso).toLocaleTimeString([], {hour: '2-digit'});
-        const note = msg => { document.getElementById('updated-at').textContent = msg; };
-        let throughputChart = null, statusChart = null;
+    <!-- workers table -->
+    <h2>Connected workers</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Worker</th><th>Mode</th><th>Models</th><th>Capabilities</th>
+            <th>Accepted</th><th class="num">Inflight</th><th class="num">Avg latency</th><th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="workers-body">
+          <tr><td colspan="8" class="muted">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
 
-        function ensureCharts() {
-          if (throughputChart || typeof Chart === 'undefined') return;
-          throughputChart = new Chart(document.getElementById('chart-throughput'), {
-            type: 'bar',
-            data: { labels: [], datasets: [
-              { label: 'done',   data: [], backgroundColor: 'rgba(52,211,153,0.8)', stack: 's' },
-              { label: 'failed', data: [], backgroundColor: 'rgba(251,113,133,0.8)', stack: 's' }
-            ]},
-            options: {
-              responsive: true,
-              scales: {
-                x: { stacked: true, ticks: { color: '#64748b' }, grid: { display: false } },
-                y: { stacked: true, beginAtZero: true, ticks: { color: '#64748b', precision: 0 }, grid: { color: '#1e293b' } }
-              },
-              plugins: { legend: { labels: { color: '#94a3b8' } } }
-            }
-          });
-          statusChart = new Chart(document.getElementById('chart-status'), {
-            type: 'doughnut',
-            data: { labels: ['pending', 'leased', 'done', 'failed'], datasets: [{
-              data: [0, 0, 0, 0],
-              backgroundColor: ['rgba(251,191,36,0.85)', 'rgba(56,189,248,0.85)', 'rgba(52,211,153,0.85)', 'rgba(251,113,133,0.85)'],
-              borderColor: '#0f172a'
-            }]},
-            options: { responsive: true, plugins: { legend: { position: 'bottom', labels: { color: '#94a3b8' } } } }
-          });
-        }
+    <p class="footnote">Auto-refreshes every 5s · <span id="updated-at"></span></p>
 
-        function cell(text, cls) {
-          const td = document.createElement('td');
-          td.className = 'py-2 pr-4 ' + (cls || '');
-          td.textContent = text;
-          return td;
-        }
+    <script>
+      // Resilient by construction: the stat cards and workers table always render, even if
+      // the Chart.js CDN is blocked (adblock/privacy shields) — charts are created lazily and
+      // guarded. Any fetch/render problem is surfaced in the footer instead of dying silently.
+      const C = {
+        accent: '#4ade80', warn: '#fbbf24', sky: '#38bdf8', danger: '#f87171',
+        muted: '#7d8aa0', grid: '#232c3a', panel: '#151a21'
+      };
+      const fmtHour = iso => new Date(iso).toLocaleTimeString([], {hour: '2-digit'});
+      const note = msg => { document.getElementById('updated-at').textContent = msg; };
+      let throughputChart = null, statusChart = null;
 
-        function renderCardsAndTable(s) {
-          const workers = s.workers || [];
-          const jobs = s.jobs || {};
-          document.getElementById('stat-workers').textContent = workers.length;
-          document.getElementById('stat-inflight').textContent = workers.reduce((n, w) => n + (w.inflight || 0), 0);
-          for (const k of ['pending', 'leased', 'done', 'failed'])
-            document.getElementById('stat-' + k).textContent = jobs[k] ?? 0;
-
-          const body = document.getElementById('workers-body');
-          body.replaceChildren();
-          if (workers.length === 0) {
-            const tr = document.createElement('tr');
-            const td = cell('No workers connected.', 'text-slate-500');
-            td.colSpan = 8;
-            tr.appendChild(td);
-            body.appendChild(tr);
+      function ensureCharts() {
+        if (throughputChart || typeof Chart === 'undefined') return;
+        throughputChart = new Chart(document.getElementById('chart-throughput'), {
+          type: 'bar',
+          data: { labels: [], datasets: [
+            { label: 'done',   data: [], backgroundColor: C.accent, stack: 's' },
+            { label: 'failed', data: [], backgroundColor: C.danger, stack: 's' }
+          ]},
+          options: {
+            responsive: true,
+            scales: {
+              x: { stacked: true, ticks: { color: C.muted }, grid: { display: false } },
+              y: { stacked: true, beginAtZero: true, ticks: { color: C.muted, precision: 0 }, grid: { color: C.grid } }
+            },
+            plugins: { legend: { labels: { color: C.muted } } }
           }
-          for (const w of workers) {
-            const tr = document.createElement('tr');
-            tr.className = 'border-t border-slate-800';
-            tr.appendChild(cell(w.worker_id, 'font-mono text-xs'));
-            tr.appendChild(cell(w.execution_mode + (w.provider ? ' · ' + w.provider : '')));
-            tr.appendChild(cell(String(w.models)));
-            tr.appendChild(cell((w.capabilities || []).join(', '), 'text-slate-400 text-xs'));
-            tr.appendChild(cell((w.accepted_job_levels || []).join(', '), 'text-slate-400 text-xs'));
-            tr.appendChild(cell(String(w.inflight), 'text-right'));
-            tr.appendChild(cell(Math.round(w.avg_latency_ms) + ' ms', 'text-right text-slate-400'));
-            tr.appendChild(cell(w.available ? 'available' : 'busy',
-              w.available ? 'text-emerald-400' : 'text-amber-400'));
-            body.appendChild(tr);
+        });
+        statusChart = new Chart(document.getElementById('chart-status'), {
+          type: 'doughnut',
+          data: { labels: ['pending', 'leased', 'done', 'failed'], datasets: [{
+            data: [0, 0, 0, 0],
+            backgroundColor: [C.warn, C.sky, C.accent, C.danger],
+            borderColor: C.panel
+          }]},
+          options: { responsive: true, plugins: { legend: { position: 'bottom', labels: { color: C.muted } } } }
+        });
+      }
+
+      function cell(text, cls) {
+        const td = document.createElement('td');
+        if (cls) td.className = cls;
+        td.textContent = text;
+        return td;
+      }
+
+      function badge(text, ok) {
+        const td = document.createElement('td');
+        const span = document.createElement('span');
+        span.className = ok ? 'badge badge-ok' : 'badge badge-warn';
+        span.textContent = text;
+        td.appendChild(span);
+        return td;
+      }
+
+      function renderCardsAndTable(s) {
+        const workers = s.workers || [];
+        const jobs = s.jobs || {};
+        document.getElementById('stat-workers').textContent = workers.length;
+        document.getElementById('stat-inflight').textContent = workers.reduce((n, w) => n + (w.inflight || 0), 0);
+        for (const k of ['pending', 'leased', 'done', 'failed'])
+          document.getElementById('stat-' + k).textContent = jobs[k] ?? 0;
+
+        const body = document.getElementById('workers-body');
+        body.replaceChildren();
+        if (workers.length === 0) {
+          const tr = document.createElement('tr');
+          const td = cell('No workers connected.', 'muted');
+          td.colSpan = 8;
+          tr.appendChild(td);
+          body.appendChild(tr);
+        }
+        for (const w of workers) {
+          const tr = document.createElement('tr');
+          tr.appendChild(cell(w.worker_id, 'mono'));
+          tr.appendChild(cell(w.execution_mode + (w.provider ? ' · ' + w.provider : '')));
+          tr.appendChild(cell(String(w.models)));
+          tr.appendChild(cell((w.capabilities || []).join(', '), 'muted'));
+          tr.appendChild(cell((w.accepted_job_levels || []).join(', '), 'muted'));
+          tr.appendChild(cell(String(w.inflight), 'num'));
+          tr.appendChild(cell(Math.round(w.avg_latency_ms) + ' ms', 'num muted'));
+          tr.appendChild(badge(w.available ? 'available' : 'busy', w.available));
+          body.appendChild(tr);
+        }
+      }
+
+      function renderCharts(s) {
+        ensureCharts();
+        if (!throughputChart) return;
+        const jobs = s.jobs || {};
+        const tp = s.throughput || [];
+        throughputChart.data.labels = tp.map(b => fmtHour(b.hour));
+        throughputChart.data.datasets[0].data = tp.map(b => b.done);
+        throughputChart.data.datasets[1].data = tp.map(b => b.failed);
+        throughputChart.update('none');
+        statusChart.data.datasets[0].data = ['pending', 'leased', 'done', 'failed'].map(k => jobs[k] ?? 0);
+        statusChart.update('none');
+      }
+
+      async function refresh() {
+        let s;
+        try {
+          const resp = await fetch('/admin/stats', {
+            headers: { accept: 'application/json' },
+            credentials: 'same-origin',
+            cache: 'no-store'
+          });
+          if (!resp.ok) { note('stats error HTTP ' + resp.status); return; }
+          if (resp.redirected || (resp.headers.get('content-type') || '').indexOf('json') < 0) {
+            note('session expired — reload the page to log in again');
+            return;
           }
-        }
+          s = await resp.json();
+        } catch (e) { note('stats fetch failed: ' + e.message); return; }
 
-        function renderCharts(s) {
-          ensureCharts();
-          if (!throughputChart) return;
-          const jobs = s.jobs || {};
-          const tp = s.throughput || [];
-          throughputChart.data.labels = tp.map(b => fmtHour(b.hour));
-          throughputChart.data.datasets[0].data = tp.map(b => b.done);
-          throughputChart.data.datasets[1].data = tp.map(b => b.failed);
-          throughputChart.update('none');
-          statusChart.data.datasets[0].data = ['pending', 'leased', 'done', 'failed'].map(k => jobs[k] ?? 0);
-          statusChart.update('none');
-        }
+        try { renderCardsAndTable(s); } catch (e) { note('render error: ' + e.message); return; }
+        try { renderCharts(s); } catch (e) { note('chart error: ' + e.message); return; }
+        note('updated ' + new Date().toLocaleTimeString() +
+             (throughputChart ? '' : ' · charts unavailable (CDN blocked?)'));
+      }
 
-        async function refresh() {
-          let s;
-          try {
-            const resp = await fetch('/admin/stats', {
-              headers: { accept: 'application/json' },
-              credentials: 'same-origin',
-              cache: 'no-store'
-            });
-            if (!resp.ok) { note('stats error HTTP ' + resp.status); return; }
-            if (resp.redirected || (resp.headers.get('content-type') || '').indexOf('json') < 0) {
-              note('session expired — reload the page to log in again');
-              return;
-            }
-            s = await resp.json();
-          } catch (e) { note('stats fetch failed: ' + e.message); return; }
-
-          try { renderCardsAndTable(s); } catch (e) { note('render error: ' + e.message); return; }
-          try { renderCharts(s); } catch (e) { note('chart error: ' + e.message); return; }
-          note('updated ' + new Date().toLocaleTimeString() +
-               (throughputChart ? '' : ' · charts unavailable (CDN blocked?)'));
-        }
-
-        refresh();
-        setInterval(refresh, 5000);
-      </script>
-    </body>
-    </html>
+      refresh();
+      setInterval(refresh, 5000);
+    </script>
     """
   end
 end

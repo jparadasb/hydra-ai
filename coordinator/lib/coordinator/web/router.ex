@@ -20,6 +20,8 @@ defmodule Coordinator.Web.Router do
     # from the same session; html-only here made Phoenix answer those fetches with 406.
     plug(:accepts, ["html", "json"])
     plug(:fetch_session)
+    # Flash messages for the admin console (saved/revoked/restored feedback).
+    plug(:fetch_flash)
     plug(:protect_from_forgery)
     plug(:put_secure_browser_headers)
   end

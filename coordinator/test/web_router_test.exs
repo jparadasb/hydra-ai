@@ -39,7 +39,7 @@ defmodule Coordinator.Web.RouterTest do
     conn = get(build_conn(), "/admin")
     assert conn.status == 200
     assert conn.resp_body =~ "Issue a key"
-    assert conn.resp_body =~ "Oban dashboard"
+    assert conn.resp_body =~ "/admin/oban"
   end
 
   test "create then reveal a key once, then revoke it" do
@@ -57,7 +57,7 @@ defmodule Coordinator.Web.RouterTest do
     # The redirect target reveals the plaintext exactly once (carried in the session).
     revealed = conn |> recycle() |> get("/admin")
     assert revealed.resp_body =~ "will not be shown again"
-    plaintext = Regex.run(~r/<code>(hydra_sk_[^<]+)</, revealed.resp_body) |> Enum.at(1)
+    plaintext = Regex.run(~r/<code[^>]*>(hydra_sk_[^<]+)</, revealed.resp_body) |> Enum.at(1)
     assert is_binary(plaintext)
 
     # A second load no longer shows it (one-shot).
