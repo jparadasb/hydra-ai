@@ -1,0 +1,13 @@
+{
+  "name": "hydra-ai-site",
+  "private": true,
+  "description": "Build tooling for the landing page in docs/ (Tailwind v4)",
+  "scripts": {
+    "build:site": "tailwindcss -i docs/src/styles.css -o docs/tailwind.css --minify",
+    "watch:site": "tailwindcss -i docs/src/styles.css -o docs/tailwind.css --watch"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.1.0",
+    "tailwindcss": "^4.1.0"
+  }
+}

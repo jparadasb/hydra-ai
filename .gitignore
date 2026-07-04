@@ -16,6 +16,10 @@ erl_crash.dump
 /coordinator/*.db-shm
 /coordinator/*.db-wal
 
+# Landing page build (Tailwind; pages.yml rebuilds docs/tailwind.css at deploy)
+/node_modules/
+/docs/tailwind.css
+
 # Local secrets
 .env
 

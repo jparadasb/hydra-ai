@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en" data-lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hydra-ai — your machines, one AI network</title>
+<meta name="description" content="Distributed AI job network: a coordinator leases jobs to worker nodes on your machines. OpenAI-compatible API, privacy routing, provider tokens never leave the worker.">
+<link rel="icon" href="logo.png">
+<link rel="stylesheet" href="tailwind.css">
+</head>
+<body class="bg-ink font-sans text-[15px] leading-relaxed text-fg antialiased">
+
+<header class="sticky top-0 z-10 border-b border-line bg-ink/90 backdrop-blur-md">
+  <div class="mx-auto flex h-[58px] max-w-[1060px] items-center gap-4 px-[22px]">
+    <a class="inline-flex items-center gap-2.5 font-mono font-semibold tracking-wide text-fg no-underline" href="#">
+      <img class="h-6 w-6 rounded-md" src="logo.png" alt="hydra-ai logo">hydra-ai
+    </a>
+    <nav class="ml-auto flex items-center gap-[18px] text-[13px]">
+      <a class="hidden text-muted hover:text-fg md:inline" href="#how"><span class="en">How it works</span><span class="es">Cómo funciona</span></a>
+      <a class="hidden text-muted hover:text-fg md:inline" href="#privacy"><span class="en">Privacy</span><span class="es">Privacidad</span></a>
+      <a class="hidden text-muted hover:text-fg md:inline" href="#api">API</a>
+      <a class="hidden text-muted hover:text-fg md:inline" href="#download"><span class="en">Download</span><span class="es">Descargar</span></a>
+      <a class="text-muted hover:text-fg" href="https://github.com/jparadasb/hydra-ai">GitHub</a>
+      <div class="inline-flex overflow-hidden rounded-lg border border-line" role="group" aria-label="Language">
+        <button type="button" data-set-lang="en" aria-pressed="true"
+                class="cursor-pointer border-0 bg-transparent px-2.5 py-1.5 font-mono text-xs text-muted aria-pressed:bg-accent-dim aria-pressed:text-accent">EN</button>
+        <button type="button" data-set-lang="es" aria-pressed="false"
+                class="cursor-pointer border-0 bg-transparent px-2.5 py-1.5 font-mono text-xs text-muted aria-pressed:bg-accent-dim aria-pressed:text-accent">ES</button>
+      </div>
+    </nav>
+  </div>
+</header>
+
+<main class="mx-auto max-w-[1060px] px-[22px]">
+
+  <div class="grid items-center gap-8 py-12 md:grid-cols-2 md:gap-12 md:py-[72px]">
+    <div>
+      <div class="mb-3.5 font-mono text-xs uppercase tracking-[.12em] text-accent">
+        <span class="en">distributed ai job network</span>
+        <span class="es">red distribuida de trabajos de ia</span>
+      </div>
+      <h1 class="mb-[18px] font-mono text-[clamp(28px,4vw,42px)] font-semibold leading-[1.15] tracking-tight">
+        <span class="en">Your machines,<br>one <span class="text-accent">AI network</span>.</span>
+        <span class="es">Tus máquinas,<br>una <span class="text-accent">red de IA</span>.</span>
+      </h1>
+      <p class="mb-7 max-w-[46ch] text-base text-muted">
+        <span class="en">A coordinator leases jobs to worker nodes running on your machines.
+        Each worker runs a local model or calls a provider you own — through one
+        OpenAI-compatible API. Your API keys never leave the worker.</span>
+        <span class="es">Un coordinador asigna trabajos a nodos worker que corren en tus máquinas.
+        Cada worker ejecuta un modelo local o llama a un proveedor tuyo — a través de una única
+        API compatible con OpenAI. Tus claves de API nunca salen del worker.</span>
+      </p>
+      <div class="flex flex-wrap items-center gap-3">
+        <a class="inline-flex items-center gap-2 rounded-lg border border-accent bg-accent-dim px-[18px] py-[11px] text-sm font-semibold text-accent no-underline hover:bg-accent-hover" href="#download">
+          <span class="en">Download the worker</span>
+          <span class="es">Descargar el worker</span>
+        </a>
+        <a class="inline-flex items-center gap-2 rounded-lg border border-line bg-panel-2 px-[18px] py-[11px] text-sm font-semibold text-fg no-underline hover:border-muted" href="https://github.com/jparadasb/hydra-ai#readme">
+          <span class="en">Read the docs</span>
+          <span class="es">Leer la documentación</span>
+        </a>
+      </div>
+    </div>
+
+    <!-- signature: routing trace terminal -->
+    <div class="overflow-x-auto rounded-[10px] border border-line bg-panel p-5 pt-[18px] font-mono text-[13px] leading-[1.9] shadow-[0_20px_60px_rgba(0,0,0,.35)]" aria-hidden="true">
+      <div class="mb-3 flex items-center gap-2 text-xs text-muted">
+        <span class="h-2 w-2 rounded-full bg-accent shadow-[0_0_10px_var(--color-accent)]"></span>hydra · routing trace
+      </div>
+      <span class="block whitespace-pre opacity-0 animate-reveal motion-reduce:animate-none motion-reduce:opacity-100">$ POST /v1/chat/completions <span class="text-warn">privacy=sensitive</span></span>
+      <span class="block whitespace-pre text-muted opacity-0 animate-reveal [animation-delay:.3s] motion-reduce:animate-none motion-reduce:opacity-100">→ coordinator: capability <span class="text-accent">text.generate</span> · model <span class="text-accent">llama3.1</span></span>
+      <span class="block whitespace-pre text-muted opacity-0 animate-reveal [animation-delay:1.1s] motion-reduce:animate-none motion-reduce:opacity-100">→ policy: sensitive ⇒ local models only</span>
+      <span class="block whitespace-pre text-muted opacity-0 animate-reveal [animation-delay:1.9s] motion-reduce:animate-none motion-reduce:opacity-100">→ lease: worker <span class="text-accent">den-01</span> (local · ollama)</span>
+      <span class="block whitespace-pre opacity-0 animate-reveal [animation-delay:2.7s] motion-reduce:animate-none motion-reduce:opacity-100">← 200 · stream · 41 tok/s</span>
+      <span class="block whitespace-pre text-accent opacity-0 animate-reveal [animation-delay:3.5s] motion-reduce:animate-none motion-reduce:opacity-100">✓ provider tokens never left the worker</span>
+    </div>
+  </div>
+
+  <section id="how" class="border-t border-line py-10 md:py-14">
+    <h2 class="mb-2 font-mono text-[22px] font-semibold"><span class="en">How it works</span><span class="es">Cómo funciona</span></h2>
+    <p class="mb-8 max-w-[62ch] text-muted">
+      <span class="en">Three moving parts: workers on your machines, one coordinator, one API in front.</span>
+      <span class="es">Tres piezas: workers en tus máquinas, un coordinador y una API al frente.</span>
+    </p>
+    <div class="grid gap-4 md:grid-cols-3">
+      <div class="rounded-[10px] border border-line bg-panel p-[22px]">
+        <div class="mb-2.5 font-mono text-xs text-accent">01 · worker</div>
+        <h3 class="mb-2 text-[15px] font-semibold"><span class="en">Run a worker</span><span class="es">Ejecuta un worker</span></h3>
+        <p class="text-sm text-muted">
+          <span class="en">Install the desktop app or the <code class="rounded-[5px] bg-panel-2 px-1 font-mono text-xs text-fg">hydra-worker</code> CLI.
+          Point it at a local model (Ollama, llama.cpp, LM Studio, vLLM) or sign in to a
+          provider you own (OpenAI, Anthropic, Gemini, and more). Keys go into a local
+          vault — they are never serialized and never sent anywhere.</span>
+          <span class="es">Instala la app de escritorio o el CLI <code class="rounded-[5px] bg-panel-2 px-1 font-mono text-xs text-fg">hydra-worker</code>.
+          Apúntalo a un modelo local (Ollama, llama.cpp, LM Studio, vLLM) o inicia sesión con un
+          proveedor tuyo (OpenAI, Anthropic, Gemini y más). Las claves van a una bóveda local —
+          nunca se serializan ni se envían a ningún lado.</span>
+        </p>
+      </div>
+      <div class="rounded-[10px] border border-line bg-panel p-[22px]">
+        <div class="mb-2.5 font-mono text-xs text-accent">02 · coordinator</div>
+        <h3 class="mb-2 text-[15px] font-semibold"><span class="en">It registers, admin approves</span><span class="es">Se registra, el admin aprueba</span></h3>
+        <p class="text-sm text-muted">
+          <span class="en">The worker connects to the coordinator and advertises only its
+          capabilities and models — never secrets. An admin decides which privacy levels each
+          worker may handle; whatever a worker claims for itself is overridden, fail-safe.</span>
+          <span class="es">El worker se conecta al coordinador y anuncia solo sus capacidades y
+          modelos — nunca secretos. Un admin decide qué niveles de privacidad puede atender cada
+          worker; lo que un worker declare por sí mismo se sobreescribe, a prueba de fallos.</span>
+        </p>
+      </div>
+      <div class="rounded-[10px] border border-line bg-panel p-[22px]">
+        <div class="mb-2.5 font-mono text-xs text-accent">03 · api</div>
+        <h3 class="mb-2 text-[15px] font-semibold"><span class="en">Call one API</span><span class="es">Llama a una sola API</span></h3>
+        <p class="text-sm text-muted">
+          <span class="en">Clients speak the OpenAI API to the coordinator's front door.
+          Each request is routed by capability, requested model, and privacy level to an
+          eligible worker, which executes it and streams the result back.</span>
+          <span class="es">Los clientes hablan la API de OpenAI con la puerta de entrada del
+          coordinador. Cada petición se enruta por capacidad, modelo solicitado y nivel de
+          privacidad hacia un worker elegible, que la ejecuta y devuelve el resultado en streaming.</span>
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section id="privacy" class="border-t border-line py-10 md:py-14">
+    <h2 class="mb-2 font-mono text-[22px] font-semibold"><span class="en">Privacy routing</span><span class="es">Enrutamiento por privacidad</span></h2>
+    <p class="mb-8 max-w-[62ch] text-muted">
+      <span class="en">Every job carries a privacy level. The coordinator enforces it when
+      routing, and the worker re-checks it before running — defense in depth.</span>
+      <span class="es">Cada trabajo lleva un nivel de privacidad. El coordinador lo aplica al
+      enrutar y el worker lo vuelve a verificar antes de ejecutar — defensa en profundidad.</span>
+    </p>
+    <div class="overflow-x-auto rounded-[10px] border border-line">
+      <table class="w-full border-collapse text-sm">
+        <thead>
+          <tr>
+            <th class="bg-panel px-4 py-3 text-left font-mono text-xs uppercase tracking-[.08em] text-muted"><span class="en">privacy</span><span class="es">privacidad</span></th>
+            <th class="bg-panel px-4 py-3 text-left font-mono text-xs uppercase tracking-[.08em] text-muted"><span class="en">eligible workers</span><span class="es">workers elegibles</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="border-t border-line">
+            <td class="whitespace-nowrap px-4 py-3 font-mono text-[13px] text-accent">public</td>
+            <td class="px-4 py-3 text-muted">
+              <span class="en">local-model and external-provider workers</span>
+              <span class="es">workers con modelo local y con proveedor externo</span>
+            </td>
+          </tr>
+          <tr class="border-t border-line">
+            <td class="whitespace-nowrap px-4 py-3 font-mono text-[13px] text-accent">private</td>
+            <td class="px-4 py-3 text-muted">
+              <span class="en">external only if the job permits it; otherwise local / org / internal</span>
+              <span class="es">externo solo si el trabajo lo permite; si no, local / org / interno</span>
+            </td>
+          </tr>
+          <tr class="border-t border-line">
+            <td class="whitespace-nowrap px-4 py-3 font-mono text-[13px] text-accent">sensitive</td>
+            <td class="px-4 py-3 text-muted">
+              <span class="en">not external-provider by default (must have a local model)</span>
+              <span class="es">sin proveedor externo por defecto (debe tener un modelo local)</span>
+            </td>
+          </tr>
+          <tr class="border-t border-line">
+            <td class="whitespace-nowrap px-4 py-3 font-mono text-[13px] text-accent">local_only</td>
+            <td class="px-4 py-3 text-muted">
+              <span class="en">must not use an external provider</span>
+              <span class="es">no puede usar un proveedor externo</span>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="api" class="border-t border-line py-10 md:py-14">
+    <h2 class="mb-2 font-mono text-[22px] font-semibold"><span class="en">One API, your infrastructure</span><span class="es">Una API, tu infraestructura</span></h2>
+    <p class="mb-8 max-w-[62ch] text-muted">
+      <span class="en">The front door speaks the OpenAI API — chat completions, streaming,
+      tools/function calling and model listing — so existing clients and SDKs work by
+      changing only the base URL.</span>
+      <span class="es">La puerta de entrada habla la API de OpenAI — chat completions, streaming,
+      tools/function calling y listado de modelos — así que los clientes y SDKs existentes
+      funcionan cambiando solo la URL base.</span>
+    </p>
+    <pre class="overflow-x-auto rounded-[10px] border border-line bg-panel p-5 font-mono text-[13px] leading-[1.7]"><span class="text-muted"># any OpenAI client works — just change the base URL</span>
+curl https://hydra.example.com/v1/chat/completions \
+  -H <span class="text-accent">"Authorization: Bearer $HYDRA_KEY"</span> \
+  -d <span class="text-accent">'{
+    "model": "llama3.1",
+    "messages": [{"role": "user", "content": "hello"}],
+    "stream": true
+  }'</span></pre>
+  </section>
+
+  <section id="download" class="border-t border-line py-10 md:py-14">
+    <h2 class="mb-2 font-mono text-[22px] font-semibold"><span class="en">Download</span><span class="es">Descargar</span></h2>
+    <p class="mb-8 max-w-[62ch] text-muted">
+      <span class="en">Desktop app (UI) and headless CLI for every platform. Links below always
+      point at the latest GitHub release.</span>
+      <span class="es">App de escritorio (UI) y CLI sin interfaz para cada plataforma. Los enlaces
+      de abajo siempre apuntan a la última versión publicada en GitHub.</span>
+    </p>
+    <div class="grid gap-4 md:grid-cols-3" id="dl-grid">
+      <div class="dl-card flex flex-col gap-3.5 rounded-[10px] border border-line bg-panel p-[22px]" data-os="mac">
+        <h3 class="flex items-center gap-2 text-[15px] font-semibold">macOS
+          <span class="you rounded-full bg-accent-dim px-[7px] py-0.5 font-mono text-[11px] font-normal text-accent" hidden><span class="en">your OS</span><span class="es">tu sistema</span></span>
+        </h3>
+        <div class="flex flex-col gap-2" data-slot="mac"><span class="dl-none">…</span></div>
+      </div>
+      <div class="dl-card flex flex-col gap-3.5 rounded-[10px] border border-line bg-panel p-[22px]" data-os="win">
+        <h3 class="flex items-center gap-2 text-[15px] font-semibold">Windows
+          <span class="you rounded-full bg-accent-dim px-[7px] py-0.5 font-mono text-[11px] font-normal text-accent" hidden><span class="en">your OS</span><span class="es">tu sistema</span></span>
+        </h3>
+        <div class="flex flex-col gap-2" data-slot="win"><span class="dl-none">…</span></div>
+      </div>
+      <div class="dl-card flex flex-col gap-3.5 rounded-[10px] border border-line bg-panel p-[22px]" data-os="linux">
+        <h3 class="flex items-center gap-2 text-[15px] font-semibold">Linux
+          <span class="you rounded-full bg-accent-dim px-[7px] py-0.5 font-mono text-[11px] font-normal text-accent" hidden><span class="en">your OS</span><span class="es">tu sistema</span></span>
+        </h3>
+        <div class="flex flex-col gap-2" data-slot="linux"><span class="dl-none">…</span></div>
+      </div>
+    </div>
+    <p class="mt-4 font-mono text-xs text-muted" id="dl-meta">
+      <span class="en">Fetching the latest release…</span>
+      <span class="es">Buscando la última versión…</span>
+    </p>
+  </section>
+
+</main>
+
+<footer class="border-t border-line py-8 pb-12 text-[13px] text-muted">
+  <div class="mx-auto flex max-w-[1060px] flex-wrap items-center gap-5 px-[22px]">
+    <span><img class="mr-1.5 inline h-[18px] w-[18px] rounded-[5px] align-[-4px]" src="logo.png" alt="">hydra-ai</span>
+    <a class="text-accent hover:underline" href="https://github.com/jparadasb/hydra-ai">GitHub</a>
+    <a class="text-accent hover:underline" href="https://github.com/jparadasb/hydra-ai/releases">
+      <span class="en">All releases</span><span class="es">Todas las versiones</span>
+    </a>
+    <a class="text-accent hover:underline" href="https://github.com/jparadasb/hydra-ai/blob/main/LICENSE">Apache-2.0</a>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var REPO = "jparadasb/hydra-ai";
+
+  /* ---- language ---- */
+  var root = document.documentElement;
+  function setLang(lang) {
+    root.setAttribute("data-lang", lang);
+    root.setAttribute("lang", lang);
+    try { localStorage.setItem("hydra-lang", lang); } catch (e) {}
+    document.querySelectorAll("[data-set-lang]").forEach(function (b) {
+      b.setAttribute("aria-pressed", String(b.dataset.setLang === lang));
+    });
+  }
+  document.querySelectorAll("[data-set-lang]").forEach(function (b) {
+    b.addEventListener("click", function () { setLang(b.dataset.setLang); });
+  });
+  var fromUrl = new URLSearchParams(location.search).get("lang");
+  var saved = null;
+  try { saved = localStorage.getItem("hydra-lang"); } catch (e) {}
+  setLang(
+    (fromUrl === "es" || fromUrl === "en") ? fromUrl :
+    saved || ((navigator.language || "").toLowerCase().startsWith("es") ? "es" : "en")
+  );
+
+  /* ---- OS detection: highlight the visitor's card ---- */
+  var ua = navigator.userAgent;
+  var os = /Mac/i.test(ua) ? "mac" : /Win/i.test(ua) ? "win" : /Linux|X11/i.test(ua) ? "linux" : null;
+  if (os) {
+    var card = document.querySelector('.dl-card[data-os="' + os + '"]');
+    if (card) {
+      card.classList.add("dl-card-detected");
+      card.querySelector(".you").hidden = false;
+      card.parentNode.prepend(card);
+    }
+  }
+
+  /* ---- download links from the GitHub releases API ----
+     The stable release is preferred; any slot it can't fill (e.g. a release cut before
+     desktop bundles existed) falls back to the rolling `edge` prerelease, marked as such. */
+  var SLOTS = {
+    mac: [
+      { re: /\.dmg$/,                              label: "Desktop app (.dmg)" },
+      { re: /^hydra-worker-aarch64-apple-darwin$/, label: "CLI · arm64" },
+      { re: /^hydra-worker-x86_64-apple-darwin$/,  label: "CLI · x86_64" }
+    ],
+    win: [
+      { re: /-setup\.exe$/,                             label: "Desktop app (setup.exe)" },
+      { re: /\.msi$/,                                   label: "Desktop app (.msi)" },
+      { re: /^hydra-worker-x86_64-pc-windows-msvc\.exe$/, label: "CLI · x86_64" }
+    ],
+    linux: [
+      { re: /\.AppImage$/,                               label: "Desktop app (.AppImage)" },
+      { re: /\.deb$/,                                    label: "Desktop app (.deb)" },
+      { re: /\.rpm$/,                                    label: "Desktop app (.rpm)" },
+      { re: /^hydra-worker-x86_64-unknown-linux-gnu$/,   label: "CLI · x86_64 glibc" },
+      { re: /^hydra-worker-x86_64-unknown-linux-musl$/,  label: "CLI · x86_64 static" }
+    ]
+  };
+
+  function pick(assets, re) {
+    for (var i = 0; i < assets.length; i++) if (re.test(assets[i].name)) return assets[i];
+    return null;
+  }
+
+  function render(stable, edge) {
+    Object.keys(SLOTS).forEach(function (key) {
+      var list = document.querySelector('[data-slot="' + key + '"]');
+      list.innerHTML = "";
+      var count = 0;
+      SLOTS[key].forEach(function (slot) {
+        var asset = stable && pick(stable.assets, slot.re);
+        var fromEdge = false;
+        if (!asset && edge) { asset = pick(edge.assets, slot.re); fromEdge = true; }
+        if (!asset) return;
+        var a = document.createElement("a");
+        a.href = asset.browser_download_url;
+        a.className = "dl-item";
+        a.innerHTML = '<span></span><span class="dl-tag' + (fromEdge ? " dl-tag-edge" : "") + '"></span>';
+        a.firstChild.textContent = slot.label;
+        a.lastChild.textContent = fromEdge ? "edge" : (stable ? stable.tag_name : "");
+        list.appendChild(a);
+        count++;
+      });
+      if (!count) {
+        list.innerHTML =
+          '<span class="dl-none"><span class="en">See <a href="https://github.com/' + REPO +
+          '/releases">all releases</a></span><span class="es">Ver <a href="https://github.com/' +
+          REPO + '/releases">todas las versiones</a></span></span>';
+      }
+    });
+    var meta = document.getElementById("dl-meta");
+    if (stable) {
+      meta.innerHTML =
+        '<span class="en">Latest release: <span class="v text-accent"></span> · <a href="' + stable.html_url +
+        '">release notes</a></span><span class="es">Última versión: <span class="v text-accent"></span> · <a href="' +
+        stable.html_url + '">notas de la versión</a></span>';
+      meta.querySelectorAll(".v").forEach(function (v) { v.textContent = stable.tag_name; });
+    } else {
+      meta.innerHTML =
+        '<span class="en">Builds from the rolling <a href="https://github.com/' + REPO +
+        '/releases/tag/edge">edge prerelease</a>.</span><span class="es">Builds del <a href="https://github.com/' +
+        REPO + '/releases/tag/edge">prerelease edge</a> continuo.</span>';
+    }
+  }
+
+  fetch("https://api.github.com/repos/" + REPO + "/releases?per_page=15")
+    .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(function (releases) {
+      var stable = null, edge = null;
+      releases.forEach(function (rel) {
+        if (rel.draft) return;
+        if (rel.tag_name === "edge") { edge = edge || rel; return; }
+        if (!rel.prerelease && !stable) stable = rel;
+      });
+      render(stable, edge);
+    })
+    .catch(function () {
+      var meta = document.getElementById("dl-meta");
+      meta.innerHTML =
+        '<span class="en">Couldn’t reach the GitHub API — <a href="https://github.com/' + REPO +
+        '/releases/latest">download from the releases page</a>.</span>' +
+        '<span class="es">No se pudo contactar la API de GitHub — <a href="https://github.com/' + REPO +
+        '/releases/latest">descarga desde la página de releases</a>.</span>';
+      document.querySelectorAll("[data-slot]").forEach(function (l) {
+        l.innerHTML =
+          '<span class="dl-none"><a href="https://github.com/' + REPO +
+          '/releases/latest"><span class="en">Latest release</span><span class="es">Última versión</span></a></span>';
+      });
+    });
+})();
+</script>
+</body>
+</html>
