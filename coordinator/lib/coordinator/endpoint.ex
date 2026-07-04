@@ -15,6 +15,15 @@ defmodule Coordinator.Endpoint do
   # LiveView socket — used by the Oban dashboard mounted under /admin (Coordinator.Web.Router).
   socket("/live", Phoenix.LiveView.Socket, websocket: true, longpoll: false)
 
+  # Landing page assets (priv/site). The page itself is served at "/" by Coordinator.Web.Router;
+  # this only serves its static siblings (tailwind.css, logo.png). Public, no session. `only`
+  # keeps the door narrow so nothing else under priv is reachable.
+  plug(Plug.Static,
+    at: "/",
+    from: {:coordinator, "priv/site"},
+    only: ~w(tailwind.css logo.png)
+  )
+
   # Signed session, required by the admin console: GitHub-OAuth login state + CSRF protection.
   # No provider secret is ever placed here; only the admin's GitHub login.
   @session_options [

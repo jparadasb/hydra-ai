@@ -16,9 +16,9 @@ erl_crash.dump
 /coordinator/*.db-shm
 /coordinator/*.db-wal
 
-# Landing page build (Tailwind; pages.yml rebuilds docs/tailwind.css at deploy)
+# Landing page build (Tailwind). The built CSS is committed so the coordinator's Docker image
+# (which runs no npm) can bundle it into priv/site; regenerate with `npm run build:site`.
 /node_modules/
-/docs/tailwind.css
 
 # Local secrets
 .env

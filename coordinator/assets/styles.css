@@ -1,8 +1,10 @@
-/* Tailwind v4 entry for the landing page.
-   Build: npx --yes @tailwindcss/cli@4 -i docs/src/styles.css -o docs/tailwind.css --minify
-   (pages.yml runs this at deploy; docs/tailwind.css is gitignored build output) */
+/* Tailwind v4 entry for the landing page served by the coordinator.
+   Build: npm run build:site  (-> coordinator/priv/site/tailwind.css, committed for the image). */
 
 @import "tailwindcss";
+
+/* Scan the served HTML for utility classes (Plug.Static serves priv/site). */
+@source "../priv/site/index.html";
 
 /* Brand tokens — same palette as the worker console (worker/ui/styles.css). */
 @theme {

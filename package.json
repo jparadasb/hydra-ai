@@ -1,10 +1,10 @@
 {
   "name": "hydra-ai-site",
   "private": true,
-  "description": "Build tooling for the landing page in docs/ (Tailwind v4)",
+  "description": "Build tooling for the landing page served by the coordinator (Tailwind v4)",
   "scripts": {
-    "build:site": "tailwindcss -i docs/src/styles.css -o docs/tailwind.css --minify",
-    "watch:site": "tailwindcss -i docs/src/styles.css -o docs/tailwind.css --watch"
+    "build:site": "tailwindcss -i coordinator/assets/styles.css -o coordinator/priv/site/tailwind.css --minify",
+    "watch:site": "tailwindcss -i coordinator/assets/styles.css -o coordinator/priv/site/tailwind.css --watch"
   },
   "devDependencies": {
     "@tailwindcss/cli": "^4.1.0",

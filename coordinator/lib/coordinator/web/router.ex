@@ -1,7 +1,8 @@
 defmodule Coordinator.Web.Router do
   @moduledoc """
-  HTTP router for the coordinator's web surface. Three concerns live here:
+  HTTP router for the coordinator's web surface. The concerns that live here:
 
+    * `/`        — public landing page (`Coordinator.Web.SiteController`; assets via `Plug.Static`).
     * `/auth/*`  — GitHub OAuth login flow for the admin console (`Coordinator.Web.AuthController`).
     * `/admin/*` — admin console: issue/revoke gateway API keys, and the real Oban dashboard.
       Gated by `Coordinator.Web.AdminAuth` (enforced only where `:admin_auth_required` is set —
@@ -28,6 +29,20 @@ defmodule Coordinator.Web.Router do
 
   pipeline :admin do
     plug(Coordinator.Web.AdminAuth)
+  end
+
+  # Public landing page: HTML only, secure headers, no session/CSRF (nothing to protect on a
+  # static GET).
+  pipeline :site do
+    plug(:accepts, ["html"])
+    plug(:put_secure_browser_headers)
+  end
+
+  # Landing page at the root. Declared before the API fallback so "/" serves the site, not a 404.
+  scope "/", Coordinator.Web do
+    pipe_through(:site)
+
+    get("/", SiteController, :index)
   end
 
   scope "/auth", Coordinator.Web do
