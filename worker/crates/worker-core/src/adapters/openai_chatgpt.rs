@@ -221,6 +221,10 @@ fn parse_responses_sse(body: &str) -> (String, Option<Vec<ToolCall>>, Usage) {
     let mut delta = String::new();
     let mut final_text: Option<String> = None;
     let mut tool_calls = Vec::new();
+    // The ChatGPT backend streams function calls as `output_item.done` events and leaves the
+    // terminal `response.completed.output` array empty; the platform Responses API does the
+    // opposite. Accumulate the streamed items and fall back to the completed output.
+    let mut streamed_calls = Vec::new();
     let mut usage = Usage::default();
 
     for line in body.lines() {
@@ -242,6 +246,11 @@ fn parse_responses_sse(body: &str) -> (String, Option<Vec<ToolCall>>, Usage) {
                     delta.push_str(d);
                 }
             }
+            "response.output_item.done" => {
+                if ev["item"]["type"].as_str() == Some("function_call") {
+                    streamed_calls.push(tool_call_from_item(&ev["item"]));
+                }
+            }
             "response.completed" => {
                 let response = &ev["response"];
                 final_text = extract_output_text(response).or(final_text.take());
@@ -252,6 +261,10 @@ fn parse_responses_sse(body: &str) -> (String, Option<Vec<ToolCall>>, Usage) {
         }
     }
 
+    // Prefer the terminal output (platform API); fall back to streamed items (ChatGPT backend).
+    if tool_calls.is_empty() {
+        tool_calls = streamed_calls;
+    }
     let content = final_text.filter(|s| !s.is_empty()).unwrap_or(delta);
     (content, (!tool_calls.is_empty()).then_some(tool_calls), usage)
 }
@@ -264,19 +277,24 @@ fn extract_function_calls(response: &Value) -> Vec<ToolCall> {
         .unwrap_or_default()
         .iter()
         .filter(|item| item["type"].as_str() == Some("function_call"))
-        .map(|item| ToolCall {
-            id: item["call_id"]
-                .as_str()
-                .or(item["id"].as_str())
-                .unwrap_or_default()
-                .to_string(),
-            kind: "function".to_string(),
-            function: ToolCallFunction {
-                name: item["name"].as_str().unwrap_or_default().to_string(),
-                arguments: item["arguments"].as_str().unwrap_or("{}").to_string(),
-            },
-        })
+        .map(tool_call_from_item)
         .collect()
+}
+
+/// Convert a single Responses `function_call` output item into OpenAI chat `ToolCall` shape.
+fn tool_call_from_item(item: &Value) -> ToolCall {
+    ToolCall {
+        id: item["call_id"]
+            .as_str()
+            .or(item["id"].as_str())
+            .unwrap_or_default()
+            .to_string(),
+        kind: "function".to_string(),
+        function: ToolCallFunction {
+            name: item["name"].as_str().unwrap_or_default().to_string(),
+            arguments: item["arguments"].as_str().unwrap_or("{}").to_string(),
+        },
+    }
 }
 
 /// Pull the concatenated assistant text from a Responses `response` object's `output` array.
@@ -350,6 +368,23 @@ mod tests {
         assert_eq!(calls[0].id, "call_9");
         assert_eq!(calls[0].function.name, "read_file");
         assert_eq!(calls[0].function.arguments, "{\"path\":\"a.txt\"}");
+    }
+
+    #[test]
+    fn sse_parse_extracts_streamed_function_calls_with_empty_completed_output() {
+        // The ChatGPT backend streams the call via `output_item.done` and leaves the terminal
+        // `response.completed.output` empty (unlike the platform Responses API).
+        let sse = concat!(
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_HH\",\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":47,\"output_tokens\":18}}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let (_text, tool_calls, usage) = parse_responses_sse(sse);
+        let calls = tool_calls.expect("streamed tool calls parsed");
+        assert_eq!(calls[0].id, "call_HH");
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[0].function.arguments, "{\"city\":\"Tokyo\"}");
+        assert_eq!(usage.output_tokens, 18);
     }
 
     #[test]
