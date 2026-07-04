@@ -95,6 +95,8 @@ jobs:
           - os: macos-latest
           - os: windows-latest
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write   # tauri-action uploads the desktop bundles to the tag's GitHub Release
     steps:
       - uses: actions/checkout@v4
 
@@ -131,6 +133,69 @@ jobs:
             worker/crates/worker-app/target/*/release/bundle/**
           if-no-files-found: warn
 
+  # ---- release download links (tag releases) ------------------------------------------------
+  # After the CLI binaries (softprops) and desktop bundles (tauri-action) are attached, rewrite
+  # the release body with a per-OS download table — desktop app (UI) first, CLI below — and
+  # keep the auto-generated changelog underneath.
+  release-links:
+    needs: [cli, desktop]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Write per-OS download links into the release body
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          base="https://github.com/$REPO/releases/download/$TAG"
+          assets=$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name')
+
+          row() { # $1=os label, $2=asset name
+            echo "| $1 | [\`$2\`]($base/$2) |"
+          }
+
+          notes=$(mktemp)
+          {
+            echo "## Downloads"
+            echo
+            echo "### Desktop app (UI)"
+            echo
+            echo "| OS | file |"
+            echo "|----|------|"
+            while IFS= read -r a; do
+              case "$a" in
+                *.dmg|*.app.tar.gz)     row "macOS"   "$a" ;;
+                *-setup.exe|*.msi)      row "Windows" "$a" ;;
+                *.AppImage|*.deb|*.rpm) row "Linux"   "$a" ;;
+              esac
+            done <<< "$assets"
+            echo
+            echo "### CLI (\`hydra-worker\`, headless)"
+            echo
+            echo "| target | file |"
+            echo "|--------|------|"
+            while IFS= read -r a; do
+              case "$a" in
+                hydra-worker-aarch64-apple-darwin)     row "macOS arm64"    "$a" ;;
+                hydra-worker-x86_64-apple-darwin)      row "macOS x86_64"   "$a" ;;
+                hydra-worker-x86_64-pc-windows-msvc.exe) row "Windows x86_64" "$a" ;;
+                hydra-worker-x86_64-unknown-linux-gnu)  row "Linux x86_64 (glibc)" "$a" ;;
+                hydra-worker-x86_64-unknown-linux-musl) row "Linux x86_64 (musl, static)" "$a" ;;
+              esac
+            done <<< "$assets"
+            echo
+            # Keep whatever body the release already has (tauri-action stub or generated
+            # notes) below the download tables.
+            gh release view "$TAG" --repo "$REPO" --json body --jq '.body'
+          } > "$notes"
+
+          gh release edit "$TAG" --repo "$REPO" --notes-file "$notes"
+          echo "Release body updated with download links:"
+          cat "$notes"
+
   # ---- rolling "edge" prerelease (every main build) ----------------------------------------
   # Collects all per-target artifacts from this run and publishes them to a single, always-
   # overwritten `edge` prerelease. Skipped for tag pushes (those cut a permanent release above).
@@ -161,6 +226,53 @@ jobs:
           echo "Staged for edge release:"
           ls -la edge
 
+      - name: Compose edge release notes with download links
+        run: |
+          base="https://github.com/${{ github.repository }}/releases/download/edge"
+
+          row() { echo "| $1 | [\`$2\`]($base/$2) |"; }
+
+          {
+            echo "Rolling build of \`hydra-worker\` from the latest \`main\`."
+            echo
+            echo "* commit: ${{ github.sha }}"
+            echo "* built: ${{ github.run_id }} (${{ github.run_number }})"
+            echo
+            echo "These binaries change on every push to \`main\` and are **not** a stable release —"
+            echo "use a \`v*\` tag release for that."
+            echo
+            echo "## Downloads"
+            echo
+            echo "### Desktop app (UI)"
+            echo
+            echo "| OS | file |"
+            echo "|----|------|"
+            for a in edge/*; do
+              a=$(basename "$a")
+              case "$a" in
+                *.dmg|*.app.tar.gz)     row "macOS"   "$a" ;;
+                *-setup.exe|*.msi)      row "Windows" "$a" ;;
+                *.AppImage|*.deb|*.rpm) row "Linux"   "$a" ;;
+              esac
+            done
+            echo
+            echo "### CLI (\`hydra-worker\`, headless)"
+            echo
+            echo "| target | file |"
+            echo "|--------|------|"
+            for a in edge/*; do
+              a=$(basename "$a")
+              case "$a" in
+                hydra-worker-aarch64-apple-darwin)       row "macOS arm64"    "$a" ;;
+                hydra-worker-x86_64-apple-darwin)        row "macOS x86_64"   "$a" ;;
+                hydra-worker-x86_64-pc-windows-msvc.exe) row "Windows x86_64" "$a" ;;
+                hydra-worker-x86_64-unknown-linux-gnu)   row "Linux x86_64 (glibc)" "$a" ;;
+                hydra-worker-x86_64-unknown-linux-musl)  row "Linux x86_64 (musl, static)" "$a" ;;
+              esac
+            done
+          } > edge-notes.md
+          cat edge-notes.md
+
       - name: Move the edge tag to this commit
         run: |
           git tag -f edge
@@ -177,12 +289,6 @@ jobs:
           # Auto-generate the changelog from commits/PRs the same way a real release does;
           # GitHub appends it below the build-info body.
           generate_release_notes: true
-          body: |
-            Rolling build of `hydra-worker` from the latest `main`.
-
-            * commit: ${{ github.sha }}
-            * built: ${{ github.run_id }} (${{ github.run_number }})
-
-            These binaries change on every push to `main` and are **not** a stable release —
-            use a `v*` tag release for that. Stable download URLs, e.g.
-            `…/releases/download/edge/hydra-worker-x86_64-unknown-linux-gnu`.
+          # Body (build info + per-OS download links) is composed in the step above so the
+          # links always match the exact asset set staged for this run.
+          body_path: edge-notes.md
