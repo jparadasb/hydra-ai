@@ -343,6 +343,55 @@ defmodule Coordinator.ApiRouterTest do
     assert chunk["object"] == "chat.completion.chunk"
   end
 
+  test "stream:true emits SSE heartbeats while a slow job runs, then the result" do
+    # Beats Cloudflare's ~100s idle 524: bytes keep flowing while the worker is busy. Use a tiny
+    # heartbeat interval so a short test delay produces pings.
+    prev = Application.get_env(:coordinator, :api_heartbeat_ms)
+    Application.put_env(:coordinator, :api_heartbeat_ms, 30)
+
+    on_exit(fn ->
+      case prev do
+        nil -> Application.delete_env(:coordinator, :api_heartbeat_ms)
+        v -> Application.put_env(:coordinator, :api_heartbeat_ms, v)
+      end
+    end)
+
+    nonce = "apihb-#{System.unique_integer([:positive])}"
+
+    task =
+      Task.async(fn ->
+        post("/v1/chat/completions", %{
+          "messages" => [%{"role" => "user", "content" => nonce}],
+          "model" => "llama3",
+          "stream" => true,
+          "timeout_ms" => 5000
+        })
+      end)
+
+    job_id = wait_for(fn -> find_job_id(nonce) end)
+    # Let several heartbeats fire before the (slow) worker result lands.
+    Process.sleep(150)
+
+    Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {
+      :job_result,
+      %{
+        "job_id" => job_id,
+        "status" => "ok",
+        "output" => %{"content" => "late hello"},
+        "usage" => %{"model" => "llama3", "input_tokens" => 4, "output_tokens" => 2}
+      }
+    })
+
+    conn = Task.await(task, 6000)
+    assert conn.status == 200
+    body = conn.resp_body
+    # Keepalive comment(s) arrived before the result, and the result still frames correctly.
+    assert body =~ ": ping"
+    assert body =~ ~s("content":"late hello")
+    assert body =~ ~s("finish_reason":"stop")
+    assert body =~ "data: [DONE]"
+  end
+
   test "bearer token required when :api_token is set" do
     Application.put_env(:coordinator, :api_token, "secret-key")
     msg = %{"messages" => [%{"role" => "user", "content" => "hi"}], "timeout_ms" => 150}

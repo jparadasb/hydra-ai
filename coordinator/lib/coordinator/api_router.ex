@@ -22,6 +22,9 @@ defmodule Coordinator.ApiRouter do
 
   @default_timeout_ms 60_000
   @max_timeout_ms 600_000
+  # While a streaming job runs, emit an SSE keepalive at least this often so an edge proxy
+  # (Cloudflare's ~100s idle/TTFB window -> 524) never sees a silent connection. Well under 100s.
+  @heartbeat_ms 15_000
 
   plug(:match)
   plug(:dispatch)
@@ -116,25 +119,13 @@ defmodule Coordinator.ApiRouter do
          timeout = resolve_timeout(conn, params),
          payload = build_payload(params, messages),
          {:ok, record} <- submit(payload) do
-      case await_result(record.id, timeout) do
-        {:ok, %{"status" => "ok"} = result} when stream? ->
-          stream_completion(conn, record.id, params, result)
-
-        {:ok, %{"status" => "ok"} = result} ->
-          json(conn, 200, openai_completion(record.id, params, result))
-
-        {:ok, %{"status" => "rejected", "reason" => reason}} ->
-          error(conn, 422, "job rejected: #{reason}", "invalid_request_error")
-
-        {:ok, %{"reason" => reason}} ->
-          {status, type} = classify_worker_error(reason)
-          error(conn, status, "worker error: #{reason}", type)
-
-        {:ok, _} ->
-          error(conn, 502, "worker returned no usable output", "api_error")
-
-        {:error, :timeout} ->
-          error(conn, 504, "no worker completed the job in time", "timeout")
+      if stream? do
+        # Flush headers + a first byte immediately, then heartbeat while the worker runs, so an
+        # edge proxy (Cloudflare's ~100s idle/TTFB -> 524) never sees a silent connection during
+        # a long generation. Errors after the flush are delivered as SSE, not an HTTP status.
+        stream_chat(conn, record.id, params, timeout)
+      else
+        blocking_chat(conn, record.id, params, timeout)
       end
     else
       {:error, :no_messages} ->
@@ -142,6 +133,27 @@ defmodule Coordinator.ApiRouter do
 
       {:error, {:submit, reason}} ->
         error(conn, 500, "could not enqueue job: #{inspect(reason)}", "api_error")
+    end
+  end
+
+  # Non-streaming: block until the job result, then map it to one JSON body (or an HTTP error).
+  defp blocking_chat(conn, job_id, params, timeout) do
+    case await_result(job_id, timeout) do
+      {:ok, %{"status" => "ok"} = result} ->
+        json(conn, 200, openai_completion(job_id, params, result))
+
+      {:ok, %{"status" => "rejected", "reason" => reason}} ->
+        error(conn, 422, "job rejected: #{reason}", "invalid_request_error")
+
+      {:ok, %{"reason" => reason}} ->
+        {status, type} = classify_worker_error(reason)
+        error(conn, status, "worker error: #{reason}", type)
+
+      {:ok, _} ->
+        error(conn, 502, "worker returned no usable output", "api_error")
+
+      {:error, :timeout} ->
+        error(conn, 504, "no worker completed the job in time", "timeout")
     end
   end
 
@@ -273,31 +285,55 @@ defmodule Coordinator.ApiRouter do
 
   # ---- OpenAI streaming (SSE) ---------------------------------------------------------------
 
-  # Emit the completion as an OpenAI `chat.completion.chunk` SSE stream. The worker returns the
-  # full result in one shot (no token streaming end-to-end), so we frame it as a role delta, a
-  # single content delta (plus tool-call deltas when the model requested tools), a finish
-  # chunk, an optional usage chunk, then `[DONE]`. This is what AI-SDK / OpenAI streaming
-  # clients (e.g. opencode) require: without it they wait on a stream that never arrives and
-  # end up with an empty message.
-  defp stream_completion(conn, job_id, params, result) do
+  # Streaming: flush the SSE headers and an assistant `role` delta *before* the worker result
+  # exists, keep the connection alive with heartbeats while it runs, then frame the finished
+  # result as `chat.completion.chunk`s. The worker returns the full result in one shot (no token
+  # streaming end-to-end), so the body is a content delta (plus tool-call deltas when the model
+  # requested tools), a finish chunk, an optional usage chunk, then `[DONE]` — what AI-SDK /
+  # OpenAI clients (e.g. opencode) expect.
+  defp stream_chat(conn, job_id, params, timeout) do
+    id = "chatcmpl-" <> job_id
+    created = System.system_time(:second)
+    model0 = params["model"] || "hydra"
+
+    conn =
+      conn
+      |> put_resp_content_type("text/event-stream")
+      |> put_resp_header("cache-control", "no-cache")
+      # Ask nginx/proxies not to buffer, so chunks flush immediately.
+      |> put_resp_header("x-accel-buffering", "no")
+      |> send_chunked(200)
+
+    # First byte now (assistant role delta) so the edge proxy sees the stream open immediately.
+    conn =
+      case chunk(conn, sse(chunk_map(id, created, model0, %{"role" => "assistant"}, nil))) do
+        {:ok, conn} -> conn
+        {:error, _} -> conn
+      end
+
+    case await_with_heartbeat(conn, job_id, timeout) do
+      {:ok, conn, %{"status" => "ok"} = result} ->
+        stream_result_body(conn, id, created, params, result)
+
+      {:ok, conn, %{"reason" => reason}} ->
+        stream_error(conn, id, created, model0, "worker error: #{reason}")
+
+      {:ok, conn, _other} ->
+        stream_error(conn, id, created, model0, "worker returned no usable output")
+
+      {:timeout, conn} ->
+        stream_error(conn, id, created, model0, "no worker completed the job in time")
+    end
+  end
+
+  # Frame the finished result onto an already-open (chunked) stream, then `[DONE]`.
+  defp stream_result_body(conn, id, created, params, result) do
     content = get_in(result, ["output", "content"]) || ""
     tool_calls = tool_calls(result)
     usage = result["usage"] || %{}
     input = usage["input_tokens"] || 0
     output = usage["output_tokens"] || 0
     model = usage["model"] || params["model"] || "hydra"
-    id = "chatcmpl-" <> job_id
-    created = System.system_time(:second)
-
-    chunk_map = fn delta, finish ->
-      %{
-        "id" => id,
-        "object" => "chat.completion.chunk",
-        "created" => created,
-        "model" => model,
-        "choices" => [%{"index" => 0, "delta" => delta, "finish_reason" => finish}]
-      }
-    end
 
     # Streaming tool calls carry a per-choice `index` in each delta entry.
     tool_call_deltas =
@@ -308,10 +344,15 @@ defmodule Coordinator.ApiRouter do
         calls ->
           calls
           |> Enum.with_index()
-          |> Enum.map(fn {call, i} -> chunk_map.(%{"tool_calls" => [Map.put(call, "index", i)]}, nil) end)
+          |> Enum.map(fn {call, i} ->
+            chunk_map(id, created, model, %{"tool_calls" => [Map.put(call, "index", i)]}, nil)
+          end)
       end
 
-    content_deltas = if content == "" and tool_calls != nil, do: [], else: [chunk_map.(%{"content" => content}, nil)]
+    content_deltas =
+      if content == "" and tool_calls != nil,
+        do: [],
+        else: [chunk_map(id, created, model, %{"content" => content}, nil)]
 
     usage_chunk = %{
       "id" => id,
@@ -326,28 +367,75 @@ defmodule Coordinator.ApiRouter do
       }
     }
 
-    conn =
-      conn
-      |> put_resp_content_type("text/event-stream")
-      |> put_resp_header("cache-control", "no-cache")
-      # Ask nginx/proxies not to buffer, so chunks flush immediately (also avoids the proxy
-      # closing an idle-looking connection during a long generation).
-      |> put_resp_header("x-accel-buffering", "no")
-      |> send_chunked(200)
+    (content_deltas ++
+       tool_call_deltas ++
+       [chunk_map(id, created, model, %{}, finish_reason(tool_calls)), usage_chunk])
+    |> send_events(conn)
+  end
 
-    events =
-      ([chunk_map.(%{"role" => "assistant"}, nil)] ++
-         content_deltas ++
-         tool_call_deltas ++
-         [chunk_map.(%{}, finish_reason(tool_calls)), usage_chunk])
-      |> Enum.map(&("data: " <> Jason.encode!(&1) <> "\n\n"))
+  # Once the stream is open we can't set an HTTP error status, so surface the failure as a
+  # terminal content delta with `finish_reason: "error"`, then `[DONE]`.
+  defp stream_error(conn, id, created, model, message) do
+    [
+      chunk_map(id, created, model, %{"content" => message}, nil),
+      chunk_map(id, created, model, %{}, "error")
+    ]
+    |> send_events(conn)
+  end
 
-    Enum.reduce_while(events ++ ["data: [DONE]\n\n"], conn, fn event, conn ->
+  defp chunk_map(id, created, model, delta, finish) do
+    %{
+      "id" => id,
+      "object" => "chat.completion.chunk",
+      "created" => created,
+      "model" => model,
+      "choices" => [%{"index" => 0, "delta" => delta, "finish_reason" => finish}]
+    }
+  end
+
+  defp sse(map), do: "data: " <> Jason.encode!(map) <> "\n\n"
+
+  # Encode + write each event, then `[DONE]`. Stops early if the client hung up.
+  defp send_events(events, conn) do
+    (Enum.map(events, &sse/1) ++ ["data: [DONE]\n\n"])
+    |> Enum.reduce_while(conn, fn event, conn ->
       case chunk(conn, event) do
         {:ok, conn} -> {:cont, conn}
         {:error, _} -> {:halt, conn}
       end
     end)
+  end
+
+  # Like `await_result` but writes an SSE keepalive every `@heartbeat_ms` while waiting, and
+  # carries the (mutated) conn back so the caller can keep streaming. A failed heartbeat write
+  # means the client disconnected -> stop waiting.
+  defp await_with_heartbeat(conn, job_id, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_await_hb(conn, job_id, deadline)
+  end
+
+  # Overridable (tests use a tiny interval); defaults to the module attribute.
+  defp heartbeat_ms, do: Application.get_env(:coordinator, :api_heartbeat_ms, @heartbeat_ms)
+
+  defp do_await_hb(conn, job_id, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      {:timeout, conn}
+    else
+      wait = min(remaining, heartbeat_ms())
+
+      receive do
+        {:job_result, %{"job_id" => ^job_id} = result} -> {:ok, conn, result}
+        {:job_result, _other} -> do_await_hb(conn, job_id, deadline)
+      after
+        wait ->
+          case chunk(conn, ": ping\n\n") do
+            {:ok, conn} -> do_await_hb(conn, job_id, deadline)
+            {:error, _} -> {:timeout, conn}
+          end
+      end
+    end
   end
 
   # ---- auth + helpers -----------------------------------------------------------------------
