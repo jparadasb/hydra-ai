@@ -32,10 +32,19 @@
         <div class="rail-foot">
           <div class="runstate"><span id="rail-dot" class="dot off"></span> <span id="rail-label" class="muted">stopped</span></div>
           <div id="worker-id" class="mono muted"></div>
+          <div class="update-foot">
+            <span id="app-version" class="mono muted"></span>
+            <button id="check-update" class="link-btn">Check for updates</button>
+          </div>
         </div>
       </nav>
 
       <div class="panel">
+        <!-- Update banner: shown when a newer signed release is available. -->
+        <div id="update-banner" class="update-banner hidden">
+          <span id="update-msg">An update is available.</span>
+          <button id="install-update" class="primary">Download &amp; install</button>
+        </div>
         <!-- RUN -->
         <section id="tab-run" class="view">
           <h1>Run</h1>

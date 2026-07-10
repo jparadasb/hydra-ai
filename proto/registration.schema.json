@@ -67,6 +67,7 @@
         "max_parallel_provider_requests": { "type": "integer", "minimum": 0 }
       }
     },
-    "trust_level": { "type": "string" }
+    "trust_level": { "type": "string" },
+    "version": { "type": "string", "description": "Worker build identity (e.g. \"0.1.0 (abc1234)\"). Informational; never gates routing." }
   }
 }

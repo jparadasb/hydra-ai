@@ -24,11 +24,20 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRDMEU3Rjg1NzJEOTk1QkIKUldTN2xkbHloWDhPVE9neXR6NXFsNGtENUxMMHVuVmZ1MXAra3ZITjI5S1pkU0s4L3JsbXYyMVAK",
+      "endpoints": [
+        "https://github.com/jparadasb/hydra-ai/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

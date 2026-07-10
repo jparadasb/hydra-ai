@@ -66,6 +66,10 @@ pub struct WorkerRegistration {
     pub privacy: PrivacyBlock,
     pub limits: LimitsBlock,
     pub trust_level: String,
+    /// Build identity of this worker (`"0.1.0 (abc1234)"`), so the coordinator can tell which
+    /// workers are behind. Informational only — never gates routing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 impl WorkerRegistration {
@@ -103,6 +107,7 @@ impl WorkerRegistration {
                 max_parallel_provider_requests: config.limits.max_parallel_provider_requests,
             },
             trust_level: "untrusted".to_string(),
+            version: Some(crate::self_update::build_version()),
         }
     }
 }

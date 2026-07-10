@@ -141,3 +141,18 @@ label.row select { width: auto; margin-left: auto; }
   padding: 12px 16px; border-radius: 8px; max-width: 360px; font-size: 13px;
 }
 .toast.bad { border-left-color: var(--danger); }
+
+/* Self-update */
+.update-foot { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+.link-btn {
+  background: none; border: none; color: var(--accent); padding: 0; width: auto;
+  font-size: 12px; cursor: pointer; text-align: left;
+}
+.link-btn:hover { text-decoration: underline; }
+.update-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  margin: 0 0 18px; padding: 12px 16px; border-radius: var(--radius);
+  background: var(--accent-dim); border: 1px solid var(--accent); color: var(--text);
+  font-size: 13px;
+}
+.update-banner .primary { width: auto; }

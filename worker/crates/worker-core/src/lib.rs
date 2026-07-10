@@ -17,6 +17,7 @@ pub mod oauth;
 pub mod privacy;
 pub mod registration;
 pub mod runtime;
+pub mod self_update;
 pub mod types;
 pub mod usage;
 pub mod vault;

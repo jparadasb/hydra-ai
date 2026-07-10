@@ -33,7 +33,19 @@ $("#unlock-btn").addEventListener("click", async () => {
   await loadConfig();
   await refreshProviders();
   startStatusPolling();
+  showAppVersion();
+  checkForUpdate(true); // silent auto-check on unlock
 });
+
+// Show the running app version in the rail foot.
+async function showAppVersion() {
+  try {
+    const v = window.__TAURI__ && window.__TAURI__.app && (await window.__TAURI__.app.getVersion());
+    if (v) $("#app-version").textContent = "v" + v;
+  } catch {
+    /* app plugin unavailable in dev — ignore */
+  }
+}
 $("#pass").addEventListener("keydown", (e) => {
   if (e.key === "Enter") $("#unlock-btn").click();
 });
@@ -203,6 +215,53 @@ $("#add-provider").addEventListener("click", async () => {
   $("#p-base").value = "";
   toast(`stored ${view.name} (${view.fingerprint})`);
   refreshProviders();
+});
+
+// ---- Self-update (Tauri signed updater) ----
+// Plugins are exposed on window.__TAURI__ because app.withGlobalTauri is true. Guarded so a
+// dev build without the updater plugin (e.g. `tauri dev` without signing) degrades gracefully.
+const updater = window.__TAURI__ && window.__TAURI__.updater;
+const proc = window.__TAURI__ && window.__TAURI__.process;
+let pendingUpdate = null;
+
+// Returns the Update object when one is available, else null. `silent` suppresses the
+// "up to date" / error toasts for the automatic check on startup.
+async function checkForUpdate(silent = false) {
+  if (!updater || !updater.check) return null;
+  try {
+    const update = await updater.check();
+    if (update && update.available) {
+      pendingUpdate = update;
+      $("#update-msg").textContent = `Update available: ${update.version}. You're on ${update.currentVersion}.`;
+      $("#update-banner").classList.remove("hidden");
+      return update;
+    }
+    if (!silent) toast("You're on the latest version.");
+    $("#update-banner").classList.add("hidden");
+    return null;
+  } catch (e) {
+    if (!silent) toast("update check failed: " + (typeof e === "string" ? e : e.message || e), true);
+    return null;
+  }
+}
+
+$("#check-update").addEventListener("click", () => checkForUpdate(false));
+
+$("#install-update").addEventListener("click", async () => {
+  const update = pendingUpdate;
+  if (!update) return;
+  const btn = $("#install-update");
+  btn.disabled = true;
+  btn.textContent = "downloading…";
+  try {
+    await update.downloadAndInstall();
+    toast("update installed — restarting…");
+    if (proc && proc.relaunch) await proc.relaunch();
+  } catch (e) {
+    toast("install failed: " + (typeof e === "string" ? e : e.message || e), true);
+    btn.disabled = false;
+    btn.textContent = "Download & install";
+  }
 });
 
 // ---- Usage ----

@@ -69,6 +69,11 @@ jobs:
 
       - name: Build hydra-worker
         working-directory: worker
+        # HYDRA_BUILD_SHA is embedded via option_env! so `hydra-worker --version` reports the
+        # commit it was built from — the only way to tell rolling `edge` builds apart (they all
+        # share version 0.1.0).
+        env:
+          HYDRA_BUILD_SHA: ${{ github.sha }}
         run: cargo build -p worker-cli --release --target ${{ matrix.target }}
 
       - name: Stage binary
@@ -82,6 +87,17 @@ jobs:
           else
             cp "${src}" "dist/hydra-worker-${{ matrix.target }}"
           fi
+          # Publish a checksum next to each asset so `hydra-worker update --check` can compare
+          # against the local binary by fetching only the tiny .sha256 (no full download).
+          cd dist
+          for f in hydra-worker-*; do
+            case "$f" in *.sha256) continue;; esac
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$f" > "$f.sha256"
+            else
+              shasum -a 256 "$f" > "$f.sha256"
+            fi
+          done
 
       - uses: actions/upload-artifact@v4
         with:
@@ -144,11 +160,17 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         with:
           projectPath: worker/crates/worker-app
-          # No signing secrets configured yet -> unsigned bundles. Add per-OS signing later.
+          # OS-level code signing (Apple/Windows) is still not configured -> Gatekeeper/SmartScreen
+          # warnings remain. The updater signature below is separate: it signs the update
+          # artifacts + latest.json so the in-app updater trusts them.
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('hydra-worker {0}', github.ref_name) || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Updater signing key (minisign). On a v* tag, tauri-action signs the bundles and
+          # uploads latest.json to the release, which the desktop app's updater endpoint reads.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - uses: actions/upload-artifact@v4
         with:

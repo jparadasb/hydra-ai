@@ -14,7 +14,11 @@ use worker_core::usage::{JsonUsageStore, UsageStore};
 use worker_core::vault::{EncryptedFileStore, Secret, Vault};
 
 #[derive(Parser)]
-#[command(name = "hydra-worker", version, about = "hydra-ai local AI execution gateway")]
+#[command(
+    name = "hydra-worker",
+    version = version_str(),
+    about = "hydra-ai local AI execution gateway"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -39,6 +43,22 @@ enum Command {
     },
     /// Connect to the coordinator and process leased jobs.
     Run,
+    /// Update this binary in place from the published GitHub release.
+    Update {
+        /// Only report whether an update is available (exit 10 if so); don't install.
+        #[arg(long)]
+        check: bool,
+        /// Release channel: "edge" (rolling build of main, default), "latest" (newest tagged
+        /// release), or a tag like "v0.2.0".
+        #[arg(long, default_value = "edge")]
+        channel: String,
+        /// Override the download base URL (expects <url>/<asset> and <url>/<asset>.sha256).
+        #[arg(long)]
+        url: Option<String>,
+        /// After a successful update, run `systemctl restart hydra-worker` (Linux only).
+        #[arg(long)]
+        restart: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -66,6 +86,13 @@ enum ProviderAction {
     Rm { name: String },
     /// Rotate (replace) a provider token.
     Rotate { name: String },
+}
+
+/// `--version` string, leaked once so clap can hold a `&'static str`.
+fn version_str() -> &'static str {
+    use std::sync::OnceLock;
+    static V: OnceLock<String> = OnceLock::new();
+    V.get_or_init(worker_core::self_update::build_version).as_str()
 }
 
 fn config_dir() -> PathBuf {
@@ -115,6 +142,100 @@ async fn main() {
         Command::Provider { action } => cmd_provider(action).await,
         Command::Usage { period } => cmd_usage(period),
         Command::Run => cmd_run().await,
+        Command::Update {
+            check,
+            channel,
+            url,
+            restart,
+        } => cmd_update(check, channel, url, restart).await,
+    }
+}
+
+/// Exit codes: 0 up to date / installed, 10 update available (check mode), 1 error.
+async fn cmd_update(check: bool, channel: String, url: Option<String>, restart: bool) {
+    use worker_core::self_update::{self, Channel, UpdateOptions, UpdateOutcome};
+
+    let exe = match std::env::current_exe().and_then(std::fs::canonicalize) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("update: cannot locate current executable: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let opts = UpdateOptions {
+        channel: Channel::parse(&channel),
+        base_url: url,
+        check_only: check,
+        verify_exec: true,
+        repo: self_update::DEFAULT_REPO.to_string(),
+    };
+
+    let client = reqwest::Client::new();
+    match self_update::run_update(&client, &exe, &opts).await {
+        Ok(UpdateOutcome::UpToDate { sha256 }) => {
+            println!("Already up to date ({}).", short(&sha256));
+        }
+        Ok(UpdateOutcome::UpdateAvailable { current, remote }) => {
+            let remote = remote.map(|r| short(&r)).unwrap_or_else(|| "unknown".into());
+            println!(
+                "Update available: local {} != remote {}. Run `hydra-worker update` to install.",
+                short(&current),
+                remote
+            );
+            std::process::exit(10);
+        }
+        Ok(UpdateOutcome::Updated { old, new, path }) => {
+            println!("Updated {} -> {} ({}).", short(&old), short(&new), path.display());
+            print_new_version(&path);
+            if restart {
+                restart_service();
+            } else {
+                println!("Restart the service to apply: sudo systemctl restart hydra-worker");
+            }
+        }
+        Err(e) => {
+            eprintln!("update failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn short(sha: &str) -> String {
+    sha.chars().take(8).collect()
+}
+
+/// Print the freshly installed binary's `--version` so the operator sees exactly what landed.
+fn print_new_version(path: &std::path::Path) {
+    if let Ok(out) = std::process::Command::new(path).arg("--version").output() {
+        if let Ok(s) = String::from_utf8(out.stdout) {
+            let s = s.trim();
+            if !s.is_empty() {
+                println!("Now running: {s}");
+            }
+        }
+    }
+}
+
+/// Linux-only service restart after an update. Non-Linux prints a hint instead.
+fn restart_service() {
+    if !cfg!(target_os = "linux") {
+        println!("--restart is Linux/systemd only; restart the worker manually.");
+        return;
+    }
+    match std::process::Command::new("systemctl")
+        .args(["restart", "hydra-worker"])
+        .status()
+    {
+        Ok(s) if s.success() => println!("Restarted hydra-worker.service."),
+        Ok(s) => {
+            eprintln!("systemctl restart hydra-worker exited with {s}");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("could not run systemctl ({e}); restart hydra-worker manually.");
+            std::process::exit(1);
+        }
     }
 }
 

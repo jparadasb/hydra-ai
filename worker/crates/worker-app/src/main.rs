@@ -228,6 +228,10 @@ fn worker_status(state: State<'_, AppState>) -> worker_core::worker_run::RunStat
 
 fn main() {
     tauri::Builder::default()
+        // Signed in-app updates (checks the GitHub `latest.json`) + relaunch after install.
+        // The UI drives these via window.__TAURI__.updater / .process.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             unlock,

@@ -97,6 +97,33 @@ screen.
 Desktop app: `worker/crates/worker-app` (`cargo tauri dev`) — see its `SETUP.md` for the
 WebView system deps.
 
+### Updating a worker
+
+Prebuilt binaries are published to GitHub releases by CI: a rolling **`edge`** prerelease on
+every push to `main`, and permanent **`v*`** releases when a version is tagged. Each asset has
+a `.sha256` next to it.
+
+CLI (headless / systemd hosts) — no rebuild, no scp:
+
+```sh
+hydra-worker --version                 # 0.1.0 (abc1234) — commit it was built from
+hydra-worker update --check            # exit 0 = current, 10 = update available
+hydra-worker update --restart          # swap the binary in place, then restart hydra-worker.service
+```
+
+`update` downloads the binary matching this host's target, verifies the published checksum, and
+atomically replaces the running executable. Defaults to the `edge` channel; use
+`--channel latest` for the newest tag or `--channel vX.Y.Z` for a specific one. Run it as the
+same user that owns the binary (root for `/usr/local/bin/hydra-worker`). First rollout onto a
+host whose installed binary predates the `update` subcommand is a one-time manual fetch of the
+`edge` asset; every update after that is `hydra-worker update`.
+
+Desktop app: checks for updates on unlock and via **Check for updates** in the sidebar. Updates
+ship only on tagged `v*` releases (the app compares versions), are signed with the updater key,
+and install + relaunch from the in-app banner. Cutting a desktop update = bump the version in
+`worker/Cargo.toml` and `worker/crates/worker-app/tauri.conf.json`, then push a `v*` tag. CI
+signing requires the repo secrets `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+
 ### Where the coordinator URL comes from
 
 The worker resolves which coordinator to connect to in this order (first wins):

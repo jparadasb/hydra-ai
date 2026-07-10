@@ -27,3 +27,5 @@ erl_crash.dump
 *.vault.bin
 .hydra-vault.bin
 .hydra-usage.json
+/worker/hydra-worker-new
+/worker/hydra-worker-*
