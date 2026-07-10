@@ -392,6 +392,52 @@ defmodule Coordinator.ApiRouterTest do
     assert body =~ "data: [DONE]"
   end
 
+  test "stream:true relays worker chunks as live deltas and does not resend content at the end" do
+    nonce = "apichunks-#{System.unique_integer([:positive])}"
+
+    task =
+      Task.async(fn ->
+        post("/v1/chat/completions", %{
+          "messages" => [%{"role" => "user", "content" => nonce}],
+          "model" => "llama3",
+          "stream" => true,
+          "timeout_ms" => 5000
+        })
+      end)
+
+    job_id = wait_for(fn -> find_job_id(nonce) end)
+    topic = "job_chunks:" <> job_id
+
+    Phoenix.PubSub.broadcast(Coordinator.PubSub, topic, {:job_chunk, %{"job_id" => job_id, "seq" => 0, "delta" => "Hel"}})
+    Phoenix.PubSub.broadcast(Coordinator.PubSub, topic, {:job_chunk, %{"job_id" => job_id, "seq" => 1, "delta" => "lo"}})
+
+    Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {
+      :job_result,
+      %{
+        "job_id" => job_id,
+        "status" => "ok",
+        "output" => %{"content" => "Hello"},
+        "usage" => %{"model" => "llama3", "input_tokens" => 4, "output_tokens" => 2}
+      }
+    })
+
+    conn = Task.await(task, 6000)
+    assert conn.status == 200
+    body = conn.resp_body
+
+    # Both fragments went out as their own deltas, in order.
+    assert body =~ ~s("content":"Hel")
+    assert body =~ ~s("content":"lo")
+    [before_frag, after_frag] = String.split(body, ~s("content":"Hel"), parts: 2)
+    assert after_frag =~ ~s("content":"lo")
+    refute before_frag =~ ~s("content":"lo")
+
+    # The final result's content is NOT framed again (it already streamed).
+    refute body =~ ~s("content":"Hello")
+    assert body =~ ~s("finish_reason":"stop")
+    assert body =~ "data: [DONE]"
+  end
+
   test "bearer token required when :api_token is set" do
     Application.put_env(:coordinator, :api_token, "secret-key")
     msg = %{"messages" => [%{"role" => "user", "content" => "hi"}], "timeout_ms" => 150}

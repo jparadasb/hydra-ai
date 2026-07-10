@@ -20,7 +20,11 @@ defmodule Coordinator.ApiRouter do
   use Plug.Router
   require Logger
 
-  @default_timeout_ms 60_000
+  # Slow local backends (e.g. a Tesla M40 chewing a large agent system prompt) routinely
+  # need >60s for a single completion. Streaming requests heartbeat past edge-proxy idle
+  # windows; non-streaming callers behind Cloudflare still hit its ~100s TTFB limit and
+  # should send `x-hydra-timeout-ms` / stream instead.
+  @default_timeout_ms 300_000
   @max_timeout_ms 600_000
   # While a streaming job runs, emit an SSE keepalive at least this often so an edge proxy
   # (Cloudflare's ~100s idle/TTFB window -> 524) never sees a silent connection. Well under 100s.
@@ -110,19 +114,26 @@ defmodule Coordinator.ApiRouter do
 
     # Subscribe BEFORE submitting so a fast worker result can never be broadcast in the window
     # between enqueue and subscribe. `await_result` filters to our job_id, so other jobs'
-    # results we receive in the meantime are harmless.
+    # results we receive in the meantime are harmless. The job id is generated here (not by
+    # the insert) so the streaming path can also subscribe to the job's chunk topic first.
     Phoenix.PubSub.subscribe(Coordinator.PubSub, "job_results")
 
     stream? = params["stream"] in [true, "true"]
+    job_id = Coordinator.Jobs.gen_id()
+
+    if stream? do
+      Phoenix.PubSub.subscribe(Coordinator.PubSub, "job_chunks:" <> job_id)
+    end
 
     with {:ok, messages} <- fetch_messages(params),
          timeout = resolve_timeout(conn, params),
          payload = build_payload(params, messages),
-         {:ok, record} <- submit(payload) do
+         {:ok, record} <- submit(payload, job_id) do
       if stream? do
-        # Flush headers + a first byte immediately, then heartbeat while the worker runs, so an
-        # edge proxy (Cloudflare's ~100s idle/TTFB -> 524) never sees a silent connection during
-        # a long generation. Errors after the flush are delivered as SSE, not an HTTP status.
+        # Flush headers + a first byte immediately, then relay the worker's streamed chunks
+        # as they arrive (heartbeating while none do, so an edge proxy — Cloudflare's ~100s
+        # idle/TTFB -> 524 — never sees a silent connection). Errors after the flush are
+        # delivered as SSE, not an HTTP status.
         stream_chat(conn, record.id, params, timeout)
       else
         blocking_chat(conn, record.id, params, timeout)
@@ -181,10 +192,11 @@ defmodule Coordinator.ApiRouter do
   # The routing capability is configurable (`HYDRA_API_CAPABILITY`): the worker runs a chat
   # completion for whatever capability it is asked to serve, so this just has to match a string
   # the connected workers advertise (e.g. "text.extract_json"). Defaults to "chat".
-  defp submit(payload) do
+  defp submit(payload, job_id) do
     capability = Application.get_env(:coordinator, :api_capability, "chat")
 
     case Coordinator.submit_job(%{
+           id: job_id,
            capability: capability,
            privacy: "public",
            allow_external_providers: true,
@@ -286,11 +298,12 @@ defmodule Coordinator.ApiRouter do
   # ---- OpenAI streaming (SSE) ---------------------------------------------------------------
 
   # Streaming: flush the SSE headers and an assistant `role` delta *before* the worker result
-  # exists, keep the connection alive with heartbeats while it runs, then frame the finished
-  # result as `chat.completion.chunk`s. The worker returns the full result in one shot (no token
-  # streaming end-to-end), so the body is a content delta (plus tool-call deltas when the model
-  # requested tools), a finish chunk, an optional usage chunk, then `[DONE]` — what AI-SDK /
-  # OpenAI clients (e.g. opencode) expect.
+  # exists, then relay the worker's `result_chunk`s as content deltas the moment they arrive
+  # (heartbeating while none do). The final result closes the stream with tool-call deltas
+  # (when the model requested tools), a finish chunk, an optional usage chunk, then `[DONE]` —
+  # what AI-SDK / OpenAI clients (e.g. opencode) expect. Workers that don't stream (older
+  # binaries, providers without SSE) emit no chunks; their full content is framed as one delta
+  # at the end, exactly as before.
   defp stream_chat(conn, job_id, params, timeout) do
     id = "chatcmpl-" <> job_id
     created = System.system_time(:second)
@@ -311,14 +324,19 @@ defmodule Coordinator.ApiRouter do
         {:error, _} -> conn
       end
 
-    case await_with_heartbeat(conn, job_id, timeout) do
-      {:ok, conn, %{"status" => "ok"} = result} ->
-        stream_result_body(conn, id, created, params, result)
+    # Relays one streamed fragment onto the open SSE stream, as clients expect deltas.
+    emit_delta = fn conn, delta ->
+      chunk(conn, sse(chunk_map(id, created, model0, %{"content" => delta}, nil)))
+    end
 
-      {:ok, conn, %{"reason" => reason}} ->
+    case await_with_heartbeat(conn, job_id, timeout, emit_delta) do
+      {:ok, conn, %{"status" => "ok"} = result, streamed?} ->
+        stream_result_body(conn, id, created, params, result, streamed?)
+
+      {:ok, conn, %{"reason" => reason}, _streamed?} ->
         stream_error(conn, id, created, model0, "worker error: #{reason}")
 
-      {:ok, conn, _other} ->
+      {:ok, conn, _other, _streamed?} ->
         stream_error(conn, id, created, model0, "worker returned no usable output")
 
       {:timeout, conn} ->
@@ -327,7 +345,9 @@ defmodule Coordinator.ApiRouter do
   end
 
   # Frame the finished result onto an already-open (chunked) stream, then `[DONE]`.
-  defp stream_result_body(conn, id, created, params, result) do
+  # `streamed?` — the content already went out as live chunks, so only the tool calls,
+  # finish and usage frames remain (resending the content would double it client-side).
+  defp stream_result_body(conn, id, created, params, result, streamed?) do
     content = get_in(result, ["output", "content"]) || ""
     tool_calls = tool_calls(result)
     usage = result["usage"] || %{}
@@ -350,7 +370,7 @@ defmodule Coordinator.ApiRouter do
       end
 
     content_deltas =
-      if content == "" and tool_calls != nil,
+      if streamed? or (content == "" and tool_calls != nil),
         do: [],
         else: [chunk_map(id, created, model, %{"content" => content}, nil)]
 
@@ -406,18 +426,20 @@ defmodule Coordinator.ApiRouter do
     end)
   end
 
-  # Like `await_result` but writes an SSE keepalive every `@heartbeat_ms` while waiting, and
-  # carries the (mutated) conn back so the caller can keep streaming. A failed heartbeat write
-  # means the client disconnected -> stop waiting.
-  defp await_with_heartbeat(conn, job_id, timeout_ms) do
+  # Like `await_result` but relays this job's streamed chunks through `emit_delta` as they
+  # arrive, writes an SSE keepalive every `@heartbeat_ms` while nothing does, and carries the
+  # (mutated) conn back so the caller can keep streaming. A failed write means the client
+  # disconnected -> stop waiting. Returns whether any content chunks were relayed, so the
+  # caller knows not to resend the full content from the final result.
+  defp await_with_heartbeat(conn, job_id, timeout_ms, emit_delta) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
-    do_await_hb(conn, job_id, deadline)
+    do_await_hb(conn, job_id, deadline, emit_delta, false)
   end
 
   # Overridable (tests use a tiny interval); defaults to the module attribute.
   defp heartbeat_ms, do: Application.get_env(:coordinator, :api_heartbeat_ms, @heartbeat_ms)
 
-  defp do_await_hb(conn, job_id, deadline) do
+  defp do_await_hb(conn, job_id, deadline, emit_delta, streamed?) do
     remaining = deadline - System.monotonic_time(:millisecond)
 
     if remaining <= 0 do
@@ -426,12 +448,27 @@ defmodule Coordinator.ApiRouter do
       wait = min(remaining, heartbeat_ms())
 
       receive do
-        {:job_result, %{"job_id" => ^job_id} = result} -> {:ok, conn, result}
-        {:job_result, _other} -> do_await_hb(conn, job_id, deadline)
+        {:job_result, %{"job_id" => ^job_id} = result} ->
+          {:ok, conn, result, streamed?}
+
+        {:job_result, _other} ->
+          do_await_hb(conn, job_id, deadline, emit_delta, streamed?)
+
+        # The topic is per-job, so any chunk here is ours (a re-leased attempt could in
+        # principle re-stream after a mid-generation failure; its result is non-ok, so the
+        # stream errors out before duplicate text can follow).
+        {:job_chunk, %{"delta" => delta}} when is_binary(delta) ->
+          case emit_delta.(conn, delta) do
+            {:ok, conn} -> do_await_hb(conn, job_id, deadline, emit_delta, true)
+            {:error, _} -> {:timeout, conn}
+          end
+
+        {:job_chunk, _malformed} ->
+          do_await_hb(conn, job_id, deadline, emit_delta, streamed?)
       after
         wait ->
           case chunk(conn, ": ping\n\n") do
-            {:ok, conn} -> do_await_hb(conn, job_id, deadline)
+            {:ok, conn} -> do_await_hb(conn, job_id, deadline, emit_delta, streamed?)
             {:error, _} -> {:timeout, conn}
           end
       end

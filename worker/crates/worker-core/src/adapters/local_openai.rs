@@ -7,8 +7,8 @@
 use async_trait::async_trait;
 use reqwest::Client;
 
-use super::openai_compatible::{oai_chat, oai_list_models, oai_validate};
-use crate::adapter::ProviderAdapter;
+use super::openai_compatible::{oai_chat, oai_chat_stream, oai_list_models, oai_validate};
+use crate::adapter::{DeltaSink, ProviderAdapter};
 use crate::error::Result;
 use crate::types::{ChatRequest, ChatResponse, ModelInfo};
 use crate::vault::Secret;
@@ -91,5 +91,13 @@ impl ProviderAdapter for LocalOpenAiAdapter {
 
     async fn run_chat_completion(&self, req: ChatRequest) -> Result<ChatResponse> {
         oai_chat(&self.client, &self.base_url, self.bearer(), req).await
+    }
+
+    async fn run_chat_completion_streaming(
+        &self,
+        req: ChatRequest,
+        on_delta: DeltaSink,
+    ) -> Result<ChatResponse> {
+        oai_chat_stream(&self.client, &self.base_url, self.bearer(), req, on_delta).await
     }
 }

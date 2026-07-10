@@ -192,6 +192,17 @@ pub struct JobResult {
     pub usage: Option<ResultUsage>,
 }
 
+/// One streamed content fragment of a running job. Mirrors `proto/job_result_chunk.schema.json`.
+/// Best-effort UX: the final [`JobResult`] remains the authoritative output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobResultChunk {
+    pub job_id: String,
+    /// Monotonic per-job counter, starting at 0.
+    pub seq: u64,
+    /// Content text fragment, in generation order.
+    pub delta: String,
+}
+
 /// Per-job usage attached to a result. No secrets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResultUsage {

@@ -80,6 +80,14 @@ defmodule Coordinator.WorkerChannel do
     end
   end
 
+  # Streamed content fragments. No reply: a per-token ack round trip would double the
+  # message rate for zero value — the worker fires and forgets, the final "result" is
+  # the acknowledged message.
+  def handle_in("result_chunk", payload, socket) do
+    WorkerSession.handle_chunk(payload)
+    {:noreply, socket}
+  end
+
   def handle_in("result", payload, socket) do
     case WorkerSession.handle_result(payload) do
       {:ok, _clean} ->

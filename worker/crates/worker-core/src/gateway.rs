@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::adapter::{AdapterRegistry, ProviderAdapter};
+use crate::adapter::{AdapterRegistry, DeltaSink, ProviderAdapter};
 use crate::config::{Preference, RoutingPolicy};
 use crate::limits::LimitGuard;
 use crate::privacy::{self, Decision};
@@ -102,6 +102,13 @@ impl Gateway {
 
     /// Execute a leased job end to end. Never panics; failures map to a [`JobResult`].
     pub async fn execute(&self, job: &Job) -> JobResult {
+        self.execute_streaming(job, Arc::new(|_| {})).await
+    }
+
+    /// Like [`Gateway::execute`], but forwards each streamed content fragment to `on_delta`
+    /// while the backend generates (backends without streaming emit no deltas). The returned
+    /// [`JobResult`] is the complete, authoritative output either way.
+    pub async fn execute_streaming(&self, job: &Job, on_delta: DeltaSink) -> JobResult {
         let reject = |reason: &str| JobResult {
             job_id: job.job_id.clone(),
             lease_id: job.lease_id.clone(),
@@ -174,7 +181,7 @@ impl Gateway {
 
         // 4. Run.
         let started = Instant::now();
-        let result = cand.adapter.run_chat_completion(req).await;
+        let result = cand.adapter.run_chat_completion_streaming(req, on_delta).await;
         let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
         let provider = cand.adapter.name().to_string();
         let model = cand.model.name.clone();

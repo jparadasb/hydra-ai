@@ -10,6 +10,10 @@ use crate::types::{
     ChatRequest, ChatResponse, CostEstimate, ModelInfo, Usage, VisionRequest, VisionResponse,
 };
 
+/// Receives streamed content fragments during a chat completion. `Arc` (not `&dyn`) so the
+/// `async_trait`-boxed futures can hold it without lifetime gymnastics.
+pub type DeltaSink = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// A backend the worker can run jobs against (OpenAI, Anthropic, Ollama, …).
 #[async_trait]
 pub trait ProviderAdapter: Send + Sync {
@@ -27,6 +31,17 @@ pub trait ProviderAdapter: Send + Sync {
 
     /// Run a chat completion.
     async fn run_chat_completion(&self, req: ChatRequest) -> Result<ChatResponse>;
+
+    /// Run a chat completion, invoking `on_delta` with each content fragment as the backend
+    /// streams it. The returned [`ChatResponse`] is still the complete, authoritative result.
+    /// Default: no streaming support — one blocking call, no deltas emitted.
+    async fn run_chat_completion_streaming(
+        &self,
+        req: ChatRequest,
+        _on_delta: DeltaSink,
+    ) -> Result<ChatResponse> {
+        self.run_chat_completion(req).await
+    }
 
     /// Run a vision/multimodal task. Default: unsupported.
     async fn run_vision_task(&self, _req: VisionRequest) -> Result<VisionResponse> {

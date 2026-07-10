@@ -82,6 +82,26 @@ defmodule Coordinator.WorkerSession do
     end
   end
 
+  @doc """
+  Handle one streamed content fragment of a running job. Sanitized and broadcast on the
+  job's own `"job_chunks:<job_id>"` topic (per-job so a busy gateway request only receives
+  its own stream). Chunks are best-effort UX and are never persisted — the final result
+  (`handle_result/1`) stays authoritative.
+  """
+  def handle_chunk(%{"job_id" => job_id} = payload) when is_binary(job_id) do
+    clean = SecretGuard.sanitize(payload)
+
+    Phoenix.PubSub.broadcast(
+      Coordinator.PubSub,
+      "job_chunks:" <> job_id,
+      {:job_chunk, clean}
+    )
+
+    {:ok, clean}
+  end
+
+  def handle_chunk(_), do: {:error, :invalid_chunk}
+
   # Record the result against the durable job, if it is one we are tracking.
   defp persist_result(%{"job_id" => job_id} = result) when is_binary(job_id) do
     Coordinator.Jobs.complete(job_id, result)

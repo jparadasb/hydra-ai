@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hydra-ai/proto/job_result_chunk.schema.json",
+  "title": "JobResultChunk",
+  "description": "Worker -> coordinator. One incremental content fragment of a running job, emitted while the backend streams tokens. Chunks are best-effort UX: the final job_result.schema.json message remains the authoritative output and always follows.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["job_id", "seq", "delta"],
+  "properties": {
+    "job_id": { "type": "string" },
+    "seq": { "type": "integer", "minimum": 0, "description": "Monotonic per-job counter, starting at 0." },
+    "delta": { "type": "string", "description": "Content text fragment, in generation order." }
+  }
+}

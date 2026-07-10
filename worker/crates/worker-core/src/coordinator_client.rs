@@ -300,7 +300,34 @@ mod networked {
                         let Ok(_permit) = sem.acquire_owned().await else {
                             return;
                         };
-                        let result = gateway.execute(&job).await;
+                        // Forward each streamed content fragment as a "result_chunk" so the
+                        // coordinator can relay tokens live. Best-effort (send may fail on a
+                        // closing socket); the final "result" below stays authoritative.
+                        let seq = AtomicU64::new(0);
+                        let on_delta: crate::adapter::DeltaSink = {
+                            let tx = tx.clone();
+                            let topic = topic.clone();
+                            let next_ref = next_ref.clone();
+                            let job_id = job.job_id.clone();
+                            Arc::new(move |delta: &str| {
+                                let chunk = crate::types::JobResultChunk {
+                                    job_id: job_id.clone(),
+                                    seq: seq.fetch_add(1, Ordering::Relaxed),
+                                    delta: delta.to_string(),
+                                };
+                                let payload =
+                                    serde_json::to_value(&chunk).unwrap_or(Value::Null);
+                                let out = PhoenixMsg::new(
+                                    Some("1".into()),
+                                    Some(next_ref()),
+                                    &topic,
+                                    "result_chunk",
+                                    payload,
+                                );
+                                tx.send(out.encode()).ok();
+                            })
+                        };
+                        let result = gateway.execute_streaming(&job, on_delta).await;
                         // Surface a failed job (rejected/errored — e.g. a provider rate limit)
                         // to the UI status; the coordinator still gets the full result below.
                         if !matches!(result.status, crate::types::JobStatus::Ok) {

@@ -110,4 +110,28 @@ defmodule Coordinator.WorkerSessionTest do
 
     assert {:error, _} = WorkerSession.handle_usage(%{"authorization" => "Bearer xyzxyzxyz"})
   end
+
+  test "handle_chunk broadcasts a sanitized fragment on the job's own topic" do
+    Phoenix.PubSub.subscribe(Coordinator.PubSub, "job_chunks:job-chunk-test")
+
+    assert {:ok, clean} =
+             WorkerSession.handle_chunk(%{
+               "job_id" => "job-chunk-test",
+               "seq" => 0,
+               "delta" => "my key is sk-abcdefghijkl and"
+             })
+
+    # Secret-shaped values are redacted, not rejected — a chunk is transient UX, never stored.
+    assert clean["delta"] =~ "[REDACTED]"
+    refute clean["delta"] =~ "sk-abcdefghijkl"
+    assert_receive {:job_chunk, ^clean}
+
+    # Chunks for other jobs don't land on this topic.
+    assert {:ok, _} =
+             WorkerSession.handle_chunk(%{"job_id" => "job-other", "seq" => 0, "delta" => "x"})
+
+    refute_receive {:job_chunk, %{"job_id" => "job-other"}}, 50
+
+    assert {:error, :invalid_chunk} = WorkerSession.handle_chunk(%{"delta" => "no id"})
+  end
 end
