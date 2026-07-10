@@ -14,7 +14,7 @@ use worker_core::usage::{JsonUsageStore, UsageStore};
 use worker_core::vault::{EncryptedFileStore, Secret, Vault};
 
 #[derive(Parser)]
-#[command(name = "hydra-worker", about = "hydra-ai local AI execution gateway")]
+#[command(name = "hydra-worker", version, about = "hydra-ai local AI execution gateway")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

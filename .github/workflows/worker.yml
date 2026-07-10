@@ -42,6 +42,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # On a v* tag, stamp the tag's version into the crate metadata so the built binary
+      # reports it (CARGO_PKG_VERSION -> `hydra-worker --version`). Otherwise the workspace
+      # version stays at its dev placeholder and every release ships as 0.1.0.
+      - name: Stamp version from tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          echo "Stamping version $ver"
+          perl -0pi -e "s/^version = \"[0-9][^\"]*\"/version = \"$ver\"/m" worker/Cargo.toml
+          grep -E '^version = ' worker/Cargo.toml
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -99,6 +111,19 @@ jobs:
       contents: write   # tauri-action uploads the desktop bundles to the tag's GitHub Release
     steps:
       - uses: actions/checkout@v4
+
+      # Mirror the CLI job: on a v* tag, stamp the version into the desktop crate + Tauri config
+      # so the bundle filenames and app version match the release tag instead of shipping 0.1.0.
+      - name: Stamp version from tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          echo "Stamping version $ver"
+          perl -0pi -e "s/^version = \"[0-9][^\"]*\"/version = \"$ver\"/m" worker/crates/worker-app/Cargo.toml
+          perl -0pi -e "s/(\"version\": )\"[0-9][^\"]*\"/\${1}\"$ver\"/" worker/crates/worker-app/tauri.conf.json
+          grep -E '^version = ' worker/crates/worker-app/Cargo.toml
+          grep -E '"version"' worker/crates/worker-app/tauri.conf.json
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
