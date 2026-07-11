@@ -10,9 +10,10 @@ use crate::types::{
     ChatRequest, ChatResponse, CostEstimate, ModelInfo, Usage, VisionRequest, VisionResponse,
 };
 
-/// Receives streamed content fragments during a chat completion. `Arc` (not `&dyn`) so the
-/// `async_trait`-boxed futures can hold it without lifetime gymnastics.
-pub type DeltaSink = Arc<dyn Fn(&str) + Send + Sync>;
+/// Receives streamed fragments during a chat completion: `(text, is_reasoning)`, where
+/// `is_reasoning` marks a thinking/`reasoning_content` fragment vs final answer content. `Arc`
+/// (not `&dyn`) so the `async_trait`-boxed futures can hold it without lifetime gymnastics.
+pub type DeltaSink = Arc<dyn Fn(&str, bool) + Send + Sync>;
 
 /// A backend the worker can run jobs against (OpenAI, Anthropic, Ollama, …).
 #[async_trait]

@@ -261,9 +261,11 @@ pub(crate) struct StreamAssembly {
 }
 
 impl StreamAssembly {
-    /// Feed one SSE line (`data: {...}` / `data: [DONE]` / keepalives). Content fragments
-    /// are forwarded to `on_delta`.
-    pub(crate) fn feed_line(&mut self, line: &str, on_delta: &(dyn Fn(&str) + Send + Sync)) {
+    /// Feed one SSE line (`data: {...}` / `data: [DONE]` / keepalives). Content fragments are
+    /// forwarded to `on_delta` with `is_reasoning=false`; reasoning/thinking fragments
+    /// (`reasoning_content`, or `reasoning`) with `is_reasoning=true`. Reasoning is streamed for
+    /// live display but not accumulated into the final answer content.
+    pub(crate) fn feed_line(&mut self, line: &str, on_delta: &(dyn Fn(&str, bool) + Send + Sync)) {
         let Some(data) = line.strip_prefix("data: ") else {
             return; // event:/comment/blank lines
         };
@@ -281,10 +283,20 @@ impl StreamAssembly {
         }
 
         let delta = &value["choices"][0]["delta"];
+        // Reasoning field name varies by backend: llama.cpp/Qwen/DeepSeek use `reasoning_content`;
+        // some (vLLM configs) use `reasoning`. Forward either, live only — never mixed into the
+        // answer text.
+        for key in ["reasoning_content", "reasoning"] {
+            if let Some(text) = delta[key].as_str() {
+                if !text.is_empty() {
+                    on_delta(text, true);
+                }
+            }
+        }
         if let Some(text) = delta["content"].as_str() {
             if !text.is_empty() {
                 self.content.push_str(text);
-                on_delta(text);
+                on_delta(text, false);
             }
         }
         if let Some(fragments) = delta["tool_calls"].as_array() {
@@ -345,9 +357,15 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    // Captures content deltas only (ignores reasoning), so the content-focused tests below read
+    // cleanly. The reasoning test uses its own capturing closure.
     fn feed(assembly: &mut StreamAssembly, lines: &[&str], deltas: &Mutex<Vec<String>>) {
         for line in lines {
-            assembly.feed_line(line, &|d: &str| deltas.lock().unwrap().push(d.to_string()));
+            assembly.feed_line(line, &|d: &str, is_reasoning: bool| {
+                if !is_reasoning {
+                    deltas.lock().unwrap().push(d.to_string());
+                }
+            });
         }
     }
 
@@ -396,6 +414,34 @@ mod tests {
         assert_eq!(calls[0].function.name, "get_weather");
         assert_eq!(calls[0].function.arguments, r#"{"city":"Paris"}"#);
         assert!(deltas.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn streams_reasoning_separately_from_content() {
+        // Qwen/llama.cpp emit thinking in `reasoning_content` before the answer's `content`.
+        let events: Mutex<Vec<(String, bool)>> = Mutex::new(Vec::new());
+        let mut a = StreamAssembly::default();
+        for line in [
+            r#"data: {"choices":[{"index":0,"delta":{"reasoning_content":"Let me"}}]}"#,
+            r#"data: {"choices":[{"index":0,"delta":{"reasoning_content":" think"}}]}"#,
+            r#"data: {"choices":[{"index":0,"delta":{"content":"42"}}]}"#,
+            "data: [DONE]",
+        ] {
+            a.feed_line(line, &|d: &str, r: bool| {
+                events.lock().unwrap().push((d.to_string(), r))
+            });
+        }
+        let resp = a.finish("m".into());
+        // Reasoning was forwarded live, tagged, and NOT folded into the answer.
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                ("Let me".to_string(), true),
+                (" think".to_string(), true),
+                ("42".to_string(), false),
+            ]
+        );
+        assert_eq!(resp.content, "42");
     }
 
     #[test]

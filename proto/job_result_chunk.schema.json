@@ -9,6 +9,7 @@
   "properties": {
     "job_id": { "type": "string" },
     "seq": { "type": "integer", "minimum": 0, "description": "Monotonic per-job counter, starting at 0." },
-    "delta": { "type": "string", "description": "Content text fragment, in generation order." }
+    "delta": { "type": "string", "description": "Text fragment, in generation order." },
+    "reasoning": { "type": "boolean", "default": false, "description": "True when this fragment is model reasoning/thinking (reasoning_content) rather than final answer content. Absent/false = answer content." }
   }
 }

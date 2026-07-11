@@ -324,9 +324,12 @@ defmodule Coordinator.ApiRouter do
         {:error, _} -> conn
       end
 
-    # Relays one streamed fragment onto the open SSE stream, as clients expect deltas.
-    emit_delta = fn conn, delta ->
-      chunk(conn, sse(chunk_map(id, created, model0, %{"content" => delta}, nil)))
+    # Relays one streamed fragment onto the open SSE stream. Reasoning/thinking fragments go out
+    # as `reasoning_content` deltas (what OpenAI-compatible clients render as thinking); answer
+    # fragments as `content`.
+    emit_delta = fn conn, delta, reasoning? ->
+      field = if reasoning?, do: "reasoning_content", else: "content"
+      chunk(conn, sse(chunk_map(id, created, model0, %{field => delta}, nil)))
     end
 
     case await_with_heartbeat(conn, job_id, timeout, emit_delta) do
@@ -456,11 +459,18 @@ defmodule Coordinator.ApiRouter do
 
         # The topic is per-job, so any chunk here is ours (a re-leased attempt could in
         # principle re-stream after a mid-generation failure; its result is non-ok, so the
-        # stream errors out before duplicate text can follow).
-        {:job_chunk, %{"delta" => delta}} when is_binary(delta) ->
-          case emit_delta.(conn, delta) do
-            {:ok, conn} -> do_await_hb(conn, job_id, deadline, emit_delta, true)
-            {:error, _} -> {:timeout, conn}
+        # stream errors out before duplicate text can follow). `reasoning` chunks are thinking,
+        # relayed live but never part of the final answer — so they don't set `streamed?` (which
+        # only suppresses re-sending answer *content* at the end).
+        {:job_chunk, %{"delta" => delta} = chunk_msg} when is_binary(delta) ->
+          reasoning? = chunk_msg["reasoning"] == true
+
+          case emit_delta.(conn, delta, reasoning?) do
+            {:ok, conn} ->
+              do_await_hb(conn, job_id, deadline, emit_delta, streamed? or not reasoning?)
+
+            {:error, _} ->
+              {:timeout, conn}
           end
 
         {:job_chunk, _malformed} ->

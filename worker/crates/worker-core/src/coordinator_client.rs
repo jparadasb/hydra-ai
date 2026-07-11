@@ -309,11 +309,12 @@ mod networked {
                             let topic = topic.clone();
                             let next_ref = next_ref.clone();
                             let job_id = job.job_id.clone();
-                            Arc::new(move |delta: &str| {
+                            Arc::new(move |delta: &str, is_reasoning: bool| {
                                 let chunk = crate::types::JobResultChunk {
                                     job_id: job_id.clone(),
                                     seq: seq.fetch_add(1, Ordering::Relaxed),
                                     delta: delta.to_string(),
+                                    reasoning: is_reasoning,
                                 };
                                 let payload =
                                     serde_json::to_value(&chunk).unwrap_or(Value::Null);

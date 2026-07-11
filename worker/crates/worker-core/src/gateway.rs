@@ -102,7 +102,7 @@ impl Gateway {
 
     /// Execute a leased job end to end. Never panics; failures map to a [`JobResult`].
     pub async fn execute(&self, job: &Job) -> JobResult {
-        self.execute_streaming(job, Arc::new(|_| {})).await
+        self.execute_streaming(job, Arc::new(|_, _| {})).await
     }
 
     /// Like [`Gateway::execute`], but forwards each streamed content fragment to `on_delta`

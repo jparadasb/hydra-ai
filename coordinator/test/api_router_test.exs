@@ -438,6 +438,51 @@ defmodule Coordinator.ApiRouterTest do
     assert body =~ "data: [DONE]"
   end
 
+  test "stream:true relays reasoning chunks as reasoning_content deltas, distinct from content" do
+    nonce = "apireason-#{System.unique_integer([:positive])}"
+
+    task =
+      Task.async(fn ->
+        post("/v1/chat/completions", %{
+          "messages" => [%{"role" => "user", "content" => nonce}],
+          "model" => "qwen",
+          "stream" => true,
+          "timeout_ms" => 5000
+        })
+      end)
+
+    job_id = wait_for(fn -> find_job_id(nonce) end)
+    topic = "job_chunks:" <> job_id
+
+    Phoenix.PubSub.broadcast(Coordinator.PubSub, topic, {:job_chunk, %{"job_id" => job_id, "seq" => 0, "delta" => "think", "reasoning" => true}})
+    Phoenix.PubSub.broadcast(Coordinator.PubSub, topic, {:job_chunk, %{"job_id" => job_id, "seq" => 1, "delta" => "42", "reasoning" => false}})
+
+    Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {
+      :job_result,
+      %{
+        "job_id" => job_id,
+        "status" => "ok",
+        "output" => %{"content" => "42"},
+        "usage" => %{"model" => "qwen", "input_tokens" => 4, "output_tokens" => 2}
+      }
+    })
+
+    conn = Task.await(task, 6000)
+    assert conn.status == 200
+    body = conn.resp_body
+
+    # Reasoning went out as a reasoning_content delta; the answer as a content delta.
+    assert body =~ ~s("reasoning_content":"think")
+    assert body =~ ~s("content":"42")
+    # Reasoning arrived before the answer content.
+    [_, after_reason] = String.split(body, ~s("reasoning_content":"think"), parts: 2)
+    assert after_reason =~ ~s("content":"42")
+    # The content was streamed, so the final result must not resend it.
+    parts = String.split(body, ~s("content":"42"))
+    assert length(parts) == 2, "answer content should appear exactly once"
+    assert body =~ "data: [DONE]"
+  end
+
   test "bearer token required when :api_token is set" do
     Application.put_env(:coordinator, :api_token, "secret-key")
     msg = %{"messages" => [%{"role" => "user", "content" => "hi"}], "timeout_ms" => 150}

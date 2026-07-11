@@ -199,8 +199,12 @@ pub struct JobResultChunk {
     pub job_id: String,
     /// Monotonic per-job counter, starting at 0.
     pub seq: u64,
-    /// Content text fragment, in generation order.
+    /// Text fragment, in generation order.
     pub delta: String,
+    /// True when this fragment is model reasoning/thinking rather than answer content.
+    /// Defaults false so an older coordinator/worker (no field) reads it as content.
+    #[serde(default)]
+    pub reasoning: bool,
 }
 
 /// Per-job usage attached to a result. No secrets.
