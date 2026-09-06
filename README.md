@@ -188,6 +188,7 @@ just pointing at it with a gateway key:
 | endpoint | notes |
 |----------|-------|
 | `POST /v1/chat/completions` | `messages`, `model`, `max_tokens`, `temperature`, `tools`/`tool_choice` (function calling — works with agent clients like opencode); `stream: true` returns an SSE `chat.completion.chunk` stream ending in `[DONE]` |
+| `POST /v1/responses` | Codex-compatible Responses API; accepts `input`/`instructions`, `model`, `max_output_tokens`, and `stream: true` SSE |
 | `GET /v1/models`, `GET /v1/models/{id}` | models currently servable by connected workers |
 | `GET /health` | liveness (public) |
 | `GET /openapi.json`, `GET /docs` | **API docs (public)** — OpenAPI 3 spec + Redoc page |

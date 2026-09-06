@@ -20,7 +20,8 @@ defmodule Coordinator.OpenApi do
         "title" => "hydra coordinator API",
         "version" => @version,
         "description" =>
-          "OpenAI-compatible gateway. A client calls `/v1/chat/completions` exactly as it " <>
+          "OpenAI-compatible gateway. A client calls `/v1/chat/completions` or `/v1/responses` " <>
+            "exactly as it " <>
             "would call OpenAI; the coordinator routes the request to an eligible worker " <>
             "(local model or the worker's own provider) and returns the result. Authenticate " <>
             "with a gateway API key (`Authorization: Bearer <key>`) issued in the admin " <>
@@ -112,8 +113,9 @@ defmodule Coordinator.OpenApi do
               "name" => "x-hydra-timeout-ms",
               "in" => "header",
               "required" => false,
-              "description" => "Override the per-request wait (ms). Also settable via the " <>
-                "`timeout_ms` body field. Capped at 600000.",
+              "description" =>
+                "Override the per-request wait (ms). Also settable via the " <>
+                  "`timeout_ms` body field. Capped at 600000.",
               "schema" => %{"type" => "integer"}
             }
           ],
@@ -131,8 +133,9 @@ defmodule Coordinator.OpenApi do
                 "text/event-stream" => %{
                   "schema" => %{
                     "type" => "string",
-                    "description" => "A sequence of `data: {chat.completion.chunk}` events " <>
-                      "ending with `data: [DONE]`."
+                    "description" =>
+                      "A sequence of `data: {chat.completion.chunk}` events " <>
+                        "ending with `data: [DONE]`."
                   }
                 }
               }
@@ -140,6 +143,32 @@ defmodule Coordinator.OpenApi do
             "400" => error_response("Invalid request (e.g. empty `messages`)"),
             "401" => unauthorized(),
             "429" => error_response("Upstream provider rate limit"),
+            "502" => error_response("Worker or upstream provider error"),
+            "504" => error_response("No worker completed the job in time")
+          }
+        }
+      },
+      "/v1/responses" => %{
+        "post" => %{
+          "tags" => ["responses"],
+          "summary" => "Create a Responses API response",
+          "description" =>
+            "Codex-compatible Responses API endpoint. `input` accepts a string or an array of " <>
+              "role/content message items. Streaming returns Responses SSE events.",
+          "requestBody" => %{
+            "required" => true,
+            "content" => %{"application/json" => %{"schema" => ref("ResponseRequest")}}
+          },
+          "responses" => %{
+            "200" => %{
+              "description" => "Response object or Responses SSE stream",
+              "content" => %{
+                "application/json" => %{"schema" => ref("Response")},
+                "text/event-stream" => %{"schema" => %{"type" => "string"}}
+              }
+            },
+            "400" => error_response("Invalid request (e.g. empty input)"),
+            "401" => unauthorized(),
             "502" => error_response("Worker or upstream provider error"),
             "504" => error_response("No worker completed the job in time")
           }
@@ -211,7 +240,8 @@ defmodule Coordinator.OpenApi do
               "items" => %{"type" => "object"}
             },
             "tool_choice" => %{
-              "description" => "`auto` | `none` | `required` | `{type: \"function\", function: {name}}`."
+              "description" =>
+                "`auto` | `none` | `required` | `{type: \"function\", function: {name}}`."
             },
             "stream" => %{"type" => "boolean", "default" => false},
             "timeout_ms" => %{"type" => "integer", "description" => "Per-request wait (ms)."}
@@ -267,7 +297,37 @@ defmodule Coordinator.OpenApi do
           "type" => "object",
           "properties" => %{
             "object" => %{"type" => "string", "example" => "list"},
-            "data" => %{"type" => "array", "items" => ref("Model")}
+            "data" => %{"type" => "array", "items" => ref("Model")},
+            "models" => %{
+              "type" => "array",
+              "items" => ref("Model"),
+              "description" => "Codex-compatible alias for data"
+            }
+          }
+        },
+        "ResponseRequest" => %{
+          "type" => "object",
+          "required" => ["input"],
+          "properties" => %{
+            "model" => %{"type" => "string"},
+            "input" => %{"description" => "Input text or message items"},
+            "instructions" => %{"type" => "string"},
+            "max_output_tokens" => %{"type" => "integer"},
+            "temperature" => %{"type" => "number"},
+            "stream" => %{"type" => "boolean", "default" => false},
+            "timeout_ms" => %{"type" => "integer"}
+          }
+        },
+        "Response" => %{
+          "type" => "object",
+          "properties" => %{
+            "id" => %{"type" => "string"},
+            "object" => %{"type" => "string", "example" => "response"},
+            "created_at" => %{"type" => "integer"},
+            "model" => %{"type" => "string"},
+            "status" => %{"type" => "string", "example" => "completed"},
+            "output" => %{"type" => "array"},
+            "usage" => %{"type" => "object"}
           }
         },
         "Error" => %{
