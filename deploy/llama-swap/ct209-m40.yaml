@@ -1,0 +1,20 @@
+healthCheckTimeout: 600
+logLevel: info
+models:
+  qwen2.5-coder-14b:
+    cmd: '/opt/llama.cpp/build/bin/llama-server
+
+      -m /opt/models/qwen2.5-coder-14b-instruct-q4_k_m.gguf
+
+      -a qwen2.5-coder-14b
+
+      -ngl 999 -fa on --fit off -c 16384 -t 8
+
+      --cache-type-k q8_0 --cache-type-v q8_0
+
+      --jinja --host 127.0.0.1 --port ${PORT}'
+    env:
+      - CUDA_VISIBLE_DEVICES=0
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
+      - LD_LIBRARY_PATH=/usr/local/cuda-12.6/lib64
+    ttl: 600
