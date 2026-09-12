@@ -6,6 +6,11 @@ defmodule Coordinator do
   Core rule: **the coordinator never receives or stores provider tokens.** Workers register
   capabilities + usage only; `Coordinator.SecretGuard` enforces this at the boundary.
 
+  It does, however, store job text: a `jobs` row holds the caller's prompt and the worker's
+  completion, which is what makes a job durable and retryable. `Coordinator.JobRetention`
+  bounds how long — redacting the text from terminal jobs after a configured window and
+  deleting the rows after a longer one.
+
   Key modules:
 
     * `Coordinator.SecretGuard`    — strips/rejects secret-shaped payloads (defense in depth)

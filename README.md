@@ -11,10 +11,17 @@ added with a pasted key **or a browser sign-in** (Gemini via Google, OpenAI via 
 
 ## Core rule
 
-**Provider tokens never leave the worker.** The coordinator only ever sees capabilities and
-usage metadata, and routes jobs by capability / privacy / trust / cost / policy. `Secret` is
-non-serializable on the worker; the coordinator's `SecretGuard` strips/rejects any
-secret-shaped payload. Asserted by tests on both sides.
+**Provider tokens never leave the worker.** `Secret` is non-serializable on the worker; the
+coordinator's `SecretGuard` strips/rejects any secret-shaped payload. Asserted by tests on both
+sides. The coordinator routes jobs by capability / privacy / trust / cost / policy.
+
+What the coordinator *does* hold: a job row carries the caller's prompt and the worker's
+completion, because the request is durable and retryable. That text is not kept forever —
+`Coordinator.JobRetention` replaces it with a size-only summary once the job has been terminal
+for `HYDRA_JOB_REDACT_AFTER_HOURS` (default 24), and deletes the row after
+`HYDRA_JOB_RETENTION_DAYS` (default 30). Token accounting in `usage_records` is not pruned, so
+consumption history outlives the prompt that produced it. Set either to `0` to disable that
+stage — including to keep prompts indefinitely, if that is what you want.
 
 ## Provider terms & compliance
 

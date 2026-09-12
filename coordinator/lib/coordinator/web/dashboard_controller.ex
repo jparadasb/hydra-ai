@@ -205,7 +205,10 @@ defmodule Coordinator.Web.DashboardController do
       }
 
       refresh();
-      setInterval(refresh, 5000);
+      // 5s meant every open dashboard tab drove a job-table aggregate twelve times a minute.
+      // The queries are indexed now, but the page still shows hour buckets — polling faster
+      // than the data changes only costs the database.
+      setInterval(refresh, 15000);
     </script>
     """
   end
