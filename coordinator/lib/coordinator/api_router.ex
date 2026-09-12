@@ -122,6 +122,8 @@ defmodule Coordinator.ApiRouter do
             %{"effort" => "medium", "description" => "Balances speed and reasoning depth"},
             %{"effort" => "high", "description" => "Deeper reasoning for difficult tasks"}
           ],
+          "shell_type" => "unified_exec",
+          "visibility" => "list",
           "object" => "model",
           "created" => created,
           "owned_by" => worker.provider_name || "hydra"
