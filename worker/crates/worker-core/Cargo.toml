@@ -13,7 +13,6 @@ async-trait = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 tracing = { workspace = true }
-keyring = { workspace = true, optional = true }
 chacha20poly1305 = { workspace = true }
 argon2 = { workspace = true }
 rand = { workspace = true }
@@ -32,10 +31,6 @@ jsonschema = { workspace = true }
 default = []
 # Networked Phoenix Channel client used to talk to the coordinator.
 transport = ["dep:tokio-tungstenite"]
-# Enable to store secrets in the OS keychain (Secret Service / Keychain / Credential
-# Manager). Requires platform crypto libs at build time. Without it, the worker falls
-# back to an encrypted local file.
-os-keychain = ["dep:keyring", "keyring/sync-secret-service", "keyring/apple-native", "keyring/windows-native"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

@@ -1,9 +1,15 @@
 //! Token vault. The ONE place raw provider secrets exist in the worker.
 //!
-//! Storage precedence:
-//!   1. OS keychain (feature `os-keychain`): Credential Manager / Keychain / Secret Service.
-//!   2. Encrypted local file fallback: ChaCha20-Poly1305, key derived from a worker
-//!      passphrase via Argon2id, file mode 0600.
+//! Storage: an encrypted local file — ChaCha20-Poly1305, key derived from a worker passphrase
+//! via Argon2id, file mode 0600. This is what every install on every platform uses, and what
+//! `token_storage: "local_encrypted"` in the registration payload reports.
+//!
+//! There was also an OS keychain backend, feature-gated, documented as available, and
+//! constructed by nothing: its selector had no callers, the feature was off by default, and CI
+//! never built it. Removed rather than wired up — the worker's usual home is a headless Linux
+//! container, where Secret Service needs a D-Bus session that is not there. Reintroducing it
+//! means call sites, CI coverage on all three platforms, and a `token_storage` value that
+//! tells the coordinator which one is actually in use.
 //!
 //! Invariants enforced here:
 //!   * [`Secret`] never implements `Serialize` and its `Debug` prints `[REDACTED]`.
@@ -19,8 +25,6 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-
-const SERVICE: &str = "hydra-ai-worker";
 
 /// A provider secret. Deliberately NOT `Serialize`. Debug/Display are redacted.
 #[derive(Clone)]
@@ -257,57 +261,6 @@ impl SecretStore for EncryptedFileStore {
         self.save(&map)
     }
 }
-
-// ---------------------------------------------------------------------------
-// OS keychain backend (feature-gated).
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "os-keychain")]
-pub struct KeyringStore;
-
-#[cfg(feature = "os-keychain")]
-impl SecretStore for KeyringStore {
-    fn set(&self, provider: &str, secret: &Secret) -> Result<()> {
-        keyring::Entry::new(SERVICE, provider)
-            .and_then(|e| e.set_password(secret.expose()))
-            .map_err(|e| Error::Vault(e.to_string()))
-    }
-
-    fn get(&self, provider: &str) -> Result<Option<Secret>> {
-        match keyring::Entry::new(SERVICE, provider).and_then(|e| e.get_password()) {
-            Ok(pw) => Ok(Some(Secret::new(pw))),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(Error::Vault(e.to_string())),
-        }
-    }
-
-    fn delete(&self, provider: &str) -> Result<()> {
-        match keyring::Entry::new(SERVICE, provider).and_then(|e| e.delete_credential()) {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(Error::Vault(e.to_string())),
-        }
-    }
-}
-
-/// Build the best available vault. Prefers OS keychain; else encrypted file.
-pub fn default_vault(_passphrase_for_fallback: impl Into<String>) -> Vault {
-    #[cfg(feature = "os-keychain")]
-    {
-        let _ = _passphrase_for_fallback;
-        return Vault::new(Box::new(KeyringStore));
-    }
-    #[cfg(not(feature = "os-keychain"))]
-    {
-        Vault::new(Box::new(EncryptedFileStore::new(
-            EncryptedFileStore::default_path(),
-            _passphrase_for_fallback.into(),
-        )))
-    }
-}
-
-// Keep SERVICE referenced even when the keychain feature is off.
-#[cfg(not(feature = "os-keychain"))]
-const _: &str = SERVICE;
 
 #[cfg(test)]
 mod tests {
