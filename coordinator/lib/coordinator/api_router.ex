@@ -114,6 +114,7 @@ defmodule Coordinator.ApiRouter do
           # Codex's model loader consumes the extended `models` list and requires a slug.
           # Keep it identical to the public model id for OpenAI-compatible clients.
           "slug" => model.name,
+          "display_name" => model.name,
           "object" => "model",
           "created" => created,
           "owned_by" => worker.provider_name || "hydra"
