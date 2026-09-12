@@ -8,7 +8,7 @@ Web frontend for the Tauri worker app. Every action calls a `#[tauri::command]` 
 
 1. **Mode chooser (first run)** — local model / provider / both → writes worker config.
 2. **Providers** — add / test / select-models / rotate / remove; shows masked fingerprint
-   (`sk-...abcd`) and spending limits. Calls `add_provider`, `test_provider`,
+   (`sk-...abcd`) and request limits. Calls `add_provider`, `test_provider`,
    `rotate_provider`, `remove_provider`, `list_providers`.
 3. **Privacy** — accepted job levels, allow private/sensitive toggles, routing preference.
 4. **Usage** — per-provider/model table (requests, tokens, est. cost, success/fail, latency,

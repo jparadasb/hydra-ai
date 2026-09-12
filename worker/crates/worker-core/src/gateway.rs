@@ -53,10 +53,14 @@ impl Gateway {
         let mut catalog = Vec::new();
         for adapter in self.registry.iter() {
             match adapter.list_models().await {
-                Ok(models) => for m in models {
-                    catalog.push((adapter.name().to_string(), m));
-                },
-                Err(error) => eprintln!("Model catalog probe failed for {}: {error}", adapter.name()),
+                Ok(models) => {
+                    for m in models {
+                        catalog.push((adapter.name().to_string(), m));
+                    }
+                }
+                Err(error) => {
+                    eprintln!("Model catalog probe failed for {}: {error}", adapter.name())
+                }
             }
         }
         let mut current = self.catalog.write().expect("catalog lock poisoned");
@@ -181,14 +185,13 @@ impl Gateway {
             }
         };
 
-        // 3. Reserve against limits (only meaningful for paid external backends).
-        let reservation = if cand.adapter.uses_external_provider() {
-            match self.limits.try_reserve(0.0) {
-                Ok(r) => Some(r),
-                Err(e) => return reject(&format!("limit_exceeded: {e}")),
-            }
-        } else {
-            None
+        // 3. Count every request; provider calls additionally consume a provider slot.
+        let reservation = match self
+            .limits
+            .try_reserve(cand.adapter.uses_external_provider())
+        {
+            Ok(r) => r,
+            Err(e) => return reject(&format!("limit_exceeded: {e}")),
         };
 
         let strict_schema = match strict_json_schema(req.response_format.as_ref()) {
@@ -244,9 +247,7 @@ impl Gateway {
                     .estimate_cost(&resp.usage)
                     .map(|c| c.usd)
                     .unwrap_or(0.0);
-                if let Some(r) = reservation {
-                    r.commit_cost(cost);
-                }
+                drop(reservation);
                 self.record(&provider, &model, &resp.usage, cost, latency_ms, true);
                 let mut output = serde_json::json!({ "content": resp.content });
                 if let Some(calls) = &resp.tool_calls {
@@ -268,7 +269,7 @@ impl Gateway {
                 }
             }
             Err(e) => {
-                drop(reservation); // releases the parallel slot; no cost committed
+                drop(reservation);
                 self.record(&provider, &model, &Usage::default(), 0.0, latency_ms, false);
                 JobResult {
                     job_id: job.job_id.clone(),

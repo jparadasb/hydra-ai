@@ -167,6 +167,7 @@ pub use networked::{connect_and_run, ClientConfig};
 
 #[cfg(feature = "transport")]
 mod networked {
+    use std::collections::HashMap;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
@@ -180,6 +181,15 @@ mod networked {
     use crate::error::{Error, Result};
     use crate::gateway::Gateway;
     use crate::types::Job;
+
+    fn cancel_job(jobs: &mut HashMap<String, tokio::task::JoinHandle<()>>, job_id: &str) -> bool {
+        if let Some(handle) = jobs.remove(job_id) {
+            handle.abort();
+            true
+        } else {
+            false
+        }
+    }
 
     pub struct ClientConfig {
         /// Base ws/wss URL, e.g. `ws://127.0.0.1:4000`.
@@ -229,9 +239,13 @@ mod networked {
             url.push_str(&framing::percent_encode(&a.sig));
         }
 
-        let (ws, _resp) = tokio_tungstenite::connect_async(&url)
-            .await
-            .map_err(|e| Error::Other(format!("ws connect: {e}")))?;
+        let (ws, _resp) = tokio::time::timeout(
+            crate::http::CONNECT_TIMEOUT,
+            tokio_tungstenite::connect_async(&url),
+        )
+        .await
+        .map_err(|_| Error::Other("ws connect timed out".into()))?
+        .map_err(|e| Error::Other(format!("ws connect: {e}")))?;
         status.mark_connected(true);
         let (mut sink, mut stream) = ws.split();
 
@@ -303,6 +317,7 @@ mod networked {
         // spawned and acquires a permit inside its task, so the loop keeps reading the socket
         // (heartbeat replies, Close frames) while at most `max_parallel_jobs` run at once.
         let sem = Arc::new(Semaphore::new(config.max_parallel_jobs.max(1)));
+        let mut jobs = HashMap::<String, tokio::task::JoinHandle<()>>::new();
 
         // Reader loop: dispatch leased jobs to bounded background tasks; each replies with its
         // own result. Running jobs in tasks (not inline) lets a worker process many leases in
@@ -316,22 +331,29 @@ mod networked {
             let Some(pm) = PhoenixMsg::decode(&text) else {
                 continue;
             };
+            // Reap completed handles while traffic is flowing. Retaining the handles lets a
+            // cancellation abort both jobs waiting for a semaphore permit and active adapters.
+            jobs.retain(|_, handle| !handle.is_finished());
             if pm.event == "phx_reply" && pm.topic == topic {
                 match pm.payload.get("status").and_then(Value::as_str) {
                     Some("ok") => tracing::debug!("coordinator acknowledged worker message"),
-                    Some(status) => eprintln!("Coordinator rejected worker message ({status}): {}", pm.payload),
+                    Some(status) => eprintln!(
+                        "Coordinator rejected worker message ({status}): {}",
+                        pm.payload
+                    ),
                     None => {}
                 }
             }
             if pm.event == "job" && pm.topic == topic {
                 if let Ok(job) = serde_json::from_value::<Job>(pm.payload.clone()) {
+                    let job_id = job.job_id.clone();
                     let gateway = Arc::clone(&gateway);
                     let status = Arc::clone(&status);
                     let sem = Arc::clone(&sem);
                     let tx = tx.clone();
                     let topic = topic.clone();
                     let next_ref = next_ref.clone();
-                    tokio::spawn(async move {
+                    let handle = tokio::spawn(async move {
                         // Wait for a free slot; if the semaphore is gone we're shutting down.
                         let Ok(_permit) = sem.acquire_owned().await else {
                             return;
@@ -389,14 +411,42 @@ mod networked {
                         tx.send(out.encode()).ok();
                         status.incr_jobs();
                     });
+                    // Duplicate leases replace and abort older work for the same logical job.
+                    if let Some(old) = jobs.insert(job_id, handle) {
+                        old.abort();
+                    }
+                }
+            }
+            if pm.event == "cancel" && pm.topic == topic {
+                if let Some(job_id) = pm.payload.get("job_id").and_then(Value::as_str) {
+                    cancel_job(&mut jobs, job_id);
                 }
             }
         }
 
         status.mark_connected(false);
+        for (_, handle) in jobs {
+            handle.abort();
+        }
         heartbeat.abort();
         catalog_refresh.abort();
         writer.abort();
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn cancel_aborts_and_removes_running_job() {
+            let mut jobs = HashMap::new();
+            let handle = tokio::spawn(std::future::pending::<()>());
+            jobs.insert("job-1".to_string(), handle);
+
+            assert!(cancel_job(&mut jobs, "job-1"));
+            assert!(jobs.is_empty());
+            assert!(!cancel_job(&mut jobs, "job-1"));
+        }
     }
 }

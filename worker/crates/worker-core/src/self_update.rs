@@ -250,9 +250,11 @@ pub async fn run_update(
         Err(e) => return Err(io_err(e)),
     }
 
-    let downloaded = download_to(client, &asset_url, &partial).await.inspect_err(|_| {
-        let _ = std::fs::remove_file(&partial);
-    })?;
+    let downloaded = download_to(client, &asset_url, &partial)
+        .await
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&partial);
+        })?;
 
     // When a checksum was published, the download must match it exactly.
     if let Some(remote) = &remote_sha {
@@ -273,7 +275,8 @@ pub async fn run_update(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o755)).map_err(io_err)?;
+        std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o755))
+            .map_err(io_err)?;
     }
 
     if opts.verify_exec {
@@ -304,7 +307,9 @@ async fn fetch_remote_sha(client: &reqwest::Client, url: &str) -> Result<Option<
     let text = resp.text().await?;
     match parse_sha256_file(&text) {
         Some(h) => Ok(Some(h)),
-        None => Err(Error::Other(format!("self-update: malformed checksum at {url}"))),
+        None => Err(Error::Other(format!(
+            "self-update: malformed checksum at {url}"
+        ))),
     }
 }
 
@@ -337,7 +342,10 @@ async fn download_to(client: &reqwest::Client, url: &str, dest: &Path) -> Result
 /// downgrades to releases that predate `--version`). Only a spawn failure — e.g. a glibc/arch
 /// mismatch — is fatal.
 fn sanity_check_exec(candidate: &Path) -> Result<()> {
-    match std::process::Command::new(candidate).arg("--version").output() {
+    match std::process::Command::new(candidate)
+        .arg("--version")
+        .output()
+    {
         Ok(out) if out.status.success() || out.status.code() == Some(2) => Ok(()),
         Ok(out) => Err(Error::Other(format!(
             "self-update: downloaded binary failed to run (exit {:?}); aborted",

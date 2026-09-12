@@ -25,6 +25,11 @@ config :coordinator, Oban,
   # SQLite has no LISTEN/NOTIFY; use the process-group notifier.
   notifier: Oban.Notifiers.PG,
   repo: Coordinator.Repo,
+  plugins: [
+    Oban.Plugins.Pruner,
+    Oban.Plugins.Lifeline,
+    {Oban.Plugins.Cron, crontab: [{"* * * * *", Coordinator.LeaseSweeper}]}
+  ],
   queues: [leases: 10]
 
 import_config "#{config_env()}.exs"

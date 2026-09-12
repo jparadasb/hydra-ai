@@ -9,6 +9,10 @@ on:
     paths:
       - 'coordinator/**'
       - '.github/workflows/coordinator.yml'
+  pull_request:
+    paths:
+      - 'coordinator/**'
+      - '.github/workflows/coordinator.yml'
   workflow_dispatch:
 
 env:
@@ -16,7 +20,31 @@ env:
   IMAGE: ${{ secrets.OCI_REGION }}.ocir.io/${{ secrets.OCI_TENANCY_NAMESPACE }}/${{ secrets.OCI_REPO_COORDINATOR || 'hydra-coordinator' }}
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: coordinator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '28'
+          elixir-version: '1.19'
+      - uses: actions/cache@v4
+        with:
+          path: |
+            coordinator/deps
+            coordinator/_build
+          key: ${{ runner.os }}-mix-${{ hashFiles('coordinator/mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-
+      - run: mix deps.get
+      - run: mix format --check-formatted
+      - run: mix test
+
   build-push:
+    needs: test
+    if: github.event_name != 'pull_request'
     # Native arm64 GitHub-hosted runner (the tauri cluster is arm64-only). Native avoids the
     # QEMU BEAM-JIT crash that killed `mix deps.compile` when emulating arm64 on an amd64 host.
     runs-on: ubuntu-24.04-arm

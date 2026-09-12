@@ -53,7 +53,13 @@ defmodule Coordinator.WorkerSessionTest do
     assert worker.accepted_job_levels == [:public]
     track(worker)
 
-    private = %Job{job_id: "j", capability: "wsess.extract", privacy: :private, allow_external_providers: true}
+    private = %Job{
+      job_id: "j",
+      capability: "wsess.extract",
+      privacy: :private,
+      allow_external_providers: true
+    }
+
     assert {:error, :no_eligible_worker} = WorkerRegistry.route(private)
   end
 
@@ -64,7 +70,13 @@ defmodule Coordinator.WorkerSessionTest do
     assert worker.accepted_job_levels == [:public, :private]
     track(worker)
 
-    private = %Job{job_id: "j", capability: "wsess.extract", privacy: :private, allow_external_providers: true}
+    private = %Job{
+      job_id: "j",
+      capability: "wsess.extract",
+      privacy: :private,
+      allow_external_providers: true
+    }
+
     assert {:ok, %{worker_id: "w-ext"}} = WorkerRegistry.route(private)
   end
 

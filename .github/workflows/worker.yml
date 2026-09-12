@@ -13,15 +13,38 @@ name: worker — build binaries & desktop apps
 on:
   push:
     branches: [main]
+    tags: ['v*']
     paths:
       - 'worker/**'
       - '.github/workflows/worker.yml'
-    tags: ['v*']
+  pull_request:
+    paths:
+      - 'worker/**'
+      - '.github/workflows/worker.yml'
   workflow_dispatch:
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: worker
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
   # ---- headless CLI binary (worker-cli) ----------------------------------------------------
   cli:
+    needs: test
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -115,6 +138,8 @@ jobs:
 
   # ---- Tauri desktop app (worker-app) ------------------------------------------------------
   desktop:
+    needs: test
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -178,7 +203,7 @@ jobs:
           path: |
             worker/crates/worker-app/target/release/bundle/**
             worker/crates/worker-app/target/*/release/bundle/**
-          if-no-files-found: warn
+          if-no-files-found: error
 
   # ---- release download links (tag releases) ------------------------------------------------
   # After the CLI binaries (softprops) and desktop bundles (tauri-action) are attached, rewrite

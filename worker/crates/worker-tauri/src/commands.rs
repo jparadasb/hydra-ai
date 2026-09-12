@@ -20,7 +20,7 @@ impl Commands {
         Self {
             vault,
             usage,
-            http: reqwest::Client::new(),
+            http: worker_core::http::default_client().expect("build HTTP client"),
         }
     }
 
@@ -234,9 +234,13 @@ mod tests {
             .unwrap();
 
         // Right passphrase probes cleanly; a fresh/empty name is fine.
-        assert!(commands_with_pass(dir.path(), "right").verify_passphrase().is_ok());
+        assert!(commands_with_pass(dir.path(), "right")
+            .verify_passphrase()
+            .is_ok());
         // Wrong passphrase can't decrypt the existing vault -> rejected.
-        assert!(commands_with_pass(dir.path(), "wrong").verify_passphrase().is_err());
+        assert!(commands_with_pass(dir.path(), "wrong")
+            .verify_passphrase()
+            .is_err());
     }
 
     #[tokio::test]

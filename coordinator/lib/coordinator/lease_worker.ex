@@ -20,7 +20,7 @@ defmodule Coordinator.LeaseWorker do
         :ok
 
       %{status: "pending"} = record ->
-        lease(record)
+        if Jobs.expired?(record), do: Jobs.fail_expired(record), else: lease(record)
 
       _already_handled ->
         :ok
@@ -37,8 +37,12 @@ defmodule Coordinator.LeaseWorker do
     case WorkerRegistry.route(domain) do
       {:ok, worker} ->
         lease_id = Jobs.gen_lease_id()
-        {:ok, record} = Jobs.mark_leased(record, worker.worker_id, lease_id)
-        WorkerChannel.lease(worker.worker_id, Jobs.to_lease_payload(record))
+
+        case Jobs.mark_leased(record, worker.worker_id, lease_id) do
+          {:ok, leased} -> WorkerChannel.lease(worker.worker_id, Jobs.to_lease_payload(leased))
+          {:error, :not_pending} -> :ok
+        end
+
         :ok
 
       {:error, :no_eligible_worker} ->

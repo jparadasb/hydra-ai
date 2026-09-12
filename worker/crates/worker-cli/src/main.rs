@@ -92,7 +92,8 @@ enum ProviderAction {
 fn version_str() -> &'static str {
     use std::sync::OnceLock;
     static V: OnceLock<String> = OnceLock::new();
-    V.get_or_init(worker_core::self_update::build_version).as_str()
+    V.get_or_init(worker_core::self_update::build_version)
+        .as_str()
 }
 
 fn config_dir() -> PathBuf {
@@ -171,13 +172,15 @@ async fn cmd_update(check: bool, channel: String, url: Option<String>, restart: 
         repo: self_update::DEFAULT_REPO.to_string(),
     };
 
-    let client = reqwest::Client::new();
+    let client = worker_core::http::download_client().expect("build HTTP client");
     match self_update::run_update(&client, &exe, &opts).await {
         Ok(UpdateOutcome::UpToDate { sha256 }) => {
             println!("Already up to date ({}).", short(&sha256));
         }
         Ok(UpdateOutcome::UpdateAvailable { current, remote }) => {
-            let remote = remote.map(|r| short(&r)).unwrap_or_else(|| "unknown".into());
+            let remote = remote
+                .map(|r| short(&r))
+                .unwrap_or_else(|| "unknown".into());
             println!(
                 "Update available: local {} != remote {}. Run `hydra-worker update` to install.",
                 short(&current),
@@ -186,7 +189,12 @@ async fn cmd_update(check: bool, channel: String, url: Option<String>, restart: 
             std::process::exit(10);
         }
         Ok(UpdateOutcome::Updated { old, new, path }) => {
-            println!("Updated {} -> {} ({}).", short(&old), short(&new), path.display());
+            println!(
+                "Updated {} -> {} ({}).",
+                short(&old),
+                short(&new),
+                path.display()
+            );
             print_new_version(&path);
             if restart {
                 restart_service();
@@ -295,7 +303,7 @@ async fn cmd_provider(action: ProviderAction) {
             }
         }
         ProviderAction::Login { name } => {
-            let http = reqwest::Client::new();
+            let http = worker_core::http::default_client().expect("build HTTP client");
             match name.as_str() {
                 "gemini" | "google" => match worker_core::oauth::login_google(
                     &http,
@@ -353,7 +361,12 @@ async fn cmd_provider(action: ProviderAction) {
                 return;
             };
             let fp = token.fingerprint();
-            match build_external_adapter(&name, base_url, token, reqwest::Client::new()) {
+            match build_external_adapter(
+                &name,
+                base_url,
+                token,
+                worker_core::http::default_client().expect("build HTTP client"),
+            ) {
                 Ok(adapter) => match adapter.validate_credentials().await {
                     Ok(true) => println!("'{name}' ({fp}): credentials OK"),
                     Ok(false) => println!("'{name}' ({fp}): credentials REJECTED"),
@@ -439,7 +452,10 @@ async fn cmd_run() {
 
     let worker_id = worker_core::identity::machine_worker_id();
     let url = worker_core::worker_run::resolve_coordinator_url(None, &cfg);
-    println!("Worker '{worker_id}' ({:?}) connecting to {url}.", cfg.execution_mode);
+    println!(
+        "Worker '{worker_id}' ({:?}) connecting to {url}.",
+        cfg.execution_mode
+    );
 
     // CLI and the desktop app share this exact run path (see worker_core::worker_run).
     let status = worker_core::worker_run::RunStatus::new();

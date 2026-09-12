@@ -9,13 +9,18 @@ defmodule Coordinator.IntegrationTest do
   alias Coordinator.{WorkerChannel, WorkerRegistry}
 
   setup_all do
-    bin = Path.expand("../../worker/target/debug/hydra-worker", __DIR__)
+    worker_dir = Path.expand("../../worker", __DIR__)
+    target_dir = System.get_env("CARGO_TARGET_DIR", Path.join(worker_dir, "target"))
+    bin = Path.join([target_dir, "debug", "hydra-worker"])
 
     unless File.exists?(bin) do
-      System.cmd("cargo", ["build", "-p", "worker-cli"],
-        cd: Path.expand("../../worker", __DIR__),
-        stderr_to_stdout: true
-      )
+      {output, status} =
+        System.cmd("cargo", ["build", "-p", "worker-cli"],
+          cd: worker_dir,
+          stderr_to_stdout: true
+        )
+
+      assert status == 0, "worker build failed:\n#{output}"
     end
 
     {:ok, bin: bin}

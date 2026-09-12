@@ -63,7 +63,6 @@
       "additionalProperties": false,
       "properties": {
         "max_requests_per_hour": { "type": "integer", "minimum": 0 },
-        "max_cost_per_day_usd": { "type": "number", "minimum": 0 },
         "max_parallel_provider_requests": { "type": "integer", "minimum": 0 }
       }
     },

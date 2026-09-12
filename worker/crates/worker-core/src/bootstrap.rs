@@ -86,15 +86,25 @@ mod tests {
         cfg.upsert_provider("gemini", None);
 
         let registry = build_registry(&cfg, &vault, reqwest::Client::new());
-        let adapter = registry.get("gemini").expect("gemini adapter must be registered");
-        let models = adapter.list_models().await.expect("Code Assist list_models is static");
+        let adapter = registry
+            .get("gemini")
+            .expect("gemini adapter must be registered");
+        let models = adapter
+            .list_models()
+            .await
+            .expect("Code Assist list_models is static");
 
-        assert!(!models.is_empty(), "gemini OAuth provider advertised no models");
+        assert!(
+            !models.is_empty(),
+            "gemini OAuth provider advertised no models"
+        );
         assert!(
             models.iter().all(|m| !m.capabilities.is_empty()),
             "gemini models advertised empty capabilities"
         );
-        assert!(models.iter().any(|m| m.capabilities.iter().any(|c| c == "chat")));
+        assert!(models
+            .iter()
+            .any(|m| m.capabilities.iter().any(|c| c == "chat")));
     }
 
     // Control: an ExternalProvider worker with NO providers in config builds no external
@@ -110,6 +120,9 @@ mod tests {
         let cfg = WorkerConfig::new("w-empty", ExecutionMode::ExternalProvider);
 
         let registry = build_registry(&cfg, &vault, reqwest::Client::new());
-        assert!(registry.get("gemini").is_err(), "no provider should be registered");
+        assert!(
+            registry.get("gemini").is_err(),
+            "no provider should be registered"
+        );
     }
 }

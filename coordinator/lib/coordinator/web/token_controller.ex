@@ -28,7 +28,11 @@ defmodule Coordinator.Web.TokenController do
     conn =
       case label do
         "" ->
-          put_flash(conn, :error, "The key needs a label — try something like laptop-cli or staging.")
+          put_flash(
+            conn,
+            :error,
+            "The key needs a label — try something like laptop-cli or staging."
+          )
 
         label ->
           case ApiTokens.create(label, conn.assigns[:current_admin]) do

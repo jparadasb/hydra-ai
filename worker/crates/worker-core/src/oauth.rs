@@ -274,7 +274,10 @@ async fn read_request_query(stream: &mut tokio::net::TcpStream) -> Result<String
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .unwrap_or("");
-    let query = target.split_once('?').map(|(_, q)| q.to_string()).unwrap_or_default();
+    let query = target
+        .split_once('?')
+        .map(|(_, q)| q.to_string())
+        .unwrap_or_default();
 
     let body = "<html><body style=\"font-family:sans-serif\"><h3>hydra-worker: sign-in received.</h3>You can close this tab.</body></html>";
     let resp = format!(
@@ -451,11 +454,15 @@ async fn code_assist_onboard(client: &reqwest::Client, access_token: &str) -> Re
             if let Some(project) = lro["response"]["cloudaicompanionProject"]["id"].as_str() {
                 return Ok(project.to_string());
             }
-            return Err(Error::Other("onboardUser finished without a project id".into()));
+            return Err(Error::Other(
+                "onboardUser finished without a project id".into(),
+            ));
         }
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
-    Err(Error::Other("Code Assist onboarding did not complete in time".into()))
+    Err(Error::Other(
+        "Code Assist onboarding did not complete in time".into(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -545,7 +552,10 @@ pub async fn refresh_openai(client: &reqwest::Client, tokens: &mut OAuthTokens) 
     if let Some(rotated) = grant["refresh_token"].as_str() {
         tokens.refresh_token = Some(rotated.to_string());
     }
-    if let Some(id) = grant["id_token"].as_str().and_then(chatgpt_account_id_from_id_token) {
+    if let Some(id) = grant["id_token"]
+        .as_str()
+        .and_then(chatgpt_account_id_from_id_token)
+    {
         tokens.account_id = Some(id);
     }
     Ok(())

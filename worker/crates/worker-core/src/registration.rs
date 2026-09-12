@@ -48,8 +48,6 @@ pub struct LimitsBlock {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_requests_per_hour: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_cost_per_day_usd: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_parallel_provider_requests: Option<u32>,
 }
 
@@ -103,7 +101,6 @@ impl WorkerRegistration {
             },
             limits: LimitsBlock {
                 max_requests_per_hour: config.limits.max_requests_per_hour,
-                max_cost_per_day_usd: config.limits.max_cost_per_day_usd,
                 max_parallel_provider_requests: config.limits.max_parallel_provider_requests,
             },
             trust_level: "untrusted".to_string(),
