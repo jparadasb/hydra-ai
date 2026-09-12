@@ -133,7 +133,7 @@ defmodule Coordinator.ApiRouterTest do
 
     job_id = wait_for(fn -> find_job_id(nonce) end)
 
-    Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {
+    Phoenix.PubSub.broadcast(Coordinator.PubSub, Coordinator.Jobs.result_topic(job_id), {
       :job_result,
       %{
         "job_id" => job_id,
@@ -185,7 +185,7 @@ defmodule Coordinator.ApiRouterTest do
 
     job_id = wait_for(fn -> find_job_id(nonce) end)
 
-    Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {
+    Phoenix.PubSub.broadcast(Coordinator.PubSub, Coordinator.Jobs.result_topic(job_id), {
       :job_result,
       %{
         "job_id" => job_id,
@@ -252,7 +252,7 @@ defmodule Coordinator.ApiRouterTest do
     assert job.payload["tools"] == tools
     assert job.payload["tool_choice"] == "auto"
 
-    Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {
+    Phoenix.PubSub.broadcast(Coordinator.PubSub, Coordinator.Jobs.result_topic(job_id), {
       :job_result,
       %{
         "job_id" => job_id,
@@ -291,7 +291,7 @@ defmodule Coordinator.ApiRouterTest do
 
     job_id = wait_for(fn -> find_job_id(nonce) end)
 
-    Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {
+    Phoenix.PubSub.broadcast(Coordinator.PubSub, Coordinator.Jobs.result_topic(job_id), {
       :job_result,
       %{
         "job_id" => job_id,
@@ -336,7 +336,7 @@ defmodule Coordinator.ApiRouterTest do
 
     job_id = wait_for(fn -> find_job_id(nonce) end)
 
-    Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {
+    Phoenix.PubSub.broadcast(Coordinator.PubSub, Coordinator.Jobs.result_topic(job_id), {
       :job_result,
       %{
         "job_id" => job_id,
@@ -366,7 +366,7 @@ defmodule Coordinator.ApiRouterTest do
 
     job_id = wait_for(fn -> find_job_id(nonce) end)
 
-    Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {
+    Phoenix.PubSub.broadcast(Coordinator.PubSub, Coordinator.Jobs.result_topic(job_id), {
       :job_result,
       %{
         "job_id" => job_id,
@@ -429,7 +429,7 @@ defmodule Coordinator.ApiRouterTest do
     # Let several heartbeats fire before the (slow) worker result lands.
     Process.sleep(150)
 
-    Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {
+    Phoenix.PubSub.broadcast(Coordinator.PubSub, Coordinator.Jobs.result_topic(job_id), {
       :job_result,
       %{
         "job_id" => job_id,
@@ -477,7 +477,7 @@ defmodule Coordinator.ApiRouterTest do
       {:job_chunk, %{"job_id" => job_id, "seq" => 1, "delta" => "lo"}}
     )
 
-    Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {
+    Phoenix.PubSub.broadcast(Coordinator.PubSub, Coordinator.Jobs.result_topic(job_id), {
       :job_result,
       %{
         "job_id" => job_id,
@@ -532,7 +532,7 @@ defmodule Coordinator.ApiRouterTest do
       {:job_chunk, %{"job_id" => job_id, "seq" => 1, "delta" => "42", "reasoning" => false}}
     )
 
-    Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {
+    Phoenix.PubSub.broadcast(Coordinator.PubSub, Coordinator.Jobs.result_topic(job_id), {
       :job_result,
       %{
         "job_id" => job_id,

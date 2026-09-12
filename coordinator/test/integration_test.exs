@@ -53,7 +53,7 @@ defmodule Coordinator.IntegrationTest do
 
     port = Port.open({:spawn_executable, bin}, [:binary, :exit_status, args: ["run"], env: env])
 
-    Phoenix.PubSub.subscribe(Coordinator.PubSub, "job_results")
+    Phoenix.PubSub.subscribe(Coordinator.PubSub, Coordinator.Jobs.result_topic("itest-job-1"))
 
     # Wait for the worker to register over the socket (device-authenticated), capturing the
     # machine-derived worker_id it chose.

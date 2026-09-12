@@ -12,10 +12,11 @@ defmodule Coordinator.ApiRouter do
   caller authenticates to the coordinator with a *gateway* key (`HYDRA_API_TOKEN`), never a
   provider secret; the worker holds its own provider tokens locally and only reports usage.
 
-  Synchronicity: the request blocks until the job's `"result"` arrives on the `"job_results"`
-  PubSub topic (the same topic `Coordinator.WorkerSession.handle_result/1` broadcasts on), or
-  until a timeout. Override the wait with an `x-hydra-timeout-ms` header or a `timeout_ms` body
-  field (handy for load tests when no worker is connected).
+  Synchronicity: the request blocks until the job's `"result"` arrives on its own
+  `"job_results:<job_id>"` PubSub topic (the same topic
+  `Coordinator.WorkerSession.handle_result/1` broadcasts on), or until a timeout. Override the
+  wait with an `x-hydra-timeout-ms` header or a `timeout_ms` body field (handy for load tests
+  when no worker is connected).
   """
   use Plug.Router
   require Logger
@@ -140,14 +141,14 @@ defmodule Coordinator.ApiRouter do
   defp chat_completion(conn) do
     params = conn.body_params
 
-    # Subscribe BEFORE submitting so a fast worker result can never be broadcast in the window
-    # between enqueue and subscribe. `await_result` filters to our job_id, so other jobs'
-    # results we receive in the meantime are harmless. The job id is generated here (not by
-    # the insert) so the streaming path can also subscribe to the job's chunk topic first.
-    Phoenix.PubSub.subscribe(Coordinator.PubSub, "job_results")
-
+    # The job id is generated here (not by the insert) so both of this job's topics can be
+    # subscribed before it is submitted: a fast worker result can never be broadcast in the
+    # window between enqueue and subscribe. Both topics are per-job, so this process only
+    # ever receives its own job's messages.
     stream? = params["stream"] in [true, "true"]
     job_id = Coordinator.Jobs.gen_id()
+
+    Phoenix.PubSub.subscribe(Coordinator.PubSub, Coordinator.Jobs.result_topic(job_id))
 
     if stream? do
       Phoenix.PubSub.subscribe(Coordinator.PubSub, "job_chunks:" <> job_id)
@@ -181,9 +182,9 @@ defmodule Coordinator.ApiRouter do
 
   defp response_completion(conn) do
     params = conn.body_params
-    Phoenix.PubSub.subscribe(Coordinator.PubSub, "job_results")
     stream? = params["stream"] in [true, "true"]
     job_id = Coordinator.Jobs.gen_id()
+    Phoenix.PubSub.subscribe(Coordinator.PubSub, Coordinator.Jobs.result_topic(job_id))
     if stream?, do: Phoenix.PubSub.subscribe(Coordinator.PubSub, "job_chunks:" <> job_id)
 
     with {:ok, messages} <- fetch_response_messages(params),
@@ -617,8 +618,8 @@ defmodule Coordinator.ApiRouter do
     end
   end
 
-  # Wait for *this* job's result on the shared topic, ignoring other jobs' results, honoring a
-  # hard deadline so a flood of unrelated results can't extend our wait.
+  # Wait for this job's result on its own topic, honoring a hard deadline. The job_id match is
+  # an invariant check, not a filter: the topic is per-job, so nothing else is delivered here.
   defp await_result(job_id, timeout_ms) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     do_await(job_id, deadline)

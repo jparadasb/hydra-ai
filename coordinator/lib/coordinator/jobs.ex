@@ -338,8 +338,15 @@ defmodule Coordinator.Jobs do
     end
   end
 
-  defp broadcast_result(result) do
-    Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {:job_result, result})
+  @doc """
+  PubSub topic carrying one job's terminal result. Per-job (mirroring `"job_chunks:<job_id>"`)
+  so a waiting caller's process only ever receives its own completion: a shared topic copies
+  every completion to every in-flight request and puts other callers' output in its mailbox.
+  """
+  def result_topic(job_id) when is_binary(job_id), do: "job_results:" <> job_id
+
+  defp broadcast_result(%{"job_id" => job_id} = result) do
+    Phoenix.PubSub.broadcast(Coordinator.PubSub, result_topic(job_id), {:job_result, result})
   end
 
   defp deadline(milliseconds), do: DateTime.add(now(), milliseconds, :millisecond)

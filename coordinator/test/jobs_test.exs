@@ -127,7 +127,6 @@ defmodule Coordinator.JobsTest do
   end
 
   test "lease worker fails an expired job instead of snoozing or dispatching it" do
-    Phoenix.PubSub.subscribe(Coordinator.PubSub, "job_results")
     register_local_worker("w-expired")
 
     {:ok, rec} =
@@ -138,6 +137,8 @@ defmodule Coordinator.JobsTest do
         expires_at: DateTime.add(DateTime.utc_now(), -1, :second),
         payload: %{"messages" => []}
       })
+
+    Phoenix.PubSub.subscribe(Coordinator.PubSub, Jobs.result_topic(rec.id))
 
     assert {:ok, _} = perform_job(LeaseWorker, %{job_id: rec.id})
 

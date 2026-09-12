@@ -164,7 +164,7 @@ defmodule Coordinator.WorkerSessionTest do
     {:ok, leased} = Jobs.mark_leased(rec, "w-gen-1", Jobs.gen_lease_id())
     Repo.update_all(JobRecord, set: [lease_id: "lease-live", worker_id: "w-gen-2"])
 
-    Phoenix.PubSub.subscribe(Coordinator.PubSub, "job_results")
+    Phoenix.PubSub.subscribe(Coordinator.PubSub, Jobs.result_topic(rec.id))
 
     stale = %{
       "job_id" => rec.id,
@@ -176,5 +176,43 @@ defmodule Coordinator.WorkerSessionTest do
     assert {:error, :stale_lease} = WorkerSession.handle_result(stale)
     refute_receive {:job_result, %{"job_id" => _}}, 100
     assert Jobs.get(rec.id).status == "leased"
+  end
+
+  test "a result is broadcast only on its own job's topic" do
+    alias Coordinator.Jobs
+    alias Coordinator.Jobs.JobRecord
+
+    job_attrs = %{
+      capability: "wsess.extract",
+      privacy: "public",
+      allow_external_providers: true,
+      payload: %{"messages" => []}
+    }
+
+    {:ok, mine} = Jobs.enqueue(job_attrs)
+    {:ok, other} = Jobs.enqueue(job_attrs)
+
+    on_exit(fn -> Repo.delete_all(JobRecord) end)
+
+    Phoenix.PubSub.subscribe(Coordinator.PubSub, "job_results:" <> mine.id)
+
+    assert {:ok, _} =
+             WorkerSession.handle_result(%{
+               "job_id" => other.id,
+               "status" => "ok",
+               "output" => %{"content" => "not yours"}
+             })
+
+    refute_receive {:job_result, _}, 100
+
+    assert {:ok, _} =
+             WorkerSession.handle_result(%{
+               "job_id" => mine.id,
+               "status" => "ok",
+               "output" => %{"content" => "yours"}
+             })
+
+    assert_receive {:job_result, %{"job_id" => job_id, "output" => %{"content" => "yours"}}}
+    assert job_id == mine.id
   end
 end
