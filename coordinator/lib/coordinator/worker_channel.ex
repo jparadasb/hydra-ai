@@ -83,7 +83,7 @@ defmodule Coordinator.WorkerChannel do
   def handle_out("cancel", payload, socket) do
     push(socket, "cancel", payload)
 
-    if socket.assigns.worker.supports_cancel_ack do
+    if Map.get(socket.assigns.worker, :supports_cancel_ack, false) do
       {:noreply, socket}
     else
       {:noreply, finish_lease(socket, payload["job_id"], payload["lease_id"])}

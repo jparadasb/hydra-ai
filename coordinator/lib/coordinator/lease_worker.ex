@@ -45,11 +45,13 @@ defmodule Coordinator.LeaseWorker do
       {:ok, worker} ->
         lease_id = Jobs.gen_lease_id()
 
+        # Worker snapshots arrive via Presence and may have been replicated by a coordinator
+        # node that predates this field, so read it defensively rather than by dot-access.
         case Jobs.mark_leased(
                record,
                worker.worker_id,
                lease_id,
-               worker.supports_lease_heartbeat
+               Map.get(worker, :supports_lease_heartbeat, false)
              ) do
           {:ok, leased} -> WorkerChannel.lease(worker.worker_id, Jobs.to_lease_payload(leased))
           {:error, :not_pending} -> :ok
