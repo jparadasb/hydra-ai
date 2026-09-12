@@ -52,13 +52,19 @@ impl Gateway {
     pub async fn refresh_catalog(&self) {
         let mut catalog = Vec::new();
         for adapter in self.registry.iter() {
-            if let Ok(models) = adapter.list_models().await {
-                for m in models {
+            match adapter.list_models().await {
+                Ok(models) => for m in models {
                     catalog.push((adapter.name().to_string(), m));
-                }
+                },
+                Err(error) => eprintln!("Model catalog probe failed for {}: {error}", adapter.name()),
             }
         }
-        *self.catalog.write().expect("catalog lock poisoned") = catalog;
+        let mut current = self.catalog.write().expect("catalog lock poisoned");
+        let changed = current.len() != catalog.len();
+        *current = catalog;
+        if changed {
+            eprintln!("Model catalog refreshed: {} model(s).", current.len());
+        }
     }
 
     /// Seed the catalog directly (tests / static configs).
