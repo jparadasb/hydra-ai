@@ -9,6 +9,7 @@ validates inbound payloads against them.
 | `registration.schema.json` | worker → coordinator | worker capabilities / models / privacy / limits. **No secrets.** |
 | `usage_report.schema.json`  | worker → coordinator | aggregated usage metrics. **No secrets.** |
 | `job.schema.json`           | coordinator → worker | leased job incl. privacy level |
+| `job_cancel.schema.json`    | coordinator → worker | cancel an in-flight or queued job |
 | `job_result.schema.json`    | worker → coordinator | normalized result |
 | `job_result_chunk.schema.json` | worker → coordinator | streamed content fragment of a running job (best-effort; the final `job_result` stays authoritative) |
 

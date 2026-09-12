@@ -157,7 +157,7 @@ defmodule Coordinator.ApiRouter do
          :ok <- requested_model_available(params),
          timeout = resolve_timeout(conn, params),
          payload = build_payload(params, messages),
-         {:ok, record} <- submit(payload, job_id) do
+         {:ok, record} <- submit(payload, job_id, timeout) do
       if stream? do
         # Flush headers + a first byte immediately, then relay the worker's streamed chunks
         # as they arrive (heartbeating while none do, so an edge proxy — Cloudflare's ~100s
@@ -190,7 +190,7 @@ defmodule Coordinator.ApiRouter do
          :ok <- requested_model_available(params),
          timeout = resolve_timeout(conn, params),
          payload = build_response_payload(params, messages),
-         {:ok, record} <- submit(payload, job_id) do
+         {:ok, record} <- submit(payload, job_id, timeout) do
       if stream? do
         response_stream(conn, record.id, params, timeout)
       else
@@ -209,6 +209,7 @@ defmodule Coordinator.ApiRouter do
             error(conn, 502, "worker returned no usable output", "api_error")
 
           {:error, :timeout} ->
+            cancel_job(record.id)
             error(conn, 504, "no worker completed the job in time", "timeout")
         end
       end
@@ -386,7 +387,8 @@ defmodule Coordinator.ApiRouter do
           "delta" => delta
         }
 
-        {:ok, response_event(conn, event, sequence)}
+        event = Map.put(event, "sequence_number", :atomics.add_get(sequence, 1, 1) - 1)
+        chunk(conn, "event: #{event["type"]}\ndata: #{Jason.encode!(event)}\n\n")
       end
     end
 
@@ -459,6 +461,7 @@ defmodule Coordinator.ApiRouter do
         response_error(conn, "worker returned no usable output", sequence)
 
       {:timeout, conn} ->
+        cancel_job(job_id)
         response_error(conn, "no worker completed the job in time", sequence)
     end
   end
@@ -558,6 +561,7 @@ defmodule Coordinator.ApiRouter do
         error(conn, 502, "worker returned no usable output", "api_error")
 
       {:error, :timeout} ->
+        cancel_job(job_id)
         error(conn, 504, "no worker completed the job in time", "timeout")
     end
   end
@@ -597,7 +601,7 @@ defmodule Coordinator.ApiRouter do
   # The routing capability is configurable (`HYDRA_API_CAPABILITY`): the worker runs a chat
   # completion for whatever capability it is asked to serve, so this just has to match a string
   # the connected workers advertise (e.g. "text.extract_json"). Defaults to "chat".
-  defp submit(payload, job_id) do
+  defp submit(payload, job_id, timeout_ms) do
     capability = Application.get_env(:coordinator, :api_capability, "chat")
 
     case Coordinator.submit_job(%{
@@ -605,6 +609,7 @@ defmodule Coordinator.ApiRouter do
            capability: capability,
            privacy: "public",
            allow_external_providers: true,
+           expires_at: DateTime.add(DateTime.utc_now(), timeout_ms, :millisecond),
            payload: payload
          }) do
       {:ok, record} -> {:ok, record}
@@ -723,10 +728,10 @@ defmodule Coordinator.ApiRouter do
       |> send_chunked(200)
 
     # First byte now (assistant role delta) so the edge proxy sees the stream open immediately.
-    conn =
+    {conn, stream_open?} =
       case chunk(conn, sse(chunk_map(id, created, model0, %{"role" => "assistant"}, nil))) do
-        {:ok, conn} -> conn
-        {:error, _} -> conn
+        {:ok, conn} -> {conn, true}
+        {:error, _} -> {conn, false}
       end
 
     # Relays one streamed fragment onto the open SSE stream. Reasoning/thinking fragments go out
@@ -737,18 +742,24 @@ defmodule Coordinator.ApiRouter do
       chunk(conn, sse(chunk_map(id, created, model0, %{field => delta}, nil)))
     end
 
-    case await_with_heartbeat(conn, job_id, timeout, emit_delta) do
-      {:ok, conn, %{"status" => "ok"} = result, streamed?} ->
-        stream_result_body(conn, id, created, params, result, streamed?)
+    if stream_open? do
+      case await_with_heartbeat(conn, job_id, timeout, emit_delta) do
+        {:ok, conn, %{"status" => "ok"} = result, streamed?} ->
+          stream_result_body(conn, id, created, params, result, streamed?)
 
-      {:ok, conn, %{"reason" => reason}, _streamed?} ->
-        stream_error(conn, id, created, model0, "worker error: #{reason}")
+        {:ok, conn, %{"reason" => reason}, _streamed?} ->
+          stream_error(conn, id, created, model0, "worker error: #{reason}")
 
-      {:ok, conn, _other, _streamed?} ->
-        stream_error(conn, id, created, model0, "worker returned no usable output")
+        {:ok, conn, _other, _streamed?} ->
+          stream_error(conn, id, created, model0, "worker returned no usable output")
 
-      {:timeout, conn} ->
-        stream_error(conn, id, created, model0, "no worker completed the job in time")
+        {:timeout, conn} ->
+          cancel_job(job_id)
+          stream_error(conn, id, created, model0, "no worker completed the job in time")
+      end
+    else
+      cancel_job(job_id)
+      conn
     end
   end
 
@@ -887,6 +898,18 @@ defmodule Coordinator.ApiRouter do
             {:error, _} -> {:timeout, conn}
           end
       end
+    end
+  end
+
+  # Persist cancellation before notifying the worker. A late result then cannot resurrect or
+  # requeue the abandoned job. Pending jobs have no worker to notify and stay terminal.
+  defp cancel_job(job_id) do
+    case Coordinator.Jobs.cancel(job_id) do
+      {:ok, %{status: "cancelled", worker_id: worker_id}} when is_binary(worker_id) ->
+        Coordinator.WorkerChannel.cancel(worker_id, job_id)
+
+      _ ->
+        :ok
     end
   end
 

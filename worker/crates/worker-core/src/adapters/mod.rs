@@ -16,9 +16,9 @@ pub(crate) mod tools;
 pub use anthropic::AnthropicAdapter;
 pub use gemini::GeminiAdapter;
 pub use gemini_oauth::GeminiCodeAssistAdapter;
-pub use openai_chatgpt::ChatGptBackendAdapter;
 pub use local_openai::LocalOpenAiAdapter;
 pub use ollama::OllamaAdapter;
+pub use openai_chatgpt::ChatGptBackendAdapter;
 pub use openai_compatible::{OpenAICompatibleAdapter, Pricing};
 
 /// Known OpenAI-compatible providers and their default base URLs. `custom` lets the user

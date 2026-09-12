@@ -10,7 +10,8 @@ config :coordinator, Coordinator.Endpoint,
 # Plain pool (not the SQL sandbox): channel/worker processes touch the repo cross-process,
 # so a shared connection is simpler. DB-touching tests run async: false and clean up.
 config :coordinator, Coordinator.Repo,
-  database: Path.expand("../coordinator_test.db", __DIR__),
+  database:
+    System.get_env("COORDINATOR_TEST_DATABASE") || Path.expand("../coordinator_test.db", __DIR__),
   pool_size: 1,
   journal_mode: :wal,
   busy_timeout: 5000

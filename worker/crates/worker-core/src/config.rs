@@ -40,11 +40,10 @@ impl Default for RoutingPolicy {
     }
 }
 
-/// Worker-side spend / rate guardrails enforced before any paid call.
+/// Worker-side request guardrails.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Limits {
     pub max_requests_per_hour: Option<u32>,
-    pub max_cost_per_day_usd: Option<f64>,
     pub max_parallel_provider_requests: Option<u32>,
 }
 
@@ -52,7 +51,6 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             max_requests_per_hour: Some(100),
-            max_cost_per_day_usd: Some(5.0),
             max_parallel_provider_requests: Some(2),
         }
     }
@@ -101,6 +99,13 @@ pub struct WorkerConfig {
     /// Coordinator base URL, e.g. `ws://127.0.0.1:4000`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coordinator_url: Option<String>,
+    /// Overall timeout for HTTP requests to local runtimes and external providers.
+    #[serde(default = "default_request_timeout_secs")]
+    pub request_timeout_secs: u64,
+}
+
+const fn default_request_timeout_secs() -> u64 {
+    120
 }
 
 impl WorkerConfig {
@@ -113,6 +118,7 @@ impl WorkerConfig {
             privacy: PrivacyPrefs::default(),
             providers: Vec::new(),
             coordinator_url: None,
+            request_timeout_secs: default_request_timeout_secs(),
         }
     }
 

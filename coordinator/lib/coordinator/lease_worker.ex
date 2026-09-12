@@ -20,7 +20,7 @@ defmodule Coordinator.LeaseWorker do
         :ok
 
       %{status: "pending"} = record ->
-        lease(record)
+        if Jobs.expired?(record), do: Jobs.fail_expired(record), else: lease(record)
 
       _already_handled ->
         :ok

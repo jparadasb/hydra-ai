@@ -74,9 +74,10 @@ impl AnthropicAdapter {
                         "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
                         "content": m.content,
                     });
-                    match msgs.last_mut().filter(|l| {
-                        l["role"] == "user" && l["content"][0]["type"] == "tool_result"
-                    }) {
+                    match msgs
+                        .last_mut()
+                        .filter(|l| l["role"] == "user" && l["content"][0]["type"] == "tool_result")
+                    {
                         Some(last) => last["content"].as_array_mut().unwrap().push(block),
                         None => msgs.push(json!({ "role": "user", "content": [block] })),
                     }
@@ -190,7 +191,11 @@ impl ProviderAdapter for AnthropicAdapter {
         // Concatenate text blocks; map tool_use blocks back to the OpenAI call shape.
         let mut content = String::new();
         let mut tool_calls = Vec::new();
-        for block in value["content"].as_array().map(Vec::as_slice).unwrap_or_default() {
+        for block in value["content"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
             match block["type"].as_str() {
                 Some("text") => content.push_str(block["text"].as_str().unwrap_or_default()),
                 Some("tool_use") => tool_calls.push(ToolCall {

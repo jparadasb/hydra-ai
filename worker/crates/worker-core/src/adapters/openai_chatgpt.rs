@@ -267,7 +267,11 @@ fn parse_responses_sse(body: &str) -> (String, Option<Vec<ToolCall>>, Usage) {
         tool_calls = streamed_calls;
     }
     let content = final_text.filter(|s| !s.is_empty()).unwrap_or(delta);
-    (content, (!tool_calls.is_empty()).then_some(tool_calls), usage)
+    (
+        content,
+        (!tool_calls.is_empty()).then_some(tool_calls),
+        usage,
+    )
 }
 
 /// Pull `function_call` output items from a Responses `response` object, in OpenAI chat shape.
@@ -411,9 +415,9 @@ mod tests {
                 "input": [{ "type": "message", "role": "user",
                             "content": [{ "type": "input_text", "text": "hi" }] }]
             })))
-            .respond_with(ResponseTemplate::new(200).set_body_string(concat!(
-                "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"hey!\"}]}],\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\n"
-            )))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"hey!\"}]}],\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\n",
+            ))
             .mount(&server)
             .await;
 
@@ -423,8 +427,16 @@ mod tests {
             .run_chat_completion(ChatRequest {
                 model: "gpt-5".into(),
                 messages: vec![
-                    ChatMessage { role: "system".into(), content: "be brief".into(), ..Default::default() },
-                    ChatMessage { role: "user".into(), content: "hi".into(), ..Default::default() },
+                    ChatMessage {
+                        role: "system".into(),
+                        content: "be brief".into(),
+                        ..Default::default()
+                    },
+                    ChatMessage {
+                        role: "user".into(),
+                        content: "hi".into(),
+                        ..Default::default()
+                    },
                 ],
                 max_tokens: None,
                 temperature: None,
@@ -444,7 +456,9 @@ mod tests {
         let a = ChatGptBackendAdapter::with_base_url("http://x", tokens(), reqwest::Client::new());
         let models = a.list_models().await.unwrap();
         assert!(models.iter().any(|m| m.name == "gpt-5.5"));
-        assert!(models.iter().all(|m| m.capabilities.contains(&"chat".to_string())));
+        assert!(models
+            .iter()
+            .all(|m| m.capabilities.contains(&"chat".to_string())));
     }
 
     #[test]

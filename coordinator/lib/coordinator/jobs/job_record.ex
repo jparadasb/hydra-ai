@@ -3,7 +3,7 @@ defmodule Coordinator.Jobs.JobRecord do
   use Ecto.Schema
   import Ecto.Changeset
 
-  @statuses ~w(pending leased done failed)
+  @statuses ~w(pending leased done failed cancelled)
   @privacies ~w(public private sensitive local_only)
 
   @primary_key {:id, :string, autogenerate: false}
@@ -15,6 +15,8 @@ defmodule Coordinator.Jobs.JobRecord do
     field(:status, :string, default: "pending")
     field(:worker_id, :string)
     field(:lease_id, :string)
+    field(:expires_at, :utc_datetime_usec)
+    field(:lease_expires_at, :utc_datetime_usec)
     field(:attempts, :integer, default: 0)
     field(:result, :map)
 
@@ -32,6 +34,8 @@ defmodule Coordinator.Jobs.JobRecord do
       :status,
       :worker_id,
       :lease_id,
+      :expires_at,
+      :lease_expires_at,
       :attempts,
       :result
     ])

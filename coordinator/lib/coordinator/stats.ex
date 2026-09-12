@@ -33,7 +33,8 @@ defmodule Coordinator.Stats do
         "execution_mode" => to_string(w.execution_mode),
         "provider" => w.provider_name,
         "models" => length(w.models),
-        "capabilities" => w.models |> Enum.flat_map(& &1.capabilities) |> Enum.uniq() |> Enum.sort(),
+        "capabilities" =>
+          w.models |> Enum.flat_map(& &1.capabilities) |> Enum.uniq() |> Enum.sort(),
         "inflight" => w.inflight,
         "avg_latency_ms" => w.avg_latency_ms,
         "available" => w.available,

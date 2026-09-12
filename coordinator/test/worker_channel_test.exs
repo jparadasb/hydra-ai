@@ -1,14 +1,22 @@
 defmodule Coordinator.WorkerChannelTest do
   use ExUnit.Case, async: false
+  use Oban.Testing, repo: Coordinator.Repo
   import Phoenix.ChannelTest
 
   @endpoint Coordinator.Endpoint
 
-  alias Coordinator.{WorkerChannel, WorkerRegistry, WorkerSocket}
+  alias Coordinator.{Jobs, LeaseWorker, WorkerChannel, WorkerRegistry, WorkerSocket}
+  alias Coordinator.Jobs.JobRecord
   import Coordinator.WorkerTestHelper
 
   # Channels are linked to the test process; each joined worker is untracked from Presence when
   # its channel shuts down at the end of the test, so no manual cleanup is needed.
+
+  setup do
+    Coordinator.Repo.delete_all(JobRecord)
+    Coordinator.Repo.delete_all(Oban.Job)
+    :ok
+  end
 
   defp registration(id) do
     %{
@@ -48,6 +56,9 @@ defmodule Coordinator.WorkerChannelTest do
 
     WorkerChannel.lease("w-chan", job)
     assert_push("job", %{"job_id" => "j1"})
+
+    WorkerChannel.cancel("w-chan", "j1")
+    assert_push("cancel", %{"job_id" => "j1"})
   end
 
   test "join is refused when registration carries a token; nothing is registered" do
@@ -69,5 +80,30 @@ defmodule Coordinator.WorkerChannelTest do
 
     ref2 = push(socket, "result", %{"job_id" => "j1", "authorization" => "Bearer abcdefgh"})
     assert_reply(ref2, :error, %{reason: "secret_key_present"})
+  end
+
+  test "closing a worker channel requeues its in-flight jobs" do
+    {:ok, _reply, socket} = join_worker("w-dies", registration("w-dies"))
+    wait_present("w-dies")
+
+    {:ok, rec} =
+      Jobs.enqueue(%{
+        capability: "text.extract_json",
+        privacy: "public",
+        allow_external_providers: true,
+        payload: %{"messages" => []}
+      })
+
+    assert :ok = perform_job(LeaseWorker, %{job_id: rec.id})
+    assert Jobs.get(rec.id).status == "leased"
+
+    Process.unlink(socket.channel_pid)
+    close(socket)
+
+    reclaimed = Jobs.get(rec.id)
+    assert reclaimed.status == "pending"
+    assert reclaimed.worker_id == nil
+    assert reclaimed.lease_id == nil
+    assert_enqueued(worker: LeaseWorker, args: %{job_id: rec.id})
   end
 end

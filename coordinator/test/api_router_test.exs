@@ -14,7 +14,11 @@ defmodule Coordinator.ApiRouterTest do
   alias Coordinator.Repo
   import Ecto.Query
 
-  @parser_opts Plug.Parsers.init(parsers: [:json], pass: ["application/json"], json_decoder: Jason)
+  @parser_opts Plug.Parsers.init(
+                 parsers: [:json],
+                 pass: ["application/json"],
+                 json_decoder: Jason
+               )
 
   setup do
     # Default to an open door; individual tests opt into a key.
@@ -45,7 +49,11 @@ defmodule Coordinator.ApiRouterTest do
   # Find the `chat` job carrying our unique marker. Concurrent tests also create chat jobs, so
   # we match on the message content, not just "the newest one".
   defp find_job_id(nonce) do
-    from(j in JobRecord, where: j.capability == "chat", order_by: [desc: j.inserted_at], limit: 50)
+    from(j in JobRecord,
+      where: j.capability == "chat",
+      order_by: [desc: j.inserted_at],
+      limit: 50
+    )
     |> Repo.all()
     |> Enum.find(fn j -> get_in(j.payload, ["messages", Access.at(0), "content"]) == nonce end)
     |> case do
@@ -61,7 +69,9 @@ defmodule Coordinator.ApiRouterTest do
   end
 
   test "GET /openapi.json serves a public OpenAPI 3 spec importable by Postman" do
-    conn = conn(:get, "/openapi.json") |> Coordinator.ApiRouter.call(Coordinator.ApiRouter.init([]))
+    conn =
+      conn(:get, "/openapi.json") |> Coordinator.ApiRouter.call(Coordinator.ApiRouter.init([]))
+
     assert conn.status == 200
     spec = Jason.decode!(conn.resp_body)
     assert spec["openapi"] =~ "3.0"
@@ -85,7 +95,10 @@ defmodule Coordinator.ApiRouterTest do
     Application.put_env(:coordinator, :api_token, "secret-key")
     on_exit(fn -> Application.delete_env(:coordinator, :api_token) end)
 
-    call = fn path -> conn(:get, path) |> Coordinator.ApiRouter.call(Coordinator.ApiRouter.init([])) end
+    call = fn path ->
+      conn(:get, path) |> Coordinator.ApiRouter.call(Coordinator.ApiRouter.init([]))
+    end
+
     assert call.("/openapi.json").status == 200
     assert call.("/docs").status == 200
     # …while the API itself still requires the bearer.
@@ -135,7 +148,10 @@ defmodule Coordinator.ApiRouterTest do
     body = Jason.decode!(conn.resp_body)
     assert body["object"] == "response"
     assert body["id"] == "resp-" <> job_id
-    assert get_in(body, ["output", Access.at(0), "content", Access.at(0), "text"]) == "response ok"
+
+    assert get_in(body, ["output", Access.at(0), "content", Access.at(0), "text"]) ==
+             "response ok"
+
     assert body["usage"]["total_tokens"] == 6
   end
 
@@ -149,6 +165,9 @@ defmodule Coordinator.ApiRouterTest do
 
     assert conn.status == 504
     assert Jason.decode!(conn.resp_body)["error"]["type"] == "timeout"
+
+    assert Repo.one(from(j in JobRecord, order_by: [desc: j.inserted_at], limit: 1)).status ==
+             "cancelled"
   end
 
   test "happy path maps a worker result into an OpenAI completion" do
@@ -201,7 +220,10 @@ defmodule Coordinator.ApiRouterTest do
         "function" => %{
           "name" => "get_weather",
           "description" => "Get the weather",
-          "parameters" => %{"type" => "object", "properties" => %{"city" => %{"type" => "string"}}}
+          "parameters" => %{
+            "type" => "object",
+            "properties" => %{"city" => %{"type" => "string"}}
+          }
         }
       }
     ]
@@ -443,8 +465,17 @@ defmodule Coordinator.ApiRouterTest do
     job_id = wait_for(fn -> find_job_id(nonce) end)
     topic = "job_chunks:" <> job_id
 
-    Phoenix.PubSub.broadcast(Coordinator.PubSub, topic, {:job_chunk, %{"job_id" => job_id, "seq" => 0, "delta" => "Hel"}})
-    Phoenix.PubSub.broadcast(Coordinator.PubSub, topic, {:job_chunk, %{"job_id" => job_id, "seq" => 1, "delta" => "lo"}})
+    Phoenix.PubSub.broadcast(
+      Coordinator.PubSub,
+      topic,
+      {:job_chunk, %{"job_id" => job_id, "seq" => 0, "delta" => "Hel"}}
+    )
+
+    Phoenix.PubSub.broadcast(
+      Coordinator.PubSub,
+      topic,
+      {:job_chunk, %{"job_id" => job_id, "seq" => 1, "delta" => "lo"}}
+    )
 
     Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {
       :job_result,
@@ -489,8 +520,17 @@ defmodule Coordinator.ApiRouterTest do
     job_id = wait_for(fn -> find_job_id(nonce) end)
     topic = "job_chunks:" <> job_id
 
-    Phoenix.PubSub.broadcast(Coordinator.PubSub, topic, {:job_chunk, %{"job_id" => job_id, "seq" => 0, "delta" => "think", "reasoning" => true}})
-    Phoenix.PubSub.broadcast(Coordinator.PubSub, topic, {:job_chunk, %{"job_id" => job_id, "seq" => 1, "delta" => "42", "reasoning" => false}})
+    Phoenix.PubSub.broadcast(
+      Coordinator.PubSub,
+      topic,
+      {:job_chunk, %{"job_id" => job_id, "seq" => 0, "delta" => "think", "reasoning" => true}}
+    )
+
+    Phoenix.PubSub.broadcast(
+      Coordinator.PubSub,
+      topic,
+      {:job_chunk, %{"job_id" => job_id, "seq" => 1, "delta" => "42", "reasoning" => false}}
+    )
 
     Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {
       :job_result,
@@ -525,7 +565,8 @@ defmodule Coordinator.ApiRouterTest do
     assert post("/v1/chat/completions", msg).status == 401
     assert post("/v1/chat/completions", msg, [{"authorization", "Bearer wrong"}]).status == 401
     # Correct key passes auth (then 504s: no worker — proves it got past the gate).
-    assert post("/v1/chat/completions", msg, [{"authorization", "Bearer secret-key"}]).status == 504
+    assert post("/v1/chat/completions", msg, [{"authorization", "Bearer secret-key"}]).status ==
+             504
   end
 
   test "an admin-issued DB key authorizes when require_api_token is on" do
@@ -560,7 +601,11 @@ defmodule Coordinator.ApiRouterTest do
         "provider" => %{"name" => "ollama"},
         "models" => [
           %{"name" => "llama3", "capabilities" => ["chat"], "uses_external_provider" => false},
-          %{"name" => "embed-x", "capabilities" => ["embeddings"], "uses_external_provider" => false}
+          %{
+            "name" => "embed-x",
+            "capabilities" => ["embeddings"],
+            "uses_external_provider" => false
+          }
         ]
       })
 

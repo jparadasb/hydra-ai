@@ -24,7 +24,11 @@ const DEFAULT_BASE: &str = "https://cloudcode-pa.googleapis.com/v1internal";
 const REFRESH_MARGIN_SECONDS: u64 = 60;
 
 /// Models the Code Assist tier serves (it has no list endpoint).
-const MODELS: &[&str] = &["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"];
+const MODELS: &[&str] = &[
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+];
 
 pub struct GeminiCodeAssistAdapter {
     base_url: String,
@@ -38,11 +42,7 @@ impl GeminiCodeAssistAdapter {
         Self::with_base_url(DEFAULT_BASE, tokens, client)
     }
 
-    pub fn with_base_url(
-        base_url: impl Into<String>,
-        tokens: OAuthTokens,
-        client: Client,
-    ) -> Self {
+    pub fn with_base_url(base_url: impl Into<String>, tokens: OAuthTokens, client: Client) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             project_id: tokens.project_id.clone().unwrap_or_default(),
@@ -124,7 +124,10 @@ impl ProviderAdapter for GeminiCodeAssistAdapter {
         let value = parse_json(resp).await?;
 
         // Code Assist nests the standard Gemini reply under "response".
-        Ok(parse_generate_content_response(&value["response"], req.model))
+        Ok(parse_generate_content_response(
+            &value["response"],
+            req.model,
+        ))
     }
 }
 
@@ -200,11 +203,12 @@ mod tests {
 
     #[tokio::test]
     async fn lists_static_models_with_chat_capability() {
-        let adapter =
-            GeminiCodeAssistAdapter::new(tokens("ya29.x"), reqwest::Client::new());
+        let adapter = GeminiCodeAssistAdapter::new(tokens("ya29.x"), reqwest::Client::new());
         let models = adapter.list_models().await.unwrap();
         assert!(models.iter().any(|m| m.name == "gemini-2.5-flash"));
         assert!(models.iter().all(|m| m.uses_external_provider));
-        assert!(models.iter().all(|m| m.capabilities.contains(&"chat".to_string())));
+        assert!(models
+            .iter()
+            .all(|m| m.capabilities.contains(&"chat".to_string())));
     }
 }

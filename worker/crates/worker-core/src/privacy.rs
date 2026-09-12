@@ -15,11 +15,11 @@ pub enum Decision {
 /// where `uses_external_provider` indicates whether the call leaves the machine?
 ///
 /// Rules:
-///   * `local_only`  → external forbidden, always.
-///   * `sensitive`   → external forbidden by default.
-///   * `private`     → external only if the job owner explicitly permits it AND the worker
-///                     policy allows external for that privacy level.
-///   * `public`      → any backend the worker policy allows.
+/// * `local_only`  → external forbidden, always.
+/// * `sensitive`   → external forbidden by default.
+/// * `private`     → external only if the job owner explicitly permits it AND the worker
+///   policy allows external for that privacy level.
+/// * `public`      → any backend the worker policy allows.
 pub fn check(
     privacy: PrivacyLevel,
     allow_external: bool,

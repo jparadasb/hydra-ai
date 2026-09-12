@@ -37,6 +37,7 @@ defmodule Coordinator.DeviceAuth do
   def revoke(worker_id) do
     from(k in WorkerKey, where: k.worker_id == ^worker_id)
     |> Repo.update_all(set: [status: "revoked", updated_at: DateTime.utc_now()])
+
     :ok
   end
 
@@ -44,6 +45,7 @@ defmodule Coordinator.DeviceAuth do
   def restore(worker_id) do
     from(k in WorkerKey, where: k.worker_id == ^worker_id)
     |> Repo.update_all(set: [status: "trusted", updated_at: DateTime.utc_now()])
+
     :ok
   end
 

@@ -250,7 +250,8 @@ async fn openai_compatible_passes_tools_and_maps_tool_calls() {
         .mount(&server)
         .await;
 
-    let a = OpenAICompatibleAdapter::new("openai", server.uri(), Secret::new("sk-t"), Client::new());
+    let a =
+        OpenAICompatibleAdapter::new("openai", server.uri(), Secret::new("sk-t"), Client::new());
     let mut req = chat("gpt-4.1-mini");
     req.tools = Some(weather_tools());
     req.tool_choice = Some(json!("auto"));

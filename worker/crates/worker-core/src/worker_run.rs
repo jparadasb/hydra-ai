@@ -165,7 +165,7 @@ pub async fn build_and_run(params: RunParams, status: Arc<RunStatus>) -> Result<
         EncryptedFileStore::default_path(),
         params.passphrase,
     )));
-    let http = reqwest::Client::new();
+    let http = crate::http::client(Duration::from_secs(cfg.request_timeout_secs))?;
     let registry = build_registry(&cfg, &vault, http.clone());
     let usage = Arc::new(
         JsonUsageStore::new(JsonUsageStore::default_path())
@@ -280,7 +280,10 @@ mod tests {
         s.note_job_error("job j1: provider returned status 429".into());
         let v = s.view();
         assert_eq!(v.jobs_failed, 1);
-        assert_eq!(v.last_error.as_deref(), Some("job j1: provider returned status 429"));
+        assert_eq!(
+            v.last_error.as_deref(),
+            Some("job j1: provider returned status 429")
+        );
 
         s.mark_stopped(Some("boom".into()));
         let v = s.view();

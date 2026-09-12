@@ -13,10 +13,10 @@ defmodule Coordinator.WorkerChannel do
   """
   use Phoenix.Channel
 
-  alias Coordinator.{WorkerRegistry, WorkerSession}
+  alias Coordinator.{Jobs, WorkerRegistry, WorkerSession}
 
-  # Intercept outgoing "job" so the channel can bump inflight as it forwards the lease.
-  intercept(["job"])
+  # Intercept job lifecycle pushes so channel-owned inflight stays accurate.
+  intercept(["job", "cancel"])
 
   @impl true
   def join("worker:" <> worker_id, payload, socket) do
@@ -68,6 +68,13 @@ defmodule Coordinator.WorkerChannel do
   def handle_out("job", payload, socket) do
     push(socket, "job", payload)
     worker = %{socket.assigns.worker | inflight: socket.assigns.worker.inflight + 1}
+    WorkerRegistry.update(self(), worker)
+    {:noreply, assign(socket, :worker, worker)}
+  end
+
+  def handle_out("cancel", payload, socket) do
+    push(socket, "cancel", payload)
+    worker = %{socket.assigns.worker | inflight: max(socket.assigns.worker.inflight - 1, 0)}
     WorkerRegistry.update(self(), worker)
     {:noreply, assign(socket, :worker, worker)}
   end
@@ -135,6 +142,12 @@ defmodule Coordinator.WorkerChannel do
     {:reply, :ok, assign(socket, :worker, worker)}
   end
 
+  @impl true
+  def terminate(_reason, socket) do
+    if worker_id = socket.assigns[:worker_id], do: Jobs.reclaim_worker_leases(worker_id)
+    :ok
+  end
+
   @doc """
   Lease a job to a specific worker by broadcasting a `"job"` event on its topic. The job map
   must conform to `/proto/job.schema.json`. Cluster-wide: reaches the channel on whatever node
@@ -142,5 +155,10 @@ defmodule Coordinator.WorkerChannel do
   """
   def lease(worker_id, %{} = job) do
     Coordinator.Endpoint.broadcast("worker:#{worker_id}", "job", job)
+  end
+
+  @doc "Tell a worker to abort an in-flight or queued job. Safe when job already finished."
+  def cancel(worker_id, job_id) when is_binary(worker_id) and is_binary(job_id) do
+    Coordinator.Endpoint.broadcast("worker:#{worker_id}", "cancel", %{"job_id" => job_id})
   end
 end

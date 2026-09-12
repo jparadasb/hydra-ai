@@ -78,7 +78,9 @@ pub fn fingerprint(token: &str) -> String {
 pub fn redact(s: &str) -> String {
     // Longest prefixes first so `sk-ant-` wins over `sk-`. `ya29.` = Google OAuth access
     // tokens, `1//` = Google OAuth refresh tokens.
-    const PREFIXES: &[&str] = &["sk-ant-", "sk-", "AIza", "gsk_", "or-", "r8_", "hf_", "ya29."];
+    const PREFIXES: &[&str] = &[
+        "sk-ant-", "sk-", "AIza", "gsk_", "or-", "r8_", "hf_", "ya29.",
+    ];
     let is_tok = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
 
     let mut out = String::with_capacity(s.len());

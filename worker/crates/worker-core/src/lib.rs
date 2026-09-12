@@ -11,6 +11,7 @@ pub mod config;
 pub mod coordinator_client;
 pub mod error;
 pub mod gateway;
+pub mod http;
 pub mod identity;
 pub mod limits;
 pub mod oauth;
