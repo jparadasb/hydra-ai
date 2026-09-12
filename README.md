@@ -206,6 +206,33 @@ curl https://hydra.example.com/v1/chat/completions \
   -d '{"model":"qwen3.6-35b-a3b","messages":[{"role":"user","content":"hello"}]}'
 ```
 
+### Request privacy
+
+A request is `public` unless it says otherwise. `x-hydra-privacy` (or a `privacy` body field)
+sets the level, and it travels with the job: the coordinator routes on it and the worker
+re-checks it before dispatching to a backend.
+
+| level | means |
+|---|---|
+| `public` (default) | any eligible worker, any backend it allows |
+| `private` | leaves the machine only if the caller permits it *and* the worker's policy allows external for private work |
+| `sensitive` | never leaves the machine unless its operator has explicitly opted in |
+| `local_only` | never leaves the machine, not configurable |
+
+`x-hydra-allow-external` (or `allow_external_providers`) declines external providers for a
+`public` or `private` request; it is forced off for `sensitive` and `local_only`.
+
+```sh
+curl https://hydra.example.com/v1/chat/completions \
+  -H "Authorization: Bearer hydra_sk_..." -H "content-type: application/json" \
+  -H "x-hydra-privacy: sensitive" \
+  -d '{"model":"qwen3.6-35b-a3b","messages":[{"role":"user","content":"..."}]}'
+```
+
+Workers advertise which levels they accept (`accepted_job_levels`, admin-controlled) and now
+enforce that list themselves, so an operator who takes only public work is not relying on the
+coordinator's routing to honor it.
+
 **Postman:** Import → Link → `https://hydra.example.com/openapi.json` generates the full
 collection; set the bearer token and go. Authenticate with a gateway key (below) — never a
 provider secret. An upstream provider error (e.g. a rate limit) is passed through with its real

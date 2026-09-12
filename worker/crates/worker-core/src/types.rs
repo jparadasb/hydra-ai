@@ -202,7 +202,13 @@ pub struct CostEstimate {
 }
 
 /// A leased job from the coordinator. Mirrors `proto/job.schema.json`.
+///
+/// `deny_unknown_fields` is the schema's `additionalProperties: false`: an inbound job used to
+/// be deserialized by serde alone, so a field the worker did not understand was silently
+/// dropped rather than refused. A coordinator that adds a constraint the worker cannot honor
+/// must not have it ignored.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Job {
     pub job_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]

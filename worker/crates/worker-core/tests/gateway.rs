@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use worker_core::adapter::{AdapterRegistry, ProviderAdapter};
-use worker_core::config::{Preference, RoutingPolicy};
+use worker_core::config::{Preference, PrivacyPrefs, RoutingPolicy};
 use worker_core::gateway::Gateway;
 use worker_core::limits::LimitGuard;
 use worker_core::types::{
@@ -115,6 +115,7 @@ async fn catalog_probes_run_concurrently_across_adapters() {
     let g = Gateway::new(
         reg,
         RoutingPolicy::default(),
+        accept_all_levels(),
         LimitGuard::new(Limits::default()),
         Arc::new(MemoryUsageStore::default()),
     );
@@ -146,11 +147,27 @@ async fn gateway_with(policy: RoutingPolicy) -> Gateway {
     let g = Gateway::new(
         reg,
         policy,
+        accept_all_levels(),
         LimitGuard::new(Limits::default()),
         Arc::new(MemoryUsageStore::default()),
     );
     g.refresh_catalog().await;
     g
+}
+
+/// Every privacy level accepted, so a test exercises the axis it is about rather than
+/// tripping the accepted-levels gate. Tests for that gate build their own prefs.
+fn accept_all_levels() -> PrivacyPrefs {
+    PrivacyPrefs {
+        accepted_job_levels: vec![
+            PrivacyLevel::Public,
+            PrivacyLevel::Private,
+            PrivacyLevel::Sensitive,
+            PrivacyLevel::LocalOnly,
+        ],
+        allow_private_jobs: true,
+        allow_sensitive_jobs: true,
+    }
 }
 
 fn job(privacy: PrivacyLevel, allow_external: bool) -> Job {
@@ -191,6 +208,7 @@ async fn local_only_never_hits_external_even_if_only_external_present() {
                 PrivacyLevel::Private,
             ],
         },
+        accept_all_levels(),
         LimitGuard::new(Limits::default()),
         Arc::new(MemoryUsageStore::default()),
     );
@@ -218,6 +236,7 @@ async fn private_routes_external_only_when_permitted() {
     let g = Gateway::new(
         reg,
         policy,
+        accept_all_levels(),
         LimitGuard::new(Limits::default()),
         Arc::new(MemoryUsageStore::default()),
     );
@@ -338,4 +357,162 @@ async fn result_carries_no_secret() {
             "job result leaked `{needle}`: {serialized}"
         );
     }
+}
+
+// ---- accepted_job_levels enforcement ---------------------------------------------------------
+
+fn accepting(levels: Vec<PrivacyLevel>) -> PrivacyPrefs {
+    PrivacyPrefs {
+        accepted_job_levels: levels,
+        allow_private_jobs: true,
+        allow_sensitive_jobs: true,
+    }
+}
+
+async fn gateway_accepting(levels: Vec<PrivacyLevel>) -> Gateway {
+    let mut reg = AdapterRegistry::new();
+    reg.register(Arc::new(FakeAdapter {
+        name: "ollama",
+        external: false,
+        reply: "local-out",
+    }));
+    let g = Gateway::new(
+        reg,
+        RoutingPolicy::default(),
+        accepting(levels),
+        LimitGuard::new(Limits::default()),
+        Arc::new(MemoryUsageStore::default()),
+    );
+    g.refresh_catalog().await;
+    g
+}
+
+#[tokio::test]
+async fn a_job_above_the_accepted_levels_is_refused_even_on_a_local_model() {
+    // The operator's machine takes public work only. A local model could physically serve a
+    // sensitive job, which is exactly why the coordinator's routing decision is not enough:
+    // refusing sensitive work is a statement about the machine.
+    let g = gateway_accepting(vec![PrivacyLevel::Public]).await;
+
+    let r = g.execute(&job(PrivacyLevel::Sensitive, false)).await;
+    assert_eq!(r.status, JobStatus::Rejected);
+    let reason = r.reason.unwrap();
+    assert!(reason.contains("privacy_violation"), "reason: {reason}");
+    assert!(reason.contains("sensitive"), "reason: {reason}");
+}
+
+#[tokio::test]
+async fn accepted_levels_admit_the_levels_they_list() {
+    let g = gateway_accepting(vec![PrivacyLevel::Public, PrivacyLevel::Sensitive]).await;
+
+    assert_eq!(
+        g.execute(&job(PrivacyLevel::Public, false)).await.status,
+        JobStatus::Ok
+    );
+    assert_eq!(
+        g.execute(&job(PrivacyLevel::Sensitive, false)).await.status,
+        JobStatus::Ok
+    );
+    assert_eq!(
+        g.execute(&job(PrivacyLevel::Private, false)).await.status,
+        JobStatus::Rejected
+    );
+}
+
+// ---- preference as a hard constraint ---------------------------------------------------------
+
+async fn gateway_external_only_registry(policy: RoutingPolicy) -> Gateway {
+    let mut reg = AdapterRegistry::new();
+    reg.register(Arc::new(FakeAdapter {
+        name: "openai",
+        external: true,
+        reply: "remote-out",
+    }));
+    let g = Gateway::new(
+        reg,
+        policy,
+        accept_all_levels(),
+        LimitGuard::new(Limits::default()),
+        Arc::new(MemoryUsageStore::default()),
+    );
+    g.refresh_catalog().await;
+    g
+}
+
+#[tokio::test]
+async fn local_only_preference_refuses_rather_than_routing_out() {
+    // `LocalOnly` was applied as a sort key, so with no local candidate it still routed to an
+    // external provider — the opposite of what the setting says.
+    let g = gateway_external_only_registry(RoutingPolicy {
+        preference: Preference::LocalOnly,
+        fallback_to_external_provider: true,
+        external_provider_allowed_privacy_levels: vec![PrivacyLevel::Public],
+    })
+    .await;
+
+    assert_eq!(
+        g.execute(&job(PrivacyLevel::Public, true)).await.status,
+        JobStatus::Rejected
+    );
+}
+
+#[tokio::test]
+async fn external_only_preference_ignores_local_backends() {
+    let mut reg = AdapterRegistry::new();
+    reg.register(Arc::new(FakeAdapter {
+        name: "ollama",
+        external: false,
+        reply: "local-out",
+    }));
+    let g = Gateway::new(
+        reg,
+        RoutingPolicy {
+            preference: Preference::ExternalOnly,
+            fallback_to_external_provider: true,
+            external_provider_allowed_privacy_levels: vec![PrivacyLevel::Public],
+        },
+        accept_all_levels(),
+        LimitGuard::new(Limits::default()),
+        Arc::new(MemoryUsageStore::default()),
+    );
+    g.refresh_catalog().await;
+
+    assert_eq!(
+        g.execute(&job(PrivacyLevel::Public, true)).await.status,
+        JobStatus::Rejected
+    );
+}
+
+// ---- fallback_to_external_provider -----------------------------------------------------------
+
+#[tokio::test]
+async fn without_fallback_a_local_capable_worker_does_not_reach_for_a_provider() {
+    // Both backends serve the capability. `fallback_to_external_provider: false` means the
+    // provider is not an option while a local backend could do the work.
+    let g = gateway_with(RoutingPolicy {
+        preference: Preference::PreferLocal,
+        fallback_to_external_provider: false,
+        external_provider_allowed_privacy_levels: vec![PrivacyLevel::Public],
+    })
+    .await;
+
+    let r = g.execute(&job(PrivacyLevel::Public, true)).await;
+    assert_eq!(r.status, JobStatus::Ok);
+    assert_eq!(r.usage.unwrap().provider, "ollama");
+}
+
+#[tokio::test]
+async fn without_fallback_a_provider_only_worker_still_works() {
+    // No local candidate exists, so there is nothing to fall back *from*.
+    let g = gateway_external_only_registry(RoutingPolicy {
+        preference: Preference::PreferLocal,
+        fallback_to_external_provider: false,
+        external_provider_allowed_privacy_levels: vec![PrivacyLevel::Public],
+    })
+    .await;
+
+    assert_eq!(
+        g.execute(&job(PrivacyLevel::Public, true)).await.status,
+        JobStatus::Ok
+    );
 }

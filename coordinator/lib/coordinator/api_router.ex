@@ -12,6 +12,11 @@ defmodule Coordinator.ApiRouter do
   caller authenticates to the coordinator with a *gateway* key (`HYDRA_API_TOKEN`), never a
   provider secret; the worker holds its own provider tokens locally and only reports usage.
 
+  Privacy: a request is `public` unless it says otherwise with an `x-hydra-privacy` header (or
+  a `privacy` body field) — `public`, `private`, `sensitive`, or `local_only`. The level travels
+  with the job: the coordinator routes on it, and the worker re-checks it before dispatch.
+  `sensitive` and `local_only` refuse to leave the machine that runs them.
+
   Synchronicity: the request blocks until the job's `"result"` arrives on its own
   `"job_results:<job_id>"` PubSub topic (the same topic
   `Coordinator.WorkerSession.handle_result/1` broadcasts on), or until a timeout. Override the
@@ -30,6 +35,9 @@ defmodule Coordinator.ApiRouter do
   # While a streaming job runs, emit an SSE keepalive at least this often so an edge proxy
   # (Cloudflare's ~100s idle/TTFB window -> 524) never sees a silent connection. Well under 100s.
   @heartbeat_ms 15_000
+  # Job privacy levels a caller may request. Declared here, with the other attributes, because
+  # a module attribute reads as nil in any function compiled before its definition.
+  @privacy_levels ~w(public private sensitive local_only)
 
   plug(:match)
   plug(:dispatch)
@@ -156,9 +164,10 @@ defmodule Coordinator.ApiRouter do
 
     with {:ok, messages} <- fetch_messages(params),
          :ok <- requested_model_available(params),
+         {:ok, privacy} <- resolve_privacy(conn, params),
          timeout = resolve_timeout(conn, params),
          payload = build_payload(params, messages),
-         {:ok, record} <- submit(payload, job_id, timeout, caller) do
+         {:ok, record} <- submit(payload, job_id, timeout, caller, privacy) do
       if stream? do
         # Flush headers + a first byte immediately, then relay the worker's streamed chunks
         # as they arrive (heartbeating while none do, so an edge proxy — Cloudflare's ~100s
@@ -175,6 +184,9 @@ defmodule Coordinator.ApiRouter do
       {:error, {:model_unavailable, model}} ->
         error(conn, 404, "model '#{model}' is not available", "invalid_request_error")
 
+      {:error, {:bad_privacy, level}} ->
+        error(conn, 400, bad_privacy_message(level), "invalid_request_error")
+
       {:error, {:submit, reason}} ->
         error(conn, 500, "could not enqueue job: #{inspect(reason)}", "api_error")
     end
@@ -189,9 +201,10 @@ defmodule Coordinator.ApiRouter do
 
     with {:ok, messages} <- fetch_response_messages(params),
          :ok <- requested_model_available(params),
+         {:ok, privacy} <- resolve_privacy(conn, params),
          timeout = resolve_timeout(conn, params),
          payload = build_response_payload(params, messages),
-         {:ok, record} <- submit(payload, job_id, timeout, caller) do
+         {:ok, record} <- submit(payload, job_id, timeout, caller, privacy) do
       if stream? do
         response_stream(conn, record.id, params, timeout)
       else
@@ -221,9 +234,16 @@ defmodule Coordinator.ApiRouter do
       {:error, {:model_unavailable, model}} ->
         error(conn, 404, "model '#{model}' is not available", "invalid_request_error")
 
+      {:error, {:bad_privacy, level}} ->
+        error(conn, 400, bad_privacy_message(level), "invalid_request_error")
+
       {:error, {:submit, reason}} ->
         error(conn, 500, "could not enqueue job: #{inspect(reason)}", "api_error")
     end
+  end
+
+  defp bad_privacy_message(level) do
+    "unknown privacy level #{inspect(level)}, expected one of: #{Enum.join(@privacy_levels, ", ")}"
   end
 
   defp fetch_response_messages(%{"input" => input} = params) do
@@ -596,20 +616,17 @@ defmodule Coordinator.ApiRouter do
 
   defp requested_model_available(_), do: :ok
 
-  # Privacy defaults to public + external allowed so any eligible worker (local or provider) can
-  # take it. A future revision can map an `x-hydra-privacy` header here.
-  #
   # The routing capability is configurable (`HYDRA_API_CAPABILITY`): the worker runs a chat
   # completion for whatever capability it is asked to serve, so this just has to match a string
   # the connected workers advertise (e.g. "text.extract_json"). Defaults to "chat".
-  defp submit(payload, job_id, timeout_ms, caller) do
+  defp submit(payload, job_id, timeout_ms, caller, privacy) do
     capability = Application.get_env(:coordinator, :api_capability, "chat")
 
     case Coordinator.submit_job(%{
            id: job_id,
            capability: capability,
-           privacy: "public",
-           allow_external_providers: true,
+           privacy: privacy.level,
+           allow_external_providers: privacy.allow_external_providers,
            expires_at: DateTime.add(DateTime.utc_now(), timeout_ms, :millisecond),
            payload: payload,
            # Attribution travels with the job: the usage row written when it completes reads
@@ -618,6 +635,46 @@ defmodule Coordinator.ApiRouter do
          }) do
       {:ok, record} -> {:ok, record}
       {:error, reason} -> {:error, {:submit, reason}}
+    end
+  end
+
+  # ---- privacy ------------------------------------------------------------------------------
+
+  # How strictly this request must be handled, from `x-hydra-privacy` (or a `privacy` body
+  # field), and whether it may leave the machine that runs it (`x-hydra-allow-external` /
+  # `allow_external_providers`).
+  #
+  # Defaults are `public` + external allowed: that is what every request used to be pinned to,
+  # so existing callers see no change. A caller with sensitive input can now say so, and the
+  # level travels with the job — the coordinator routes on it and the worker re-checks it.
+  #
+  # `local_only` and `sensitive` are refusals to leave the machine, so they force
+  # `allow_external_providers` to false regardless of what was asked for.
+  defp resolve_privacy(conn, params) do
+    level = header_or_param(conn, "x-hydra-privacy", params, "privacy") || "public"
+
+    cond do
+      level not in @privacy_levels ->
+        {:error, {:bad_privacy, level}}
+
+      level in ["sensitive", "local_only"] ->
+        {:ok, %{level: level, allow_external_providers: false}}
+
+      true ->
+        allow =
+          case header_or_param(conn, "x-hydra-allow-external", params, "allow_external_providers") do
+            nil -> true
+            value -> value in [true, "true", "1"]
+          end
+
+        {:ok, %{level: level, allow_external_providers: allow}}
+    end
+  end
+
+  defp header_or_param(conn, header, params, field) do
+    case get_req_header(conn, header) do
+      [value | _] -> value
+      [] -> params[field]
     end
   end
 
