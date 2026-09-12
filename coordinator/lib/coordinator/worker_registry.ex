@@ -38,12 +38,19 @@ defmodule Coordinator.WorkerRegistry do
 
   @doc "Track a newly-registered worker. Call from its channel process."
   def track(pid, %Worker{worker_id: id} = worker) do
-    Presence.track(pid, @topic, id, %{worker: worker, channel_pid: pid})
+    Presence.track(pid, @topic, id, meta(worker, pid))
   end
 
   @doc "Replace the tracked snapshot for a worker. Call from its channel process."
   def update(pid, %Worker{worker_id: id} = worker) do
-    Presence.update(pid, @topic, id, %{worker: worker, channel_pid: pid})
+    Presence.update(pid, @topic, id, meta(worker, pid))
+  end
+
+  # `tracked_at` is what makes "most recent" answerable. Presence metas arrive in no
+  # particular order, so during a reconnect overlap the winner was whichever the list happened
+  # to end with. Wall-clock rather than monotonic: metas are compared across cluster nodes.
+  defp meta(worker, pid) do
+    %{worker: worker, channel_pid: pid, tracked_at: System.system_time(:microsecond)}
   end
 
   @doc "Whether another live channel exists for this worker id."
@@ -58,8 +65,12 @@ defmodule Coordinator.WorkerRegistry do
   # two metas can exist under the key; prefer the most recently tracked snapshot.
   defp latest(metas) do
     metas
-    |> Enum.map(&Map.get(&1, :worker))
-    |> Enum.reject(&is_nil/1)
-    |> List.last()
+    |> Enum.filter(&Map.get(&1, :worker))
+    # A meta replicated by a node that predates `tracked_at` sorts oldest rather than crashing.
+    |> Enum.max_by(&Map.get(&1, :tracked_at, 0), fn -> nil end)
+    |> case do
+      nil -> nil
+      meta -> meta.worker
+    end
   end
 end

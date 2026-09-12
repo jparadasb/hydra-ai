@@ -64,9 +64,11 @@ defmodule Coordinator.Web.Router do
     get("/dashboard", DashboardController, :index)
     get("/stats", DashboardController, :stats)
 
-    # Enrolled workers: admin-granted privacy levels + device-key revoke/restore.
+    # Enrolled workers: admin-granted privacy levels + routing trust + device-key
+    # revoke/restore.
     get("/workers", WorkerController, :index)
     post("/workers/:id/policy", WorkerController, :policy)
+    post("/workers/:id/trust", WorkerController, :trust)
     post("/workers/:id/revoke", WorkerController, :revoke)
     post("/workers/:id/restore", WorkerController, :restore)
   end

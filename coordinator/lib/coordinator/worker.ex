@@ -23,9 +23,12 @@ defmodule Coordinator.Worker do
           max_requests_per_hour: non_neg_integer() | nil,
           supports_cancel_ack: boolean(),
           supports_lease_heartbeat: boolean(),
-          # live scheduling signals
+          # Live scheduling signals. All three are measured by the coordinator at the channel
+          # boundary (`Coordinator.WorkerSignals`), never reported by the worker.
           inflight: non_neg_integer(),
           avg_latency_ms: float(),
+          requests_last_hour: non_neg_integer(),
+          recent_failures: float(),
           available: boolean()
         }
 
@@ -40,6 +43,8 @@ defmodule Coordinator.Worker do
             supports_lease_heartbeat: false,
             inflight: 0,
             avg_latency_ms: 0.0,
+            requests_last_hour: 0,
+            recent_failures: 0.0,
             available: true
 
   @doc """
@@ -55,6 +60,8 @@ defmodule Coordinator.Worker do
       accepted_job_levels:
         (get_in(reg, ["privacy", "accepted_job_levels"]) || ["public"])
         |> Enum.map(&Coordinator.Job.parse_privacy/1),
+      # Set by `Coordinator.WorkerSession` from the admin grant before this runs — a worker's
+      # own `trust_level` never reaches here.
       trust_level: reg["trust_level"] || "untrusted",
       max_requests_per_hour: get_in(reg, ["limits", "max_requests_per_hour"]),
       supports_cancel_ack: reg["supports_cancel_ack"] == true,

@@ -15,6 +15,7 @@ defmodule Coordinator.WorkerChannelTest do
   setup do
     Coordinator.Repo.delete_all(JobRecord)
     Coordinator.Repo.delete_all(Oban.Job)
+    on_exit(fn -> Coordinator.Repo.delete_all(Coordinator.WorkerKey) end)
     :ok
   end
 
@@ -32,6 +33,131 @@ defmodule Coordinator.WorkerChannelTest do
       ],
       "privacy" => %{"accepted_job_levels" => ["public", "private"]}
     }
+  end
+
+  test "latency is measured from lease to result, not taken from the worker" do
+    {:ok, _reply, socket} = join_worker("w-latency", registration("w-latency"))
+    wait_present("w-latency")
+
+    # A worker claiming to be instant is ignored: this is measured at the channel boundary.
+    push(socket, "signals", %{"avg_latency_ms" => 0, "available" => true})
+
+    WorkerChannel.lease("w-latency", %{"job_id" => "j-lat", "lease_id" => "l-lat"})
+    assert_push("job", _)
+    Process.sleep(30)
+
+    ref = push(socket, "result", %{"job_id" => "j-lat", "lease_id" => "l-lat", "status" => "ok"})
+    assert_reply(ref, :ok)
+    wait_inflight("w-latency", 0)
+
+    worker = Enum.find(WorkerRegistry.list(), &(&1.worker_id == "w-latency"))
+    assert worker.avg_latency_ms >= 30
+  end
+
+  test "a worker cannot report its own latency" do
+    {:ok, _reply, socket} = join_worker("w-selfreport", registration("w-selfreport"))
+    wait_present("w-selfreport")
+
+    ref = push(socket, "signals", %{"avg_latency_ms" => 999_999, "available" => false})
+    assert_reply(ref, :ok)
+
+    worker =
+      wait_for_worker("w-selfreport", fn w -> w.available == false end)
+
+    # `available` is the worker's to set — it may take itself out of rotation. The number the
+    # router scores on is not.
+    assert worker.avg_latency_ms == 0.0
+  end
+
+  test "completions count against the hourly ceiling the router compares them to" do
+    {:ok, _reply, socket} = join_worker("w-window", registration("w-window"))
+    wait_present("w-window")
+
+    WorkerChannel.lease("w-window", %{"job_id" => "j-win", "lease_id" => "l-win"})
+    assert_push("job", _)
+
+    ref = push(socket, "result", %{"job_id" => "j-win", "lease_id" => "l-win", "status" => "ok"})
+    assert_reply(ref, :ok)
+    wait_inflight("w-window", 0)
+
+    worker = Enum.find(WorkerRegistry.list(), &(&1.worker_id == "w-window"))
+    assert worker.requests_last_hour == 1
+  end
+
+  test "a failed result counts against the worker and a success pays it back" do
+    {:ok, _reply, socket} = join_worker("w-rep", registration("w-rep"))
+    wait_present("w-rep")
+
+    WorkerChannel.lease("w-rep", %{"job_id" => "j-bad", "lease_id" => "l-bad"})
+    assert_push("job", _)
+
+    ref =
+      push(socket, "result", %{
+        "job_id" => "j-bad",
+        "lease_id" => "l-bad",
+        "status" => "error",
+        "reason" => "provider_error"
+      })
+
+    assert_reply(ref, :ok)
+    failed = wait_for_worker("w-rep", fn w -> w.recent_failures > 0 end)
+
+    WorkerChannel.lease("w-rep", %{"job_id" => "j-good", "lease_id" => "l-good"})
+    assert_push("job", _)
+
+    ref2 =
+      push(socket, "result", %{"job_id" => "j-good", "lease_id" => "l-good", "status" => "ok"})
+
+    assert_reply(ref2, :ok)
+
+    recovered =
+      wait_for_worker("w-rep", fn w -> w.recent_failures < failed.recent_failures end)
+
+    assert recovered.recent_failures < failed.recent_failures
+  end
+
+  test "an admin trust grant reaches a connected worker without a reconnect" do
+    enroll_key("w-trust")
+    {:ok, _reply, _socket} = join_worker("w-trust", registration("w-trust"))
+    wait_present("w-trust")
+
+    assert {:ok, _} = Coordinator.WorkerPolicies.set_trust_level("w-trust", "trusted")
+
+    worker = wait_for_worker("w-trust", fn w -> w.trust_level == "trusted" end)
+    assert worker.trust_level == "trusted"
+  end
+
+  # Poll the registry until a worker's snapshot satisfies `pred`.
+  defp wait_for_worker(worker_id, pred, tries \\ 100)
+
+  defp wait_for_worker(worker_id, _pred, 0),
+    do: flunk("worker #{worker_id} never reached the expected state")
+
+  defp wait_for_worker(worker_id, pred, tries) do
+    case Enum.find(WorkerRegistry.list(), &(&1.worker_id == worker_id)) do
+      %{} = w ->
+        if pred.(w) do
+          w
+        else
+          Process.sleep(10)
+          wait_for_worker(worker_id, pred, tries - 1)
+        end
+
+      nil ->
+        Process.sleep(10)
+        wait_for_worker(worker_id, pred, tries - 1)
+    end
+  end
+
+  defp enroll_key(worker_id) do
+    %Coordinator.WorkerKey{}
+    |> Coordinator.WorkerKey.changeset(%{
+      worker_id: worker_id,
+      public_key: Base.encode64(:crypto.strong_rand_bytes(32)),
+      status: "trusted",
+      accepted_job_levels: ["public"]
+    })
+    |> Coordinator.Repo.insert!()
   end
 
   test "the worker socket binds the peer address so abuse can be traced to a host" do

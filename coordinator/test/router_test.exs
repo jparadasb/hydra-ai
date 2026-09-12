@@ -22,6 +22,8 @@ defmodule Coordinator.RouterTest do
       trust_level: Keyword.get(opts, :trust, "untrusted"),
       inflight: Keyword.get(opts, :inflight, 0),
       avg_latency_ms: Keyword.get(opts, :latency, 0.0),
+      requests_last_hour: Keyword.get(opts, :rph, 0),
+      recent_failures: Keyword.get(opts, :failures, 0.0),
       max_requests_per_hour: Keyword.get(opts, :max_rph),
       available: Keyword.get(opts, :available, true)
     }
@@ -90,8 +92,39 @@ defmodule Coordinator.RouterTest do
   end
 
   test "respects hourly capacity ceiling" do
-    busy = worker("busy", models: [model(false)], inflight: 5, max_rph: 5)
+    busy = worker("busy", models: [model(false)], rph: 5, max_rph: 5)
     assert {:error, :no_eligible_worker} = Router.route(job(:public), [busy])
+  end
+
+  test "the hourly ceiling counts the trailing hour, not instantaneous inflight" do
+    # These were compared against each other despite being different units: five jobs running
+    # right now is not five jobs in the last hour.
+    concurrent = worker("concurrent", models: [model(false)], inflight: 5, rph: 1, max_rph: 5)
+    assert {:ok, %{worker_id: "concurrent"}} = Router.route(job(:public), [concurrent])
+
+    spent = worker("spent", models: [model(false)], inflight: 0, rph: 5, max_rph: 5)
+    assert {:error, :no_eligible_worker} = Router.route(job(:public), [spent])
+  end
+
+  test "a worker that has been failing loses out to one that has not" do
+    # Behavioural, and separate from the admin's trust grant: this says what a worker has
+    # actually been doing.
+    reliable = worker("reliable", models: [model(false)], failures: 0.0)
+    flaky = worker("flaky", models: [model(false)], failures: 3.0)
+
+    assert {:ok, %{worker_id: "reliable"}} = Router.route(job(:public), [flaky, reliable])
+  end
+
+  test "a failing trusted worker can still lose to a healthy untrusted one" do
+    # Trust is a -20 bonus; a sustained failure record outweighs it. Otherwise a trusted
+    # worker that has stopped working keeps being handed everything.
+    trusted_but_broken =
+      worker("trusted-broken", models: [model(false)], trust: "trusted", failures: 4.0)
+
+    healthy = worker("healthy", models: [model(false)], trust: "untrusted")
+
+    assert {:ok, %{worker_id: "healthy"}} =
+             Router.route(job(:public), [trusted_but_broken, healthy])
   end
 
   test "unavailable workers are excluded" do

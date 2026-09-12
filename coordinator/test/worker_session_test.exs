@@ -37,6 +37,45 @@ defmodule Coordinator.WorkerSessionTest do
     }
   end
 
+  describe "admin-controlled trust" do
+    test "a worker that registers as trusted is stored untrusted unless an admin granted it" do
+      # `trusted` is worth a -20 routing bonus, so a worker that could name its own trust
+      # level won essentially every routing decision against honest workers.
+      claim = Map.put(registration(), "trust_level", "trusted")
+
+      assert {:ok, worker} = WorkerSession.handle_register(claim)
+      assert worker.trust_level == "untrusted"
+    end
+
+    test "an admin grant is what actually sets it" do
+      enroll("w-ext", ["public"])
+      assert {:ok, _} = WorkerPolicies.set_trust_level("w-ext", "trusted")
+
+      assert {:ok, worker} = WorkerSession.handle_register(registration())
+      assert worker.trust_level == "trusted"
+    end
+
+    test "an admin grant still wins over a worker claiming something else" do
+      enroll("w-ext", ["public"])
+      assert {:ok, _} = WorkerPolicies.set_trust_level("w-ext", "organization")
+
+      claim = Map.put(registration(), "trust_level", "trusted")
+      assert {:ok, worker} = WorkerSession.handle_register(claim)
+      assert worker.trust_level == "organization"
+    end
+
+    test "an unenrolled worker is untrusted and cannot be granted anything" do
+      assert WorkerPolicies.trust_level("ghost") == "untrusted"
+      assert {:error, :not_enrolled} = WorkerPolicies.set_trust_level("ghost", "trusted")
+    end
+
+    test "an unknown trust level is refused rather than stored" do
+      enroll("w-ext", ["public"])
+      assert {:error, %Ecto.Changeset{}} = WorkerPolicies.set_trust_level("w-ext", "superuser")
+      assert WorkerPolicies.trust_level("w-ext") == "untrusted"
+    end
+  end
+
   test "registers a clean worker and makes it routable" do
     assert {:ok, worker} = WorkerSession.handle_register(registration())
     assert worker.worker_id == "w-ext"

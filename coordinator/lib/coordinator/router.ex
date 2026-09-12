@@ -65,9 +65,12 @@ defmodule Coordinator.Router do
   defp privacy_compatible?(%Job{privacy: :local_only} = job, w),
     do: Worker.has_local?(w, job.capability)
 
-  # Don't hand work to a paid worker already at its declared hourly request ceiling.
+  # Don't hand work to a paid worker already at its declared hourly request ceiling. Compared
+  # against completions in the trailing hour, which is what the ceiling is denominated in;
+  # this used to compare it against instantaneous `inflight`, a different unit entirely.
   defp over_capacity?(%Worker{max_requests_per_hour: nil}), do: false
-  defp over_capacity?(%Worker{inflight: n, max_requests_per_hour: max}), do: n >= max
+
+  defp over_capacity?(%Worker{requests_last_hour: n, max_requests_per_hour: max}), do: n >= max
 
   # Lower is better.
   defp score(%Job{} = job, %Worker{} = w) do
@@ -75,9 +78,15 @@ defmodule Coordinator.Router do
     latency = w.avg_latency_ms / 100.0
     trust = trust_bonus(w.trust_level)
     external = if would_use_external?(job, w), do: 50, else: 0
-    load + latency + external + trust
+    # Behavioural, and deliberately separate from trust: an admin's grant says what a worker is
+    # allowed to be preferred for, while this says what it has actually been doing. A worker
+    # that keeps failing loses work without an admin having to intervene, and earns it back by
+    # succeeding.
+    failures = w.recent_failures * 25
+    load + latency + external + trust + failures
   end
 
+  # Admin-granted (`Coordinator.WorkerPolicies`), not self-declared.
   defp trust_bonus("trusted"), do: -20
   defp trust_bonus("organization"), do: -10
   defp trust_bonus("internal"), do: -15
