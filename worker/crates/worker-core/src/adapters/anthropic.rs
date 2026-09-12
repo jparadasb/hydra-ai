@@ -7,8 +7,9 @@ use serde_json::json;
 
 use super::openai_compatible::parse_json;
 use super::tools::{forced_function_name, function_defs, parse_arguments};
-use crate::adapter::ProviderAdapter;
-use crate::error::Result;
+use crate::adapter::{DeltaSink, ProviderAdapter};
+use crate::error::{Error, Result};
+use crate::retry::RetryExt;
 use crate::types::{
     ChatRequest, ChatResponse, ModelInfo, ToolCall, ToolCallFunction, Usage, VisionRequest,
     VisionResponse,
@@ -41,6 +42,30 @@ impl AnthropicAdapter {
         builder
             .header("x-api-key", self.token.expose())
             .header("anthropic-version", API_VERSION)
+    }
+
+    /// The `/messages` request body. Shared so the streaming path cannot drift from the
+    /// blocking one — they must send the same request, differing only in `stream`.
+    fn message_body(req: &ChatRequest) -> serde_json::Value {
+        let (system, messages) = Self::split_system(req);
+        let mut body = json!({
+            "model": req.model,
+            "max_tokens": req.max_tokens.unwrap_or(1024),
+            "messages": messages,
+        });
+        if let Some(s) = system {
+            body["system"] = json!(s);
+        }
+        if let Some(t) = req.temperature {
+            body["temperature"] = json!(t);
+        }
+        if let Some(tools) = &req.tools {
+            body["tools"] = anthropic_tools(tools);
+            if let Some(choice) = &req.tool_choice {
+                body["tool_choice"] = anthropic_tool_choice(choice);
+            }
+        }
+        body
     }
 
     /// Split out an optional leading system message (Anthropic wants it top-level) and map the
@@ -127,7 +152,7 @@ impl ProviderAdapter for AnthropicAdapter {
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
         let resp = self
             .req(self.client.get(format!("{}/models", self.base_url)))
-            .send()
+            .send_retried()
             .await?;
         let value = parse_json(resp).await?;
         let models = value["data"]
@@ -156,35 +181,18 @@ impl ProviderAdapter for AnthropicAdapter {
     async fn validate_credentials(&self) -> Result<bool> {
         let resp = self
             .req(self.client.get(format!("{}/models", self.base_url)))
-            .send()
+            .send_retried()
             .await?;
         Ok(resp.status().is_success())
     }
 
     async fn run_chat_completion(&self, req: ChatRequest) -> Result<ChatResponse> {
-        let (system, messages) = Self::split_system(&req);
-        let mut body = json!({
-            "model": req.model,
-            "max_tokens": req.max_tokens.unwrap_or(1024),
-            "messages": messages,
-        });
-        if let Some(s) = system {
-            body["system"] = json!(s);
-        }
-        if let Some(t) = req.temperature {
-            body["temperature"] = json!(t);
-        }
-        if let Some(tools) = &req.tools {
-            body["tools"] = anthropic_tools(tools);
-            if let Some(choice) = &req.tool_choice {
-                body["tool_choice"] = anthropic_tool_choice(choice);
-            }
-        }
+        let body = Self::message_body(&req);
 
         let resp = self
             .req(self.client.post(format!("{}/messages", self.base_url)))
             .json(&body)
-            .send()
+            .send_retried()
             .await?;
         let value = parse_json(resp).await?;
 
@@ -210,8 +218,8 @@ impl ProviderAdapter for AnthropicAdapter {
             }
         }
         let usage = Usage {
-            input_tokens: value["usage"]["input_tokens"].as_u64().unwrap_or(0),
-            output_tokens: value["usage"]["output_tokens"].as_u64().unwrap_or(0),
+            input_tokens: value["usage"]["input_tokens"].as_u64(),
+            output_tokens: value["usage"]["output_tokens"].as_u64(),
             ..Default::default()
         };
         Ok(ChatResponse {
@@ -220,6 +228,53 @@ impl ProviderAdapter for AnthropicAdapter {
             tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
             usage,
         })
+    }
+
+    /// Anthropic streams SSE with a different event vocabulary from OpenAI's: text arrives as
+    /// `content_block_delta` with a `text_delta`, tool arguments as `input_json_delta`
+    /// fragments that have to be reassembled per block index, and token counts are split
+    /// across `message_start` (input) and `message_delta` (output).
+    ///
+    /// Without this the trait default ran the blocking call, so a caller streaming against
+    /// Anthropic waited in silence and then got the whole answer at once.
+    async fn run_chat_completion_streaming(
+        &self,
+        req: ChatRequest,
+        on_delta: DeltaSink,
+    ) -> Result<ChatResponse> {
+        use futures_util::StreamExt;
+
+        let mut body = Self::message_body(&req);
+        body["stream"] = json!(true);
+
+        let resp = self
+            .req(self.client.post(format!("{}/messages", self.base_url)))
+            .json(&body)
+            .send_retried()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await?;
+            return Err(Error::ProviderStatus {
+                status: status.as_u16(),
+                body: crate::vault::redact(&text),
+            });
+        }
+
+        let mut assembly = AnthropicStream::default();
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::new();
+
+        while let Some(chunk) = stream.next().await {
+            buf.push_str(&String::from_utf8_lossy(&chunk?));
+            while let Some(pos) = buf.find('\n') {
+                let line: String = buf.drain(..=pos).collect();
+                assembly.feed_line(line.trim_end(), on_delta.as_ref());
+            }
+        }
+
+        Ok(assembly.finish(req.model))
     }
 
     async fn run_vision_task(&self, req: VisionRequest) -> Result<VisionResponse> {
@@ -238,7 +293,7 @@ impl ProviderAdapter for AnthropicAdapter {
         let resp = self
             .req(self.client.post(format!("{}/messages", self.base_url)))
             .json(&body)
-            .send()
+            .send_retried()
             .await?;
         let value = parse_json(resp).await?;
         Ok(VisionResponse {
@@ -248,11 +303,120 @@ impl ProviderAdapter for AnthropicAdapter {
                 .unwrap_or_default()
                 .to_string(),
             usage: Usage {
-                input_tokens: value["usage"]["input_tokens"].as_u64().unwrap_or(0),
-                output_tokens: value["usage"]["output_tokens"].as_u64().unwrap_or(0),
+                input_tokens: value["usage"]["input_tokens"].as_u64(),
+                output_tokens: value["usage"]["output_tokens"].as_u64(),
                 image_units: req.images.len() as u64,
                 ..Default::default()
             },
         })
+    }
+}
+
+/// Incremental state for one streamed Anthropic message. Pure — fed SSE lines, no I/O.
+#[derive(Default)]
+struct AnthropicStream {
+    content: String,
+    /// Per content-block index: the tool id/name from `content_block_start`, plus the JSON
+    /// argument fragments that arrive afterwards and have to be concatenated.
+    blocks: Vec<(String, String, String)>,
+    usage: Usage,
+}
+
+impl AnthropicStream {
+    fn feed_line(&mut self, line: &str, on_delta: &(dyn Fn(&str, bool) + Send + Sync)) {
+        let Some(data) = line.strip_prefix("data: ") else {
+            return; // event:/comment/blank lines
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
+            return;
+        };
+
+        match value["type"].as_str() {
+            Some("message_start") => {
+                self.usage.input_tokens = value["message"]["usage"]["input_tokens"].as_u64();
+            }
+
+            Some("content_block_start") => {
+                let idx = value["index"].as_u64().unwrap_or(0) as usize;
+                if self.blocks.len() <= idx {
+                    self.blocks.resize(idx + 1, Default::default());
+                }
+                let block = &value["content_block"];
+                if block["type"] == "tool_use" {
+                    self.blocks[idx].0 = block["id"].as_str().unwrap_or_default().to_string();
+                    self.blocks[idx].1 = block["name"].as_str().unwrap_or_default().to_string();
+                }
+            }
+
+            Some("content_block_delta") => {
+                let idx = value["index"].as_u64().unwrap_or(0) as usize;
+                let delta = &value["delta"];
+
+                match delta["type"].as_str() {
+                    Some("text_delta") => {
+                        if let Some(text) = delta["text"].as_str() {
+                            if !text.is_empty() {
+                                self.content.push_str(text);
+                                on_delta(text, false);
+                            }
+                        }
+                    }
+                    // Extended thinking: streamed for live display, never mixed into the answer.
+                    Some("thinking_delta") => {
+                        if let Some(text) = delta["thinking"].as_str() {
+                            if !text.is_empty() {
+                                on_delta(text, true);
+                            }
+                        }
+                    }
+                    Some("input_json_delta") => {
+                        if self.blocks.len() <= idx {
+                            self.blocks.resize(idx + 1, Default::default());
+                        }
+                        if let Some(fragment) = delta["partial_json"].as_str() {
+                            self.blocks[idx].2.push_str(fragment);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // The output count arrives here, at the end, rather than with the input count.
+            Some("message_delta") => {
+                if let Some(output) = value["usage"]["output_tokens"].as_u64() {
+                    self.usage.output_tokens = Some(output);
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    fn finish(self, model: String) -> ChatResponse {
+        let tool_calls: Vec<ToolCall> = self
+            .blocks
+            .into_iter()
+            .filter(|(id, name, _)| !id.is_empty() || !name.is_empty())
+            .map(|(id, name, arguments)| ToolCall {
+                id,
+                kind: "function".to_string(),
+                function: ToolCallFunction {
+                    name,
+                    // An empty-argument tool call still has to be valid JSON downstream.
+                    arguments: if arguments.is_empty() {
+                        "{}".to_string()
+                    } else {
+                        arguments
+                    },
+                },
+            })
+            .collect();
+
+        ChatResponse {
+            model,
+            content: self.content,
+            tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
+            usage: self.usage,
+        }
     }
 }

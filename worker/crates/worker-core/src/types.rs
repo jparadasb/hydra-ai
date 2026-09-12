@@ -187,12 +187,36 @@ pub struct VisionResponse {
 /// Token/unit usage for a single call.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Usage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
+    /// `None` means the provider reported nothing, which is not the same claim as zero. Every
+    /// field here used to be `unwrap_or(0)`, so a provider that omits `usage` produced zero
+    /// tokens, which became zero cost, which never charged a budget — indistinguishable from a
+    /// call that genuinely consumed nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
     #[serde(default)]
     pub image_units: u64,
     #[serde(default)]
     pub audio_units: u64,
+}
+
+impl Usage {
+    /// Tokens in, treating "not reported" as zero. For arithmetic — accumulation, cost — where
+    /// there is nothing else to do with an absent number. Use the field itself to ask whether
+    /// the provider actually said.
+    pub fn input(&self) -> u64 {
+        self.input_tokens.unwrap_or(0)
+    }
+
+    pub fn output(&self) -> u64 {
+        self.output_tokens.unwrap_or(0)
+    }
+
+    /// Did the provider report token counts at all?
+    pub fn is_reported(&self) -> bool {
+        self.input_tokens.is_some() || self.output_tokens.is_some()
+    }
 }
 
 /// Estimated cost of some usage.
@@ -265,7 +289,11 @@ pub struct JobResultChunk {
 pub struct ResultUsage {
     pub provider: String,
     pub model: String,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
+    /// Omitted from the wire when the provider reported nothing, so the coordinator can tell
+    /// "no measurement" from "measured zero" rather than being handed a fabricated 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
     pub latency_ms: f64,
 }

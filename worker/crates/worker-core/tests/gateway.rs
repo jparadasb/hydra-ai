@@ -60,8 +60,8 @@ impl ProviderAdapter for FakeAdapter {
                 }]
             }),
             usage: Usage {
-                input_tokens: 5,
-                output_tokens: 3,
+                input_tokens: Some(5),
+                output_tokens: Some(3),
                 ..Default::default()
             },
         })

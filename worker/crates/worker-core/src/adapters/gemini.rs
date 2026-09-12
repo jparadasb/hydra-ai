@@ -7,8 +7,9 @@ use serde_json::json;
 
 use super::openai_compatible::parse_json;
 use super::tools::{forced_function_name, function_defs, parse_arguments};
-use crate::adapter::ProviderAdapter;
-use crate::error::Result;
+use crate::adapter::{DeltaSink, ProviderAdapter};
+use crate::error::{Error, Result};
+use crate::retry::RetryExt;
 use crate::types::{ChatRequest, ChatResponse, ModelInfo, ToolCall, ToolCallFunction, Usage};
 use crate::vault::Secret;
 
@@ -49,7 +50,7 @@ impl ProviderAdapter for GeminiAdapter {
             .client
             .get(format!("{}/models", self.base_url))
             .header("x-goog-api-key", self.token.expose())
-            .send()
+            .send_retried()
             .await?;
         let value = parse_json(resp).await?;
         let models = value["models"]
@@ -60,13 +61,14 @@ impl ProviderAdapter for GeminiAdapter {
                     .map(|name| ModelInfo {
                         // names come back as "models/gemini-1.5-flash"
                         name: name.trim_start_matches("models/").to_string(),
-                        capabilities: vec![
-                            "chat".into(),
-                            "text.extract_json".into(),
-                            "image.describe".into(),
-                        ],
+                        // `image.describe` is deliberately absent: this adapter implements no
+                        // `run_vision_task`, so the trait default answers "does not support
+                        // vision tasks" — advertising it made the coordinator route jobs that
+                        // were guaranteed to fail. The models can do vision; this adapter
+                        // cannot yet, and the advertisement has to match the adapter.
+                        capabilities: vec!["chat".into(), "text.extract_json".into()],
                         context_length: None,
-                        modalities: vec!["text".into(), "image".into()],
+                        modalities: vec!["text".into()],
                         uses_external_provider: true,
                     })
                     .collect()
@@ -80,7 +82,7 @@ impl ProviderAdapter for GeminiAdapter {
             .client
             .get(format!("{}/models", self.base_url))
             .header("x-goog-api-key", self.token.expose())
-            .send()
+            .send_retried()
             .await?;
         Ok(resp.status().is_success())
     }
@@ -93,10 +95,140 @@ impl ProviderAdapter for GeminiAdapter {
             .post(url)
             .header("x-goog-api-key", self.token.expose())
             .json(&body)
-            .send()
+            .send_retried()
             .await?;
         let value = parse_json(resp).await?;
         Ok(parse_generate_content_response(&value, req.model))
+    }
+
+    /// Gemini streams through `:streamGenerateContent?alt=sse`, emitting the same
+    /// `generateContent` response shape once per chunk rather than once at the end. Each
+    /// carries the new text parts; the last carries `usageMetadata`.
+    async fn run_chat_completion_streaming(
+        &self,
+        req: ChatRequest,
+        on_delta: DeltaSink,
+    ) -> Result<ChatResponse> {
+        let body = build_generate_content_body(&req);
+        let url = format!(
+            "{}/models/{}:streamGenerateContent?alt=sse",
+            self.base_url, req.model
+        );
+
+        let resp = self
+            .client
+            .post(url)
+            .header("x-goog-api-key", self.token.expose())
+            .json(&body)
+            .send_retried()
+            .await?;
+
+        stream_generate_content(resp, req.model, on_delta).await
+    }
+}
+
+/// Consume a `streamGenerateContent?alt=sse` response into one [`ChatResponse`], forwarding
+/// text as it arrives. Shared with the Code Assist (OAuth) adapter, which streams the same
+/// chunk shape inside its own envelope.
+pub(crate) async fn stream_generate_content(
+    resp: reqwest::Response,
+    model: String,
+    on_delta: DeltaSink,
+) -> Result<ChatResponse> {
+    use futures_util::StreamExt;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await?;
+        return Err(Error::ProviderStatus {
+            status: status.as_u16(),
+            body: crate::vault::redact(&text),
+        });
+    }
+
+    let mut assembly = GeminiStream::default();
+    let mut stream = resp.bytes_stream();
+    let mut buf = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        buf.push_str(&String::from_utf8_lossy(&chunk?));
+        while let Some(pos) = buf.find('\n') {
+            let line: String = buf.drain(..=pos).collect();
+            assembly.feed_line(line.trim_end(), on_delta.as_ref());
+        }
+    }
+
+    Ok(assembly.finish(model))
+}
+
+/// Incremental state for one streamed Gemini generation. Pure — fed SSE lines, no I/O.
+#[derive(Default)]
+pub(crate) struct GeminiStream {
+    content: String,
+    tool_calls: Vec<ToolCall>,
+    usage: Usage,
+}
+
+impl GeminiStream {
+    pub(crate) fn feed_line(&mut self, line: &str, on_delta: &(dyn Fn(&str, bool) + Send + Sync)) {
+        let Some(data) = line.strip_prefix("data: ") else {
+            return;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
+            return;
+        };
+
+        self.feed_value(&value, on_delta);
+    }
+
+    /// Fold one decoded chunk. Separate from `feed_line` because the Code Assist adapter
+    /// receives this same shape wrapped in a `response` envelope.
+    pub(crate) fn feed_value(
+        &mut self,
+        value: &serde_json::Value,
+        on_delta: &(dyn Fn(&str, bool) + Send + Sync),
+    ) {
+        for part in value["candidates"][0]["content"]["parts"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            if let Some(text) = part["text"].as_str() {
+                if !text.is_empty() {
+                    self.content.push_str(text);
+                    on_delta(text, false);
+                }
+            }
+
+            // Function calls arrive whole rather than as fragments.
+            if let Some(call) = part.get("functionCall").filter(|c| !c.is_null()) {
+                self.tool_calls.push(ToolCall {
+                    id: format!("call_{}", self.tool_calls.len()),
+                    kind: "function".to_string(),
+                    function: ToolCallFunction {
+                        name: call["name"].as_str().unwrap_or_default().to_string(),
+                        arguments: call["args"].to_string(),
+                    },
+                });
+            }
+        }
+
+        // Every chunk may restate the running totals; the last one wins. Absent stays absent.
+        if let Some(input) = value["usageMetadata"]["promptTokenCount"].as_u64() {
+            self.usage.input_tokens = Some(input);
+        }
+        if let Some(output) = value["usageMetadata"]["candidatesTokenCount"].as_u64() {
+            self.usage.output_tokens = Some(output);
+        }
+    }
+
+    pub(crate) fn finish(self, model: String) -> ChatResponse {
+        ChatResponse {
+            model,
+            content: self.content,
+            tool_calls: (!self.tool_calls.is_empty()).then_some(self.tool_calls),
+            usage: self.usage,
+        }
     }
 }
 
@@ -243,12 +375,8 @@ pub(crate) fn parse_generate_content_response(
         }
     }
     let usage = Usage {
-        input_tokens: value["usageMetadata"]["promptTokenCount"]
-            .as_u64()
-            .unwrap_or(0),
-        output_tokens: value["usageMetadata"]["candidatesTokenCount"]
-            .as_u64()
-            .unwrap_or(0),
+        input_tokens: value["usageMetadata"]["promptTokenCount"].as_u64(),
+        output_tokens: value["usageMetadata"]["candidatesTokenCount"].as_u64(),
         ..Default::default()
     };
     ChatResponse {

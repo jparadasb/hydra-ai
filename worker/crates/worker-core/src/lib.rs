@@ -17,6 +17,7 @@ pub mod limits;
 pub mod oauth;
 pub mod privacy;
 pub mod registration;
+pub mod retry;
 pub mod runtime;
 pub mod self_update;
 pub mod types;

@@ -8,6 +8,7 @@ use serde_json::json;
 
 use crate::adapter::{DeltaSink, ProviderAdapter};
 use crate::error::{Error, Result};
+use crate::retry::RetryExt;
 use crate::types::{ChatRequest, ChatResponse, ModelInfo, ToolCall, Usage};
 use crate::vault::Secret;
 
@@ -94,8 +95,8 @@ impl ProviderAdapter for OpenAICompatibleAdapter {
 
     fn estimate_cost(&self, usage: &Usage) -> Option<crate::types::CostEstimate> {
         let p = self.pricing.as_ref()?;
-        let usd = (usage.input_tokens as f64 / 1_000_000.0) * p.input_per_1m_usd
-            + (usage.output_tokens as f64 / 1_000_000.0) * p.output_per_1m_usd;
+        let usd = (usage.input() as f64 / 1_000_000.0) * p.input_per_1m_usd
+            + (usage.output() as f64 / 1_000_000.0) * p.output_per_1m_usd;
         Some(crate::types::CostEstimate { usd })
     }
 }
@@ -118,7 +119,7 @@ pub(crate) async fn oai_list_models(
     uses_external: bool,
 ) -> Result<Vec<ModelInfo>> {
     let resp = auth(client.get(format!("{base_url}/models")), bearer)
-        .send()
+        .send_retried()
         .await?;
     let value = parse_json(resp).await?;
     let caps: Vec<String> = capabilities.iter().map(|s| s.to_string()).collect();
@@ -147,7 +148,7 @@ pub(crate) async fn oai_validate(
     bearer: Option<&str>,
 ) -> Result<bool> {
     let resp = auth(client.get(format!("{base_url}/models")), bearer)
-        .send()
+        .send_retried()
         .await?;
     Ok(resp.status().is_success())
 }
@@ -185,7 +186,7 @@ pub(crate) async fn oai_chat(
     let body = chat_body(&req);
     let resp = auth(client.post(format!("{base_url}/chat/completions")), bearer)
         .json(&body)
-        .send()
+        .send_retried()
         .await?;
     let value = parse_json(resp).await?;
 
@@ -196,8 +197,8 @@ pub(crate) async fn oai_chat(
         .ok()
         .filter(|calls| !calls.is_empty());
     let usage = Usage {
-        input_tokens: value["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
-        output_tokens: value["usage"]["completion_tokens"].as_u64().unwrap_or(0),
+        input_tokens: value["usage"]["prompt_tokens"].as_u64(),
+        output_tokens: value["usage"]["completion_tokens"].as_u64(),
         ..Default::default()
     };
     Ok(ChatResponse {
@@ -227,7 +228,7 @@ pub(crate) async fn oai_chat_stream(
 
     let resp = auth(client.post(format!("{base_url}/chat/completions")), bearer)
         .json(&body)
-        .send()
+        .send_retried()
         .await?;
     let status = resp.status();
     if !status.is_success() {
@@ -281,8 +282,8 @@ impl StreamAssembly {
 
         // The usage chunk (empty `choices`) closes an include_usage stream.
         if let Some(u) = value.get("usage").filter(|u| !u.is_null()) {
-            self.usage.input_tokens = u["prompt_tokens"].as_u64().unwrap_or(0);
-            self.usage.output_tokens = u["completion_tokens"].as_u64().unwrap_or(0);
+            self.usage.input_tokens = u["prompt_tokens"].as_u64();
+            self.usage.output_tokens = u["completion_tokens"].as_u64();
         }
 
         let delta = &value["choices"][0]["delta"];
@@ -391,8 +392,8 @@ mod tests {
         let resp = a.finish("m".into());
         assert_eq!(resp.content, "Hello");
         assert_eq!(*deltas.lock().unwrap(), vec!["Hel", "lo"]);
-        assert_eq!(resp.usage.input_tokens, 7);
-        assert_eq!(resp.usage.output_tokens, 2);
+        assert_eq!(resp.usage.input_tokens, Some(7));
+        assert_eq!(resp.usage.output_tokens, Some(2));
         assert!(resp.tool_calls.is_none());
     }
 

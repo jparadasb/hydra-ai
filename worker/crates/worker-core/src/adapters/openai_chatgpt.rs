@@ -10,15 +10,18 @@
 //! base URL is overridable (`with_base_url` / `HYDRA_OPENAI_CHATGPT_BASE_URL`) so it can be
 //! corrected without a rebuild if the contract shifts.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
 use super::tools::{forced_function_name, function_defs};
-use crate::adapter::ProviderAdapter;
+use crate::adapter::{DeltaSink, ProviderAdapter};
 use crate::error::{Error, Result};
 use crate::oauth::{refresh_openai, OAuthTokens};
+use crate::retry::RetryExt;
 use crate::types::{ChatRequest, ChatResponse, ModelInfo, ToolCall, ToolCallFunction, Usage};
 
 const DEFAULT_BASE: &str = "https://chatgpt.com/backend-api/codex";
@@ -115,6 +118,29 @@ impl ProviderAdapter for ChatGptBackendAdapter {
     }
 
     async fn run_chat_completion(&self, req: ChatRequest) -> Result<ChatResponse> {
+        // This endpoint only speaks SSE, so even the non-streaming call consumes a stream —
+        // it just has nowhere to forward the fragments to.
+        self.run_responses(req, Arc::new(|_, _| {})).await
+    }
+
+    async fn run_chat_completion_streaming(
+        &self,
+        req: ChatRequest,
+        on_delta: DeltaSink,
+    ) -> Result<ChatResponse> {
+        self.run_responses(req, on_delta).await
+    }
+}
+
+impl ChatGptBackendAdapter {
+    /// One `POST /responses`, consumed as it arrives.
+    ///
+    /// This used to set `stream: true` and then `resp.text().await` — buffering the entire SSE
+    /// body into a single `String` before parsing it. Every streaming benefit was lost and the
+    /// whole response was held in memory at once.
+    async fn run_responses(&self, req: ChatRequest, on_delta: DeltaSink) -> Result<ChatResponse> {
+        use futures_util::StreamExt;
+
         let bearer = self.bearer().await?;
         let body = build_responses_body(&req);
 
@@ -130,17 +156,33 @@ impl ProviderAdapter for ChatGptBackendAdapter {
             request = request.header("chatgpt-account-id", acct.clone());
         }
 
-        let resp = request.send().await?;
+        let resp = request.send_retried().await?;
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
+            // An error body is small and is not SSE; read it whole to report it.
+            let text = resp.text().await.unwrap_or_default();
             return Err(Error::ProviderStatus {
                 status: status.as_u16(),
                 body: format!("chatgpt responses: {}", crate::vault::redact(&text)),
             });
         }
 
-        let (content, tool_calls, usage) = parse_responses_sse(&text);
+        let mut assembly = ResponsesStream::default();
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::new();
+
+        while let Some(chunk) = stream.next().await {
+            buf.push_str(&String::from_utf8_lossy(&chunk?));
+            while let Some(pos) = buf.find('\n') {
+                let line: String = buf.drain(..=pos).collect();
+                assembly.feed_line(line.trim_end(), on_delta.as_ref());
+            }
+        }
+        if !buf.trim().is_empty() {
+            assembly.feed_line(buf.trim(), on_delta.as_ref());
+        }
+
+        let (content, tool_calls, usage) = assembly.finish();
         Ok(ChatResponse {
             model: req.model,
             content,
@@ -226,60 +268,94 @@ fn build_responses_body(req: &ChatRequest) -> Value {
 /// Parse a Responses SSE stream (full body) into (text, tool calls, usage). Prefers the
 /// terminal `response.completed` event's output; falls back to accumulated
 /// `output_text.delta`s.
-fn parse_responses_sse(body: &str) -> (String, Option<Vec<ToolCall>>, Usage) {
-    let mut delta = String::new();
-    let mut final_text: Option<String> = None;
-    let mut tool_calls = Vec::new();
-    // The ChatGPT backend streams function calls as `output_item.done` events and leaves the
-    // terminal `response.completed.output` array empty; the platform Responses API does the
-    // opposite. Accumulate the streamed items and fall back to the completed output.
-    let mut streamed_calls = Vec::new();
-    let mut usage = Usage::default();
+/// Incremental state for one Responses SSE stream. Pure — fed lines, no I/O — so the same
+/// folding serves the live path and the whole-body parse the tests use.
+#[derive(Default)]
+struct ResponsesStream {
+    delta: String,
+    final_text: Option<String>,
+    tool_calls: Vec<ToolCall>,
+    /// The ChatGPT backend streams function calls as `output_item.done` events and leaves the
+    /// terminal `response.completed.output` array empty; the platform Responses API does the
+    /// opposite. Accumulate the streamed items and fall back to the completed output.
+    streamed_calls: Vec<ToolCall>,
+    usage: Usage,
+}
 
-    for line in body.lines() {
+impl ResponsesStream {
+    fn feed_line(&mut self, line: &str, on_delta: &(dyn Fn(&str, bool) + Send + Sync)) {
         let line = line.trim_start();
         let Some(payload) = line.strip_prefix("data:") else {
-            continue;
+            return;
         };
         let payload = payload.trim();
         if payload.is_empty() || payload == "[DONE]" {
-            continue;
+            return;
         }
         let Ok(ev) = serde_json::from_str::<Value>(payload) else {
-            continue;
+            return;
         };
 
         match ev["type"].as_str().unwrap_or_default() {
             "response.output_text.delta" => {
                 if let Some(d) = ev["delta"].as_str() {
-                    delta.push_str(d);
+                    if !d.is_empty() {
+                        self.delta.push_str(d);
+                        on_delta(d, false);
+                    }
+                }
+            }
+            // Reasoning summaries are shown live and never folded into the answer.
+            "response.reasoning_summary_text.delta" => {
+                if let Some(d) = ev["delta"].as_str() {
+                    if !d.is_empty() {
+                        on_delta(d, true);
+                    }
                 }
             }
             "response.output_item.done" => {
                 if ev["item"]["type"].as_str() == Some("function_call") {
-                    streamed_calls.push(tool_call_from_item(&ev["item"]));
+                    self.streamed_calls.push(tool_call_from_item(&ev["item"]));
                 }
             }
             "response.completed" => {
                 let response = &ev["response"];
-                final_text = extract_output_text(response).or(final_text.take());
-                tool_calls = extract_function_calls(response);
-                usage = extract_usage(&response["usage"]);
+                self.final_text = extract_output_text(response).or(self.final_text.take());
+                self.tool_calls = extract_function_calls(response);
+                self.usage = extract_usage(&response["usage"]);
             }
             _ => {}
         }
     }
 
-    // Prefer the terminal output (platform API); fall back to streamed items (ChatGPT backend).
-    if tool_calls.is_empty() {
-        tool_calls = streamed_calls;
+    fn finish(mut self) -> (String, Option<Vec<ToolCall>>, Usage) {
+        // Prefer the terminal output (platform API); fall back to streamed items (ChatGPT
+        // backend).
+        if self.tool_calls.is_empty() {
+            self.tool_calls = self.streamed_calls;
+        }
+        let content = self
+            .final_text
+            .filter(|s| !s.is_empty())
+            .unwrap_or(self.delta);
+        (
+            content,
+            (!self.tool_calls.is_empty()).then_some(self.tool_calls),
+            self.usage,
+        )
     }
-    let content = final_text.filter(|s| !s.is_empty()).unwrap_or(delta);
-    (
-        content,
-        (!tool_calls.is_empty()).then_some(tool_calls),
-        usage,
-    )
+}
+
+/// Fold a complete SSE body in one go. Used by the tests; the live path feeds the same
+/// assembly line by line as bytes arrive.
+#[cfg(test)]
+fn parse_responses_sse(body: &str) -> (String, Option<Vec<ToolCall>>, Usage) {
+    let mut assembly = ResponsesStream::default();
+    let sink = |_: &str, _: bool| {};
+    for line in body.lines() {
+        assembly.feed_line(line, &sink);
+    }
+    assembly.finish()
 }
 
 /// Pull `function_call` output items from a Responses `response` object, in OpenAI chat shape.
@@ -330,8 +406,8 @@ fn extract_output_text(response: &Value) -> Option<String> {
 
 fn extract_usage(u: &Value) -> Usage {
     Usage {
-        input_tokens: u["input_tokens"].as_u64().unwrap_or(0),
-        output_tokens: u["output_tokens"].as_u64().unwrap_or(0),
+        input_tokens: u["input_tokens"].as_u64(),
+        output_tokens: u["output_tokens"].as_u64(),
         ..Default::default()
     }
 }
@@ -366,8 +442,8 @@ mod tests {
         let (text, tool_calls, usage) = parse_responses_sse(sse);
         assert_eq!(text, "Hello there");
         assert!(tool_calls.is_none());
-        assert_eq!(usage.input_tokens, 4);
-        assert_eq!(usage.output_tokens, 2);
+        assert_eq!(usage.input_tokens, Some(4));
+        assert_eq!(usage.output_tokens, Some(2));
     }
 
     #[test]
@@ -397,7 +473,7 @@ mod tests {
         assert_eq!(calls[0].id, "call_HH");
         assert_eq!(calls[0].function.name, "get_weather");
         assert_eq!(calls[0].function.arguments, "{\"city\":\"Tokyo\"}");
-        assert_eq!(usage.output_tokens, 18);
+        assert_eq!(usage.output_tokens, Some(18));
     }
 
     #[test]
@@ -456,7 +532,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.content, "hey!");
-        assert_eq!(resp.usage.output_tokens, 1);
+        assert_eq!(resp.usage.output_tokens, Some(1));
     }
 
     #[tokio::test]
