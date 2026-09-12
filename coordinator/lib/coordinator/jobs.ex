@@ -9,15 +9,23 @@ defmodule Coordinator.Jobs do
   """
 
   import Ecto.Query, warn: false
+  require Logger
 
   alias Coordinator.{Job, Repo}
   alias Coordinator.Jobs.JobRecord
 
   @max_attempts 5
+  @retry_backoff_base_seconds 2
+  @retry_backoff_max_seconds 60
   @default_job_timeout_ms 300_000
   @default_lease_timeout_ms 60_000
 
-  @doc "Persist a new job and enqueue its lease assignment."
+  @doc """
+  Persist a new job and enqueue its lease assignment.
+
+  Both writes happen in one transaction. Separately, a failed `Oban.insert` left a `pending`
+  row that nothing would ever pick up — a job silently lost, visible only by reading the table.
+  """
   def enqueue(attrs) do
     id = attrs[:id] || attrs["id"] || gen_id()
 
@@ -28,14 +36,21 @@ defmodule Coordinator.Jobs do
       |> Map.put_new("status", "pending")
       |> Map.put_new("expires_at", deadline(@default_job_timeout_ms))
 
-    with {:ok, record} <- %JobRecord{} |> JobRecord.changeset(record_attrs) |> Repo.insert(),
-         {:ok, _oban} <- enqueue_lease(id) do
-      {:ok, record}
-    end
+    Repo.transaction(fn ->
+      with {:ok, record} <- %JobRecord{} |> JobRecord.changeset(record_attrs) |> Repo.insert(),
+           {:ok, _oban} <- enqueue_lease(id) do
+        record
+      else
+        {:error, reason} ->
+          Logger.error("job #{id} could not be enqueued: #{inspect(reason)}")
+          Repo.rollback(reason)
+      end
+    end)
   end
 
-  defp enqueue_lease(job_id) do
-    %{job_id: job_id} |> Coordinator.LeaseWorker.new() |> Oban.insert()
+  defp enqueue_lease(job_id, schedule_in_seconds \\ 0) do
+    opts = if schedule_in_seconds > 0, do: [schedule_in: schedule_in_seconds], else: []
+    %{job_id: job_id} |> Coordinator.LeaseWorker.new(opts) |> Oban.insert()
   end
 
   def get(id), do: Repo.get(JobRecord, id)
@@ -64,6 +79,16 @@ defmodule Coordinator.Jobs do
     }
   end
 
+  @doc """
+  Take a pending job for `worker_id` under a fresh lease generation.
+
+  Conditional on the row still being `pending`, so two nodes racing to lease the same job
+  cannot both win; the loser gets `{:error, :not_pending}` and does nothing.
+
+  This does **not** touch `attempts`. That counter bounds *failures* (see `requeue/1` and
+  lease reclamation) — counting successful handoffs here meant a job that failed five times
+  without ever being re-leased never spent a single attempt.
+  """
   def mark_leased(%JobRecord{} = r, worker_id, lease_id, renewable? \\ false) do
     {count, _} =
       from(j in JobRecord, where: j.id == ^r.id and j.status == "pending")
@@ -74,8 +99,7 @@ defmodule Coordinator.Jobs do
           lease_id: lease_id,
           lease_expires_at: lease_deadline(r, renewable?),
           updated_at: now()
-        ],
-        inc: [attempts: 1]
+        ]
       )
 
     if count == 1, do: {:ok, get(r.id)}, else: {:error, :not_pending}
@@ -168,6 +192,10 @@ defmodule Coordinator.Jobs do
       )
 
     if count == 1 do
+      Logger.warning(
+        "job #{record.id} failed after #{record.attempts} attempts (lease expired on #{record.worker_id})"
+      )
+
       Coordinator.WorkerChannel.cancel(record.worker_id, record.id, record.lease_id)
       broadcast_result(%{"job_id" => record.id, "status" => "error", "reason" => "lease_expired"})
     end
@@ -182,6 +210,8 @@ defmodule Coordinator.Jobs do
           from(j in JobRecord,
             where: j.id == ^record.id and j.status == "leased" and j.lease_id == ^record.lease_id
           )
+          # A lease that ran out is a failed attempt, and is counted as one — this is half of
+          # what `@max_attempts` is supposed to bound.
           |> Repo.update_all(
             set: [
               status: "pending",
@@ -189,11 +219,12 @@ defmodule Coordinator.Jobs do
               lease_id: nil,
               lease_expires_at: nil,
               updated_at: now()
-            ]
+            ],
+            inc: [attempts: 1]
           )
 
         if count == 1 do
-          case enqueue_lease(record.id) do
+          case enqueue_lease(record.id, retry_delay(record.attempts + 1)) do
             {:ok, _job} -> :reclaimed
             {:error, reason} -> Repo.rollback(reason)
           end
@@ -251,6 +282,10 @@ defmodule Coordinator.Jobs do
         update_status(record, "done", result)
 
       record.attempts >= @max_attempts ->
+        Logger.warning(
+          "job #{record.id} failed after #{record.attempts} attempts: #{inspect(result["reason"])}"
+        )
+
         update_status(record, "failed", result)
 
       true ->
@@ -283,7 +318,12 @@ defmodule Coordinator.Jobs do
     {:ok, get(record.id)}
   end
 
-  @doc "Reset a job to pending and re-enqueue its lease assignment."
+  @doc """
+  Reset a job to pending and re-enqueue its lease assignment after a failed attempt.
+
+  Spends one attempt and delays the retry. Without the delay, a worker that errors
+  deterministically on a job burned the whole retry budget in a fraction of a second.
+  """
   def requeue(%JobRecord{} = record) do
     {count, _} =
       from(j in JobRecord,
@@ -296,15 +336,39 @@ defmodule Coordinator.Jobs do
           lease_id: nil,
           lease_expires_at: nil,
           updated_at: now()
-        ]
+        ],
+        inc: [attempts: 1]
       )
 
     if count == 1 do
-      with {:ok, _} <- enqueue_lease(record.id), do: {:ok, get(record.id)}
+      requeue_lease(record.id)
     else
       {:ok, get(record.id)}
     end
   end
+
+  # Re-enqueue after an attempt was spent, backing off on the count the database now holds
+  # (not on a possibly stale in-memory snapshot).
+  defp requeue_lease(job_id) do
+    record = get(job_id)
+    delay = retry_delay(record.attempts)
+
+    Logger.info(
+      "job #{job_id} requeued, attempt #{record.attempts} of #{@max_attempts}, retrying in #{delay}s"
+    )
+
+    with {:ok, _} <- enqueue_lease(job_id, delay), do: {:ok, record}
+  end
+
+  # Exponential, capped: 2s, 4s, 8s, 16s, 32s, then 60s.
+  defp retry_delay(attempts) when is_integer(attempts) and attempts > 0 do
+    min(
+      @retry_backoff_base_seconds * Integer.pow(2, min(attempts - 1, 16)),
+      @retry_backoff_max_seconds
+    )
+  end
+
+  defp retry_delay(_), do: @retry_backoff_base_seconds
 
   def gen_id, do: "job-" <> (:crypto.strong_rand_bytes(8) |> Base.url_encode64(padding: false))
 
