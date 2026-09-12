@@ -649,6 +649,116 @@ defmodule Coordinator.ApiRouterTest do
     end
   end
 
+  describe "privacy" do
+    test "a request is public with external providers allowed unless it says otherwise" do
+      nonce = "privacy-default-#{System.unique_integer([:positive])}"
+
+      task = Task.async(fn -> post_chat(nonce) end)
+      job = wait_for(fn -> find_job(nonce) end)
+
+      assert job.privacy == "public"
+      assert job.allow_external_providers
+
+      Task.await(task, 5000)
+    end
+
+    test "x-hydra-privacy sets the job's level" do
+      for level <- ~w(public private sensitive local_only) do
+        nonce = "privacy-#{level}-#{System.unique_integer([:positive])}"
+
+        task = Task.async(fn -> post_chat(nonce, [{"x-hydra-privacy", level}]) end)
+        job = wait_for(fn -> find_job(nonce) end)
+
+        assert job.privacy == level
+        Task.await(task, 5000)
+      end
+    end
+
+    test "a privacy body field works for clients that cannot set headers" do
+      nonce = "privacy-body-#{System.unique_integer([:positive])}"
+
+      task = Task.async(fn -> post_chat(nonce, [], %{"privacy" => "private"}) end)
+      job = wait_for(fn -> find_job(nonce) end)
+
+      assert job.privacy == "private"
+      Task.await(task, 5000)
+    end
+
+    test "sensitive and local_only refuse to leave the machine regardless of what was asked" do
+      for level <- ~w(sensitive local_only) do
+        nonce = "privacy-noexternal-#{level}-#{System.unique_integer([:positive])}"
+
+        task =
+          Task.async(fn ->
+            post_chat(nonce, [{"x-hydra-privacy", level}, {"x-hydra-allow-external", "true"}])
+          end)
+
+        job = wait_for(fn -> find_job(nonce) end)
+
+        refute job.allow_external_providers
+        Task.await(task, 5000)
+      end
+    end
+
+    test "external providers can be declined for a public or private request" do
+      nonce = "privacy-optout-#{System.unique_integer([:positive])}"
+
+      task = Task.async(fn -> post_chat(nonce, [{"x-hydra-allow-external", "false"}]) end)
+      job = wait_for(fn -> find_job(nonce) end)
+
+      refute job.allow_external_providers
+      assert job.privacy == "public"
+      Task.await(task, 5000)
+    end
+
+    test "an unknown privacy level is a 400 that names the accepted ones" do
+      conn =
+        post(
+          "/v1/chat/completions",
+          %{"model" => "test-model", "messages" => [%{"role" => "user", "content" => "x"}]},
+          [{"x-hydra-privacy", "top-secret"}]
+        )
+
+      assert conn.status == 400
+      message = Jason.decode!(conn.resp_body)["error"]["message"]
+      assert message =~ "top-secret"
+      assert message =~ "local_only"
+    end
+
+    test "the Responses API honors the same header" do
+      nonce = "privacy-responses-#{System.unique_integer([:positive])}"
+
+      task =
+        Task.async(fn ->
+          post(
+            "/v1/responses",
+            %{"model" => "test-model", "input" => nonce, "timeout_ms" => 1000},
+            [{"x-hydra-privacy", "sensitive"}]
+          )
+        end)
+
+      job = wait_for(fn -> find_job(nonce) end)
+
+      assert job.privacy == "sensitive"
+      refute job.allow_external_providers
+      Task.await(task, 5000)
+    end
+
+    test "the OpenAPI spec documents the privacy header" do
+      conn =
+        conn(:get, "/openapi.json") |> Coordinator.ApiRouter.call(Coordinator.ApiRouter.init([]))
+
+      params =
+        Jason.decode!(conn.resp_body)["paths"]["/v1/chat/completions"]["post"]["parameters"]
+
+      privacy = Enum.find(params, &(&1["name"] == "x-hydra-privacy"))
+
+      assert privacy["in"] == "header"
+      assert privacy["schema"]["enum"] == ["public", "private", "sensitive", "local_only"]
+      assert privacy["schema"]["default"] == "public"
+    end
+  end
+
   describe "caller identity and quotas" do
     setup do
       Coordinator.RateLimiter.reset()
@@ -767,6 +877,29 @@ defmodule Coordinator.ApiRouterTest do
       wait_for(fn -> if Coordinator.RateLimiter.inflight({:ip, "127.0.0.1"}) == 0, do: :free end)
       assert post("/v1/chat/completions", %{"model" => "test-model"}).status == 400
     end
+  end
+
+  # Submit a chat completion carrying `nonce` as its only message, so the job it creates can be
+  # found among the other tests' jobs.
+  defp post_chat(nonce, headers \\ [], extra_body \\ %{}) do
+    body =
+      Map.merge(
+        %{
+          "model" => "test-model",
+          "messages" => [%{"role" => "user", "content" => nonce}],
+          "timeout_ms" => 1000
+        },
+        extra_body
+      )
+
+    post("/v1/chat/completions", body, headers)
+  end
+
+  # The job record carrying `nonce`, whichever endpoint created it.
+  defp find_job(nonce) do
+    from(j in JobRecord, order_by: [desc: j.inserted_at], limit: 50)
+    |> Repo.all()
+    |> Enum.find(fn j -> get_in(j.payload, ["messages", Access.at(0), "content"]) == nonce end)
   end
 
   # Poll a function until it returns non-nil (the just-created job appears).

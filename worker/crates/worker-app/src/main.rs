@@ -49,7 +49,8 @@ fn unlock(state: State<'_, AppState>, passphrase: String) -> Result<bool, String
 /// Note: which job privacy levels this worker *accepts* is set by the coordinator admin, not
 /// here, so it is not exposed. The worker-side privacy knob is `external_allowed_levels`: the
 /// privacy levels a job may be forwarded to an external provider at (local models are always
-/// allowed; sensitive/local_only never leave the machine).
+/// allowed). `sensitive` takes effect if the operator adds it; `local_only` never leaves the
+/// machine by definition and is rejected by `set_privacy`.
 #[tauri::command]
 fn get_config() -> serde_json::Value {
     let cfg = support::ensure_config();
@@ -173,16 +174,32 @@ fn remove_provider(state: State<'_, AppState>, name: String) -> Result<(), Strin
 
 /// Update the worker's routing: which privacy levels may be sent to an external provider, and
 /// the local/external preference. (Accepted job levels are admin-controlled and not set here.)
+///
+/// `local_only` is rejected rather than stored. It is the one level whose meaning is "never
+/// leaves this machine", so listing it here is a contradiction the enforcement layer would
+/// ignore — better to say so than to persist a setting that can never take effect.
 #[tauri::command]
 fn set_privacy(
     external_allowed_levels: Vec<String>,
     routing_preference: String,
 ) -> Result<(), String> {
     let mut cfg = support::ensure_config();
-    cfg.routing.external_provider_allowed_privacy_levels = external_allowed_levels
-        .iter()
-        .filter_map(|s| parse_level(s))
-        .collect();
+
+    let mut levels = Vec::with_capacity(external_allowed_levels.len());
+    for raw in &external_allowed_levels {
+        match parse_level(raw) {
+            Some(PrivacyLevel::LocalOnly) => {
+                return Err(
+                    "local_only jobs never use an external provider; remove it from the list"
+                        .into(),
+                );
+            }
+            Some(level) => levels.push(level),
+            None => return Err(format!("unknown privacy level: {raw}")),
+        }
+    }
+
+    cfg.routing.external_provider_allowed_privacy_levels = levels;
     cfg.routing.preference = parse_pref(&routing_preference)?;
     support::save_config(&cfg).map_err(|e| e.to_string())
 }

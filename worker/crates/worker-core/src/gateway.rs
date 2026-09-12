@@ -11,7 +11,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::adapter::{AdapterRegistry, DeltaSink, ProviderAdapter};
-use crate::config::{Preference, RoutingPolicy};
+use crate::config::{Preference, PrivacyPrefs, RoutingPolicy};
 use crate::limits::LimitGuard;
 use crate::privacy::{self, Decision};
 use crate::types::{ChatRequest, Job, JobResult, JobStatus, ModelInfo, ResultUsage, Usage};
@@ -26,6 +26,10 @@ struct Candidate {
 pub struct Gateway {
     registry: AdapterRegistry,
     policy: RoutingPolicy,
+    /// Which job privacy levels this worker accepts at all. Advertised at registration and
+    /// enforced here, so the coordinator's routing decision is not the only thing standing
+    /// between an operator's policy and the work that lands on their machine.
+    privacy_prefs: PrivacyPrefs,
     limits: LimitGuard,
     usage: Arc<dyn UsageStore>,
     /// Cached (adapter, model) catalog, refreshed via [`Gateway::refresh_catalog`].
@@ -37,12 +41,14 @@ impl Gateway {
     pub fn new(
         registry: AdapterRegistry,
         policy: RoutingPolicy,
+        privacy_prefs: PrivacyPrefs,
         limits: LimitGuard,
         usage: Arc<dyn UsageStore>,
     ) -> Self {
         Self {
             registry,
             policy,
+            privacy_prefs,
             limits,
             usage,
             catalog: RwLock::new(Vec::new()),
@@ -95,7 +101,13 @@ impl Gateway {
             .collect()
     }
 
-    fn candidates_for(&self, capability: &str) -> Vec<Candidate> {
+    /// Backends that can serve `capability`, narrowed to `requested_model` when the caller
+    /// named one, then constrained by routing policy and ordered by preference.
+    ///
+    /// The model constraint is applied *first* on purpose: the policy questions below ("is
+    /// there a local option?") are about the models that could actually serve this request,
+    /// not about the worker's catalog in general.
+    fn candidates_for(&self, capability: &str, requested_model: Option<&str>) -> Vec<Candidate> {
         let catalog = self.catalog.read().expect("catalog lock poisoned");
         let mut cands: Vec<Candidate> = catalog
             .iter()
@@ -107,6 +119,34 @@ impl Gateway {
                 })
             })
             .collect();
+
+        // A requested model is an exact constraint: silently substituting a different model
+        // violates the API contract.
+        if let Some(req) = requested_model {
+            cands.retain(|c| c.model.name == req);
+        }
+
+        // `LocalOnly` and `ExternalOnly` are constraints, not preferences. They used to be
+        // applied as a sort key, which meant `LocalOnly` still routed externally whenever no
+        // local candidate could serve the capability — the opposite of what it says.
+        match self.policy.preference {
+            Preference::LocalOnly => cands.retain(|c| !c.adapter.uses_external_provider()),
+            Preference::ExternalOnly => cands.retain(|c| c.adapter.uses_external_provider()),
+            Preference::PreferLocal | Preference::PreferExternal => {}
+        }
+
+        // `fallback_to_external_provider` was set and never read. It governs exactly this:
+        // whether a local-preferring worker may reach for an external provider when a local
+        // backend could have served the capability. With it off, external candidates are only
+        // considered when there is no local one at all — so a worker whose only backend is a
+        // provider still works, while a worker with a local model does not quietly send work
+        // off-machine.
+        if self.policy.preference == Preference::PreferLocal
+            && !self.policy.fallback_to_external_provider
+            && cands.iter().any(|c| !c.adapter.uses_external_provider())
+        {
+            cands.retain(|c| !c.adapter.uses_external_provider());
+        }
 
         // Order by routing preference. PreferLocal => local backends first.
         let local_first = matches!(
@@ -142,13 +182,16 @@ impl Gateway {
             usage: None,
         };
 
-        // 1. Pick the first privacy-compatible candidate. A requested model is an exact
-        //    constraint: silently substituting a different model violates the API contract.
-        let requested_model = job.payload.get("model").and_then(|v| v.as_str());
-        let mut candidates = self.candidates_for(&job.capability);
-        if let Some(req) = requested_model {
-            candidates.retain(|c| c.model.name == req);
+        // 0. Does this worker take work at this privacy level at all? Checked before any
+        //    backend is considered: refusing `sensitive` work is a statement about the machine,
+        //    not about which model would run it.
+        if let Decision::Deny(why) = privacy::accepts_level(job.privacy, &self.privacy_prefs) {
+            return reject(&format!("privacy_violation: {why}"));
         }
+
+        // 1. Pick the first privacy-compatible candidate.
+        let requested_model = job.payload.get("model").and_then(|v| v.as_str());
+        let candidates = self.candidates_for(&job.capability, requested_model);
 
         let mut chosen: Option<Candidate> = None;
         let mut last_denial: Option<&'static str> = None;

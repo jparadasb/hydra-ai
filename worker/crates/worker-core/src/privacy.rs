@@ -1,7 +1,7 @@
 //! Worker-side privacy enforcement. Defense in depth: the coordinator routes by these same
 //! rules, but the worker re-checks before dispatching every leased job.
 
-use crate::config::RoutingPolicy;
+use crate::config::{PrivacyPrefs, RoutingPolicy};
 use crate::types::PrivacyLevel;
 
 /// Decision about whether a job may run on a given backend.
@@ -11,12 +11,33 @@ pub enum Decision {
     Deny(&'static str),
 }
 
+/// Does this worker accept jobs at `privacy` at all?
+///
+/// `accepted_job_levels` is advertised to the coordinator at registration, and the coordinator
+/// routes by it — but the coordinator's word was previously final. An operator who configured
+/// their machine to take only `public` work got no enforcement on their own machine. This is
+/// the re-check, applied before any backend is chosen.
+pub fn accepts_level(privacy: PrivacyLevel, prefs: &PrivacyPrefs) -> Decision {
+    if prefs.accepted_job_levels.contains(&privacy) {
+        Decision::Allow
+    } else {
+        match privacy {
+            PrivacyLevel::Public => Decision::Deny("worker does not accept public jobs"),
+            PrivacyLevel::Private => Decision::Deny("worker does not accept private jobs"),
+            PrivacyLevel::Sensitive => Decision::Deny("worker does not accept sensitive jobs"),
+            PrivacyLevel::LocalOnly => Decision::Deny("worker does not accept local_only jobs"),
+        }
+    }
+}
+
 /// May a job of `privacy` (with `allow_external` set by the job owner) run on a backend
 /// where `uses_external_provider` indicates whether the call leaves the machine?
 ///
 /// Rules:
-/// * `local_only`  → external forbidden, always.
-/// * `sensitive`   → external forbidden by default.
+/// * `local_only`  → external forbidden, always. Not configurable: the name is the contract.
+/// * `sensitive`   → external only if the job owner permits it AND the operator has explicitly
+///   added `sensitive` to `external_provider_allowed_privacy_levels`. Not in the default
+///   policy, so the default answer is still no.
 /// * `private`     → external only if the job owner explicitly permits it AND the worker
 ///   policy allows external for that privacy level.
 /// * `public`      → any backend the worker policy allows.
@@ -35,7 +56,13 @@ pub fn check(
     match privacy {
         PrivacyLevel::LocalOnly => Decision::Deny("local_only job cannot use external provider"),
         PrivacyLevel::Sensitive => {
-            Decision::Deny("sensitive job cannot use external provider by default")
+            if !allow_external {
+                Decision::Deny("sensitive job did not permit external providers")
+            } else if !policy_allows_external(policy, PrivacyLevel::Sensitive) {
+                Decision::Deny("worker policy disallows external for sensitive jobs")
+            } else {
+                Decision::Allow
+            }
         }
         PrivacyLevel::Private => {
             if !allow_external {

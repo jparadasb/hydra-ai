@@ -30,8 +30,16 @@ const REFRESH_MARGIN_SECONDS: u64 = 60;
 const DEFAULT_MODELS: &[&str] = &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"];
 
 fn chatgpt_models() -> Vec<String> {
-    match std::env::var("HYDRA_OPENAI_CHATGPT_MODELS") {
-        Ok(v) if !v.trim().is_empty() => v
+    parse_model_list(std::env::var("HYDRA_OPENAI_CHATGPT_MODELS").ok().as_deref())
+}
+
+/// Split a `HYDRA_OPENAI_CHATGPT_MODELS` override, falling back to the built-in list.
+///
+/// Separate from the env lookup so it can be tested without writing a process-global variable
+/// that every concurrently running test in the binary would see.
+fn parse_model_list(override_value: Option<&str>) -> Vec<String> {
+    match override_value {
+        Some(v) if !v.trim().is_empty() => v
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
@@ -463,9 +471,22 @@ mod tests {
 
     #[test]
     fn model_list_env_override_splits_and_trims() {
-        std::env::set_var("HYDRA_OPENAI_CHATGPT_MODELS", " gpt-6 , gpt-6-mini ");
-        let models = chatgpt_models();
-        std::env::remove_var("HYDRA_OPENAI_CHATGPT_MODELS");
-        assert_eq!(models, vec!["gpt-6".to_string(), "gpt-6-mini".to_string()]);
+        // Parsed directly rather than through the environment: setting the variable made every
+        // other test in this binary that lists models see the override if it happened to run
+        // at the same moment.
+        assert_eq!(
+            parse_model_list(Some(" gpt-6 , gpt-6-mini ")),
+            vec!["gpt-6".to_string(), "gpt-6-mini".to_string()]
+        );
+    }
+
+    #[test]
+    fn model_list_falls_back_when_the_override_is_absent_or_blank() {
+        assert_eq!(parse_model_list(None), chatgpt_default_models());
+        assert_eq!(parse_model_list(Some("   ")), chatgpt_default_models());
+    }
+
+    fn chatgpt_default_models() -> Vec<String> {
+        DEFAULT_MODELS.iter().map(|s| s.to_string()).collect()
     }
 }

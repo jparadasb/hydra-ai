@@ -175,6 +175,7 @@ pub async fn build_and_run(params: RunParams, status: Arc<RunStatus>) -> Result<
     let gateway = Gateway::new(
         registry,
         cfg.routing.clone(),
+        cfg.privacy.clone(),
         LimitGuard::new(cfg.limits.clone()),
         usage,
     );

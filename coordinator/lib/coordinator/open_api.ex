@@ -118,7 +118,9 @@ defmodule Coordinator.OpenApi do
                 "Override the per-request wait (ms). Also settable via the " <>
                   "`timeout_ms` body field. Capped at 600000.",
               "schema" => %{"type" => "integer"}
-            }
+            },
+            privacy_header(),
+            allow_external_header()
           ],
           "requestBody" => %{
             "required" => true,
@@ -157,6 +159,7 @@ defmodule Coordinator.OpenApi do
           "description" =>
             "Codex-compatible Responses API endpoint. `input` accepts a string or an array of " <>
               "role/content message items. Streaming returns Responses SSE events.",
+          "parameters" => [privacy_header(), allow_external_header()],
           "requestBody" => %{
             "required" => true,
             "content" => %{"application/json" => %{"schema" => ref("ResponseRequest")}}
@@ -351,6 +354,36 @@ defmodule Coordinator.OpenApi do
   end
 
   defp ref(name), do: %{"$ref" => "#/components/schemas/#{name}"}
+
+  defp privacy_header do
+    %{
+      "name" => "x-hydra-privacy",
+      "in" => "header",
+      "required" => false,
+      "description" =>
+        "How strictly this request must be handled. Also settable via the `privacy` body " <>
+          "field. `sensitive` and `local_only` never leave the machine that runs them; " <>
+          "`private` leaves it only if external providers are permitted. Defaults to `public`.",
+      "schema" => %{
+        "type" => "string",
+        "enum" => ["public", "private", "sensitive", "local_only"],
+        "default" => "public"
+      }
+    }
+  end
+
+  defp allow_external_header do
+    %{
+      "name" => "x-hydra-allow-external",
+      "in" => "header",
+      "required" => false,
+      "description" =>
+        "Whether a `public` or `private` request may be served by an external provider. " <>
+          "Also settable via the `allow_external_providers` body field. Forced to false for " <>
+          "`sensitive` and `local_only`. Defaults to true.",
+      "schema" => %{"type" => "boolean", "default" => true}
+    }
+  end
 
   defp unauthorized, do: error_response("Missing or invalid API key")
 
