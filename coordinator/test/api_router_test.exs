@@ -587,6 +587,7 @@ defmodule Coordinator.ApiRouterTest do
 
       model = Enum.find(body["data"], &(&1["id"] == "llama3"))
       assert model["object"] == "model"
+      assert model["slug"] == "llama3"
       assert model["owned_by"] == "ollama"
     end
 
