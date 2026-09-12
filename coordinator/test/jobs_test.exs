@@ -93,15 +93,83 @@ defmodule Coordinator.JobsTest do
     assert Jobs.get(rec.id).status == "cancelled"
   end
 
-  test "mark_leased increments current database attempts, not a stale snapshot" do
+  test "mark_leased does not spend an attempt — attempts count failures, not handoffs" do
     register_local_worker("w-attempts")
+    {:ok, rec} = enqueue()
+
+    assert {:ok, leased} = Jobs.mark_leased(rec, "w-attempts", Jobs.gen_lease_id())
+    assert leased.attempts == 0
+  end
+
+  test "requeue counts the failure against the database's attempts, not a stale snapshot" do
     {:ok, stale} = enqueue()
 
     from(j in JobRecord, where: j.id == ^stale.id)
     |> Coordinator.Repo.update_all(set: [attempts: 3])
 
-    assert {:ok, leased} = Jobs.mark_leased(stale, "w-attempts", Jobs.gen_lease_id())
-    assert leased.attempts == 4
+    # `stale` still says 0; the increment must apply to the row, not to this snapshot.
+    assert {:ok, requeued} = Jobs.requeue(stale)
+    assert requeued.attempts == 4
+  end
+
+  test "a job that keeps failing exhausts exactly @max_attempts, counting each failure" do
+    {:ok, rec} = enqueue()
+
+    # Five failures: each re-queues and spends one attempt.
+    for expected <- 1..5 do
+      {:ok, _} = Jobs.complete(rec.id, %{"status" => "error", "reason" => "provider_error"})
+      job = Jobs.get(rec.id)
+      assert job.status == "pending"
+      assert job.attempts == expected
+    end
+
+    # The sixth result has no budget left.
+    {:ok, _} = Jobs.complete(rec.id, %{"status" => "error", "reason" => "provider_error"})
+    assert Jobs.get(rec.id).status == "failed"
+  end
+
+  test "a requeued job backs off instead of retrying immediately" do
+    {:ok, rec} = enqueue()
+    Coordinator.Repo.delete_all(Oban.Job)
+
+    {:ok, _} = Jobs.complete(rec.id, %{"status" => "error", "reason" => "provider_error"})
+
+    [oban_job] =
+      Coordinator.Repo.all(from(o in Oban.Job, where: o.worker == "Coordinator.LeaseWorker"))
+
+    assert DateTime.compare(oban_job.scheduled_at, DateTime.utc_now()) == :gt
+
+    # Later attempts wait longer: a worker erroring deterministically used to burn the whole
+    # budget in a fraction of a second.
+    from(j in JobRecord, where: j.id == ^rec.id)
+    |> Coordinator.Repo.update_all(set: [attempts: 3, status: "pending"])
+
+    Coordinator.Repo.delete_all(Oban.Job)
+    {:ok, _} = Jobs.complete(rec.id, %{"status" => "error", "reason" => "provider_error"})
+
+    [later] =
+      Coordinator.Repo.all(from(o in Oban.Job, where: o.worker == "Coordinator.LeaseWorker"))
+
+    assert DateTime.diff(later.scheduled_at, oban_job.scheduled_at, :second) > 0
+  end
+
+  test "enqueue is atomic: a failure leaves neither a job row nor a lease job" do
+    # The invariant: a `pending` row and its lease job are created together or not at all.
+    # Previously the two writes were independent, so a failure between them left a row nothing
+    # would ever pick up. This drives the insert side; the Oban side shares the transaction.
+    job_id = Jobs.gen_id()
+
+    assert {:error, _} =
+             Jobs.enqueue(%{
+               id: job_id,
+               # `capability` is required by the changeset; omitting it fails the insert.
+               privacy: "public",
+               allow_external_providers: true,
+               payload: %{"messages" => []}
+             })
+
+    refute Jobs.get(job_id)
+    refute_enqueued(worker: LeaseWorker, args: %{job_id: job_id})
   end
 
   test "lease heartbeat renews only the active generation" do
@@ -207,6 +275,24 @@ defmodule Coordinator.JobsTest do
     rec |> JobRecord.changeset(%{"attempts" => 5}) |> Coordinator.Repo.update!()
     {:ok, _} = Jobs.complete(rec.id, %{"status" => "error", "reason" => "provider_error"})
     assert Jobs.get(rec.id).status == "failed"
+  end
+
+  test "an expired lease spends an attempt, so a job stuck in leasing cannot retry forever" do
+    register_local_worker("w-lease-attempts")
+    {:ok, rec} = enqueue()
+    assert :ok = perform_job(LeaseWorker, %{job_id: rec.id})
+    assert Jobs.get(rec.id).attempts == 0
+
+    from(j in JobRecord, where: j.id == ^rec.id)
+    |> Coordinator.Repo.update_all(
+      set: [lease_expires_at: DateTime.add(DateTime.utc_now(), -1, :second)]
+    )
+
+    assert :ok = Jobs.reclaim_expired_leases()
+
+    reclaimed = Jobs.get(rec.id)
+    assert reclaimed.status == "pending"
+    assert reclaimed.attempts == 1
   end
 
   test "cancel marks active job terminal and ignores a late worker result" do
