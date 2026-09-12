@@ -220,4 +220,134 @@ defmodule Coordinator.JobsTest do
 
     assert Jobs.get(rec.id).status == "cancelled"
   end
+
+  defp release(job_id, worker_id, lease_id) do
+    from(j in JobRecord, where: j.id == ^job_id)
+    |> Coordinator.Repo.update_all(set: [worker_id: worker_id, lease_id: lease_id])
+  end
+
+  test "an OK result from a superseded lease generation cannot decide the job" do
+    register_local_worker("w-gen-ok")
+    {:ok, rec} = enqueue()
+    perform_job(LeaseWorker, %{job_id: rec.id})
+    stale_lease = Jobs.get(rec.id).lease_id
+    release(rec.id, "w-gen-2", "lease-gen-2")
+
+    assert {:error, :stale_lease} =
+             Jobs.complete(rec.id, %{
+               "status" => "ok",
+               "lease_id" => stale_lease,
+               "output" => %{"content" => "late"}
+             })
+
+    live = Jobs.get(rec.id)
+    assert live.status == "leased"
+    assert live.lease_id == "lease-gen-2"
+    assert live.result == nil
+  end
+
+  test "a non-OK result from a superseded lease generation does not requeue the live lease" do
+    register_local_worker("w-gen-err")
+    {:ok, rec} = enqueue()
+    perform_job(LeaseWorker, %{job_id: rec.id})
+    stale_lease = Jobs.get(rec.id).lease_id
+    release(rec.id, "w-gen-2", "lease-gen-2")
+    Coordinator.Repo.delete_all(Oban.Job)
+
+    assert {:error, :stale_lease} =
+             Jobs.complete(rec.id, %{
+               "status" => "error",
+               "reason" => "provider_error",
+               "lease_id" => stale_lease
+             })
+
+    live = Jobs.get(rec.id)
+    assert live.status == "leased"
+    assert live.worker_id == "w-gen-2"
+    assert live.lease_id == "lease-gen-2"
+    refute_enqueued(worker: LeaseWorker, args: %{job_id: rec.id})
+  end
+
+  test "a result carrying the current lease generation completes the job" do
+    register_local_worker("w-gen-live")
+    {:ok, rec} = enqueue()
+    perform_job(LeaseWorker, %{job_id: rec.id})
+    lease_id = Jobs.get(rec.id).lease_id
+
+    assert {:ok, _} =
+             Jobs.complete(rec.id, %{
+               "status" => "ok",
+               "lease_id" => lease_id,
+               "output" => %{"content" => "x"}
+             })
+
+    assert Jobs.get(rec.id).status == "done"
+  end
+
+  test "a reclaim that cannot re-queue leaves the worker's lease uncancelled" do
+    Phoenix.PubSub.subscribe(Coordinator.PubSub, "worker:w-rollback")
+    register_local_worker("w-rollback")
+    {:ok, rec} = enqueue()
+    perform_job(LeaseWorker, %{job_id: rec.id})
+
+    from(j in JobRecord, where: j.id == ^rec.id)
+    |> Coordinator.Repo.update_all(
+      set: [lease_expires_at: DateTime.add(DateTime.utc_now(), -1, :second)]
+    )
+
+    # Break the Oban table so `enqueue_lease/1` fails inside the reclaim transaction.
+    Coordinator.Repo.query!("ALTER TABLE oban_jobs RENAME TO oban_jobs_unavailable")
+
+    try do
+      catch_error(Jobs.reclaim_expired_leases())
+    after
+      Coordinator.Repo.query!("ALTER TABLE oban_jobs_unavailable RENAME TO oban_jobs")
+    end
+
+    refute_receive %Phoenix.Socket.Broadcast{event: "cancel"}, 100
+    assert Jobs.get(rec.id).status == "leased"
+    assert Jobs.get(rec.id).worker_id == "w-rollback"
+  end
+
+  test "a reclaim that re-queues cancels the superseded lease generation" do
+    Phoenix.PubSub.subscribe(Coordinator.PubSub, "worker:w-reclaim-cancel")
+    register_local_worker("w-reclaim-cancel")
+    {:ok, rec} = enqueue()
+    perform_job(LeaseWorker, %{job_id: rec.id})
+    lease_id = Jobs.get(rec.id).lease_id
+
+    from(j in JobRecord, where: j.id == ^rec.id)
+    |> Coordinator.Repo.update_all(
+      set: [lease_expires_at: DateTime.add(DateTime.utc_now(), -1, :second)]
+    )
+
+    assert :ok = Jobs.reclaim_expired_leases()
+
+    assert_receive %Phoenix.Socket.Broadcast{
+      event: "cancel",
+      payload: %{"job_id" => cancelled_job, "lease_id" => cancelled_lease}
+    }
+
+    assert cancelled_job == rec.id
+    assert cancelled_lease == lease_id
+    assert Jobs.get(rec.id).status == "pending"
+  end
+
+  test "a job without a caller deadline still gets a sweepable lease deadline" do
+    register_local_worker("w-no-deadline")
+
+    {:ok, rec} =
+      Jobs.enqueue(%{
+        capability: "text.extract_json",
+        privacy: "public",
+        allow_external_providers: true,
+        expires_at: nil,
+        payload: %{"messages" => []}
+      })
+
+    assert rec.expires_at == nil
+    assert {:ok, leased} = Jobs.mark_leased(rec, "w-no-deadline", Jobs.gen_lease_id())
+    assert leased.lease_expires_at != nil
+    assert DateTime.compare(leased.lease_expires_at, DateTime.utc_now()) == :gt
+  end
 end

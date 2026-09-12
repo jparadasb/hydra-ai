@@ -183,28 +183,52 @@ mod networked {
     use crate::types::Job;
 
     struct RunningJob {
-        lease_id: Option<String>,
         handle: tokio::task::JoinHandle<()>,
         heartbeat: tokio::task::JoinHandle<()>,
     }
 
+    /// `(job_id, lease_id)`: one entry per lease generation, mirroring the coordinator's
+    /// `active_leases`. Keying by `job_id` alone would make a re-lease silently abort the
+    /// live generation without ever acking it as cancelled.
+    type JobKey = (String, Option<String>);
+
+    /// Track a newly dispatched lease. Only an identical generation replaces (and aborts) an
+    /// existing entry; a different generation of the same job runs alongside it.
+    fn track_job(
+        jobs: &mut HashMap<JobKey, RunningJob>,
+        job_id: String,
+        lease_id: Option<String>,
+        handle: tokio::task::JoinHandle<()>,
+        heartbeat: tokio::task::JoinHandle<()>,
+    ) {
+        if let Some(old) = jobs.insert((job_id, lease_id), RunningJob { handle, heartbeat }) {
+            old.heartbeat.abort();
+            old.handle.abort();
+        }
+    }
+
+    /// Abort the named generation, or every generation of `job_id` when the coordinator sends
+    /// no `lease_id` (pre-generation coordinators).
     fn cancel_job(
-        jobs: &mut HashMap<String, RunningJob>,
+        jobs: &mut HashMap<JobKey, RunningJob>,
         job_id: &str,
         lease_id: Option<&str>,
     ) -> bool {
-        let matches = jobs
-            .get(job_id)
-            .is_some_and(|running| lease_id.is_none() || running.lease_id.as_deref() == lease_id);
+        let targets: Vec<JobKey> = jobs
+            .keys()
+            .filter(|(id, lease)| {
+                id == job_id && (lease_id.is_none() || lease.as_deref() == lease_id)
+            })
+            .cloned()
+            .collect();
 
-        if matches {
-            let running = jobs.remove(job_id).expect("running job disappeared");
+        for key in &targets {
+            let running = jobs.remove(key).expect("running job disappeared");
             running.heartbeat.abort();
             running.handle.abort();
-            true
-        } else {
-            false
         }
+
+        !targets.is_empty()
     }
 
     pub struct ClientConfig {
@@ -309,6 +333,9 @@ mod networked {
         let registration_template = config.registration.clone();
         let catalog_refresh = tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(30));
+            // A refresh slower than the interval must not queue missed ticks: bursting would
+            // re-probe and re-send `registration` back to back with no gap.
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             tick.tick().await;
             loop {
                 tick.tick().await;
@@ -333,7 +360,7 @@ mod networked {
         // spawned and acquires a permit inside its task, so the loop keeps reading the socket
         // (heartbeat replies, Close frames) while at most `max_parallel_jobs` run at once.
         let sem = Arc::new(Semaphore::new(config.max_parallel_jobs.max(1)));
-        let mut jobs = HashMap::<String, RunningJob>::new();
+        let mut jobs = HashMap::<JobKey, RunningJob>::new();
 
         // Reader loop: dispatch leased jobs to bounded background tasks; each replies with its
         // own result. Running jobs in tasks (not inline) lets a worker process many leases in
@@ -467,18 +494,7 @@ mod networked {
                         status.incr_jobs();
                         heartbeat_abort.abort();
                     });
-                    // Duplicate leases replace and abort older work for the same logical job.
-                    if let Some(old) = jobs.insert(
-                        job_id,
-                        RunningJob {
-                            lease_id,
-                            handle,
-                            heartbeat,
-                        },
-                    ) {
-                        old.heartbeat.abort();
-                        old.handle.abort();
-                    }
+                    track_job(&mut jobs, job_id, lease_id, handle, heartbeat);
                 }
             }
             if pm.event == "cancel" && pm.topic == topic {
@@ -519,21 +535,62 @@ mod networked {
         #[tokio::test]
         async fn cancel_aborts_and_removes_running_job() {
             let mut jobs = HashMap::new();
-            let handle = tokio::spawn(std::future::pending::<()>());
-            let heartbeat = tokio::spawn(std::future::pending::<()>());
-            jobs.insert(
+            track_job(
+                &mut jobs,
                 "job-1".to_string(),
-                RunningJob {
-                    lease_id: Some("lease-1".into()),
-                    handle,
-                    heartbeat,
-                },
+                Some("lease-1".to_string()),
+                tokio::spawn(std::future::pending::<()>()),
+                tokio::spawn(std::future::pending::<()>()),
             );
 
             assert!(!cancel_job(&mut jobs, "job-1", Some("stale-lease")));
             assert!(cancel_job(&mut jobs, "job-1", Some("lease-1")));
             assert!(jobs.is_empty());
             assert!(!cancel_job(&mut jobs, "job-1", Some("lease-1")));
+        }
+
+        #[tokio::test]
+        async fn a_new_lease_generation_leaves_the_previous_one_running() {
+            let mut jobs = HashMap::new();
+            track_job(
+                &mut jobs,
+                "job-1".to_string(),
+                Some("lease-1".to_string()),
+                tokio::spawn(std::future::pending::<()>()),
+                tokio::spawn(std::future::pending::<()>()),
+            );
+            track_job(
+                &mut jobs,
+                "job-1".to_string(),
+                Some("lease-2".to_string()),
+                tokio::spawn(std::future::pending::<()>()),
+                tokio::spawn(std::future::pending::<()>()),
+            );
+
+            // Both generations run: the coordinator tracks each lease separately, so the
+            // first must keep running until it is cancelled or finishes on its own.
+            assert_eq!(jobs.len(), 2);
+
+            assert!(cancel_job(&mut jobs, "job-1", Some("lease-1")));
+            assert_eq!(jobs.len(), 1);
+            assert!(jobs.contains_key(&("job-1".to_string(), Some("lease-2".to_string()))));
+        }
+
+        #[tokio::test]
+        async fn cancel_without_a_lease_id_stops_every_generation() {
+            let mut jobs = HashMap::new();
+            for lease in ["lease-1", "lease-2"] {
+                track_job(
+                    &mut jobs,
+                    "job-1".to_string(),
+                    Some(lease.to_string()),
+                    tokio::spawn(std::future::pending::<()>()),
+                    tokio::spawn(std::future::pending::<()>()),
+                );
+            }
+
+            assert!(cancel_job(&mut jobs, "job-1", None));
+            assert!(jobs.is_empty());
         }
     }
 }

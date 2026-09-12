@@ -146,4 +146,35 @@ defmodule Coordinator.WorkerSessionTest do
 
     assert {:error, :invalid_chunk} = WorkerSession.handle_chunk(%{"delta" => "no id"})
   end
+
+  test "a result from a superseded lease generation is neither persisted nor broadcast" do
+    alias Coordinator.Jobs
+    alias Coordinator.Jobs.JobRecord
+
+    {:ok, rec} =
+      Jobs.enqueue(%{
+        capability: "wsess.extract",
+        privacy: "public",
+        allow_external_providers: true,
+        payload: %{"messages" => []}
+      })
+
+    on_exit(fn -> Repo.delete_all(JobRecord) end)
+
+    {:ok, leased} = Jobs.mark_leased(rec, "w-gen-1", Jobs.gen_lease_id())
+    Repo.update_all(JobRecord, set: [lease_id: "lease-live", worker_id: "w-gen-2"])
+
+    Phoenix.PubSub.subscribe(Coordinator.PubSub, "job_results")
+
+    stale = %{
+      "job_id" => rec.id,
+      "lease_id" => leased.lease_id,
+      "status" => "ok",
+      "output" => %{"content" => "late"}
+    }
+
+    assert {:error, :stale_lease} = WorkerSession.handle_result(stale)
+    refute_receive {:job_result, %{"job_id" => _}}, 100
+    assert Jobs.get(rec.id).status == "leased"
+  end
 end

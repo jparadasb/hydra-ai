@@ -52,18 +52,24 @@ impl Gateway {
     /// Probe every adapter's models and cache the capability catalog. Call at startup and
     /// whenever providers/models change.
     pub async fn refresh_catalog(&self) {
+        // Probe every adapter at once: the timeout is per adapter, so a serial sweep would
+        // stall startup for `timeout × adapter count` against silent or firewalled hosts.
+        let probes = self.registry.iter().map(|adapter| async move {
+            let name = adapter.name().to_string();
+            let probe = tokio::time::timeout(Self::CATALOG_PROBE_TIMEOUT, adapter.list_models());
+            (name, probe.await)
+        });
+
         let mut catalog = Vec::new();
-        for adapter in self.registry.iter() {
-            match tokio::time::timeout(Self::CATALOG_PROBE_TIMEOUT, adapter.list_models()).await {
+        for (name, outcome) in futures_util::future::join_all(probes).await {
+            match outcome {
                 Ok(Ok(models)) => {
                     for m in models {
-                        catalog.push((adapter.name().to_string(), m));
+                        catalog.push((name.clone(), m));
                     }
                 }
-                Ok(Err(error)) => {
-                    eprintln!("Model catalog probe failed for {}: {error}", adapter.name())
-                }
-                Err(_) => eprintln!("Model catalog probe timed out for {}", adapter.name()),
+                Ok(Err(error)) => eprintln!("Model catalog probe failed for {name}: {error}"),
+                Err(_) => eprintln!("Model catalog probe timed out for {name}"),
             }
         }
         let mut current = self.catalog.write().expect("catalog lock poisoned");

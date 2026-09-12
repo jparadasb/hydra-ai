@@ -193,8 +193,6 @@ defmodule Coordinator.Jobs do
           )
 
         if count == 1 do
-          Coordinator.WorkerChannel.cancel(record.worker_id, record.id, record.lease_id)
-
           case enqueue_lease(record.id) do
             {:ok, _job} -> :reclaimed
             {:error, reason} -> Repo.rollback(reason)
@@ -205,8 +203,17 @@ defmodule Coordinator.Jobs do
       end)
 
     case result do
-      {:error, reason} -> {:error, reason}
-      _ -> :ok
+      # Cancel only once the reclaim is durable. Inside the transaction, a rollback would
+      # leave the row `leased` to a worker that has already aborted the inference.
+      {:ok, :reclaimed} ->
+        Coordinator.WorkerChannel.cancel(record.worker_id, record.id, record.lease_id)
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+
+      _ ->
+        :ok
     end
   end
 
@@ -226,19 +233,29 @@ defmodule Coordinator.Jobs do
         {:ok, record}
 
       record ->
-        status = result["status"]
+        # A result stamped with a superseded generation must not decide the job: its lease
+        # was already reclaimed and re-leased, and another worker is live on it.
+        if is_binary(result["lease_id"]) and result["lease_id"] != record.lease_id do
+          {:error, :stale_lease}
+        else
+          apply_result(record, result)
+        end
+    end
+  end
 
-        cond do
-          status == "ok" ->
-            update_status(record, "done", result)
+  defp apply_result(record, result) do
+    status = result["status"]
 
-          record.attempts >= @max_attempts ->
-            update_status(record, "failed", result)
+    cond do
+      status == "ok" ->
+        update_status(record, "done", result)
 
-          true ->
-            with {:ok, record} <- requeue(record) do
-              {:ok, record}
-            end
+      record.attempts >= @max_attempts ->
+        update_status(record, "failed", result)
+
+      true ->
+        with {:ok, record} <- requeue(record) do
+          {:ok, record}
         end
     end
   end
@@ -311,7 +328,15 @@ defmodule Coordinator.Jobs do
     end
   end
 
-  defp lease_deadline(%JobRecord{} = record, false), do: Map.get(record, :expires_at)
+  # A job with no caller deadline still needs a lease deadline: `reclaim_expired_leases`
+  # compares `lease_expires_at <= now`, and SQL never matches NULL, so a NULL deadline would
+  # strand the job in `leased` forever.
+  defp lease_deadline(%JobRecord{} = record, false) do
+    case Map.get(record, :expires_at) do
+      %DateTime{} = expires_at -> expires_at
+      _ -> deadline(lease_timeout_ms())
+    end
+  end
 
   defp broadcast_result(result) do
     Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {:job_result, result})
