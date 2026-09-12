@@ -11,11 +11,12 @@ use reqwest::Client;
 use serde_json::json;
 use tokio::sync::Mutex;
 
-use super::gemini::{build_generate_content_body, parse_generate_content_response};
+use super::gemini::{build_generate_content_body, parse_generate_content_response, GeminiStream};
 use super::openai_compatible::parse_json;
-use crate::adapter::ProviderAdapter;
-use crate::error::Result;
+use crate::adapter::{DeltaSink, ProviderAdapter};
+use crate::error::{Error, Result};
 use crate::oauth::{refresh_google, OAuthTokens};
+use crate::retry::RetryExt;
 use crate::types::{ChatRequest, ChatResponse, ModelInfo};
 
 const DEFAULT_BASE: &str = "https://cloudcode-pa.googleapis.com/v1internal";
@@ -76,13 +77,12 @@ impl ProviderAdapter for GeminiCodeAssistAdapter {
             .iter()
             .map(|name| ModelInfo {
                 name: (*name).to_string(),
-                capabilities: vec![
-                    "chat".into(),
-                    "text.extract_json".into(),
-                    "image.describe".into(),
-                ],
+                // Same as the API-key Gemini adapter: no `run_vision_task` here, so
+                // `image.describe` is not advertised. The advertisement has to match what this
+                // adapter can actually serve, not what the model could.
+                capabilities: vec!["chat".into(), "text.extract_json".into()],
                 context_length: None,
-                modalities: vec!["text".into(), "image".into()],
+                modalities: vec!["text".into()],
                 uses_external_provider: true,
             })
             .collect())
@@ -101,7 +101,7 @@ impl ProviderAdapter for GeminiCodeAssistAdapter {
                     "pluginType": "GEMINI"
                 }
             }))
-            .send()
+            .send_retried()
             .await?;
         Ok(resp.status().is_success())
     }
@@ -119,7 +119,7 @@ impl ProviderAdapter for GeminiCodeAssistAdapter {
             .post(format!("{}:generateContent", self.base_url))
             .bearer_auth(bearer)
             .json(&body)
-            .send()
+            .send_retried()
             .await?;
         let value = parse_json(resp).await?;
 
@@ -128,6 +128,64 @@ impl ProviderAdapter for GeminiCodeAssistAdapter {
             &value["response"],
             req.model,
         ))
+    }
+
+    /// Code Assist streams the same chunk shape as Gemini, each one wrapped in the same
+    /// `response` envelope the blocking call uses.
+    async fn run_chat_completion_streaming(
+        &self,
+        req: ChatRequest,
+        on_delta: DeltaSink,
+    ) -> Result<ChatResponse> {
+        use futures_util::StreamExt;
+
+        let bearer = self.bearer().await?;
+        let body = json!({
+            "model": req.model,
+            "project": self.project_id,
+            "request": build_generate_content_body(&req),
+        });
+
+        let resp = self
+            .client
+            .post(format!("{}:streamGenerateContent?alt=sse", self.base_url))
+            .bearer_auth(bearer)
+            .json(&body)
+            .send_retried()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await?;
+            return Err(Error::ProviderStatus {
+                status: status.as_u16(),
+                body: crate::vault::redact(&text),
+            });
+        }
+
+        let mut assembly = GeminiStream::default();
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::new();
+
+        while let Some(chunk) = stream.next().await {
+            buf.push_str(&String::from_utf8_lossy(&chunk?));
+            while let Some(pos) = buf.find('\n') {
+                let line: String = buf.drain(..=pos).collect();
+                let line = line.trim_end();
+
+                let Some(data) = line.strip_prefix("data: ") else {
+                    continue;
+                };
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
+                    continue;
+                };
+
+                // Unwrap the envelope, then fold the ordinary Gemini chunk inside it.
+                assembly.feed_value(&value["response"], on_delta.as_ref());
+            }
+        }
+
+        Ok(assembly.finish(req.model))
     }
 }
 
@@ -197,8 +255,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.content, "hello!");
-        assert_eq!(resp.usage.input_tokens, 3);
-        assert_eq!(resp.usage.output_tokens, 5);
+        assert_eq!(resp.usage.input_tokens, Some(3));
+        assert_eq!(resp.usage.output_tokens, Some(5));
     }
 
     #[tokio::test]

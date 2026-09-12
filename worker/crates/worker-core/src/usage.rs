@@ -69,8 +69,8 @@ fn apply(rec: &mut UsageRecord, o: &CallOutcome, period: &str) {
     rec.model = o.model.clone();
     rec.period = period.to_string();
     rec.requests += 1;
-    rec.input_tokens += o.usage.input_tokens;
-    rec.output_tokens += o.usage.output_tokens;
+    rec.input_tokens += o.usage.input();
+    rec.output_tokens += o.usage.output();
     rec.image_units += o.usage.image_units;
     rec.audio_units += o.usage.audio_units;
     rec.estimated_cost_usd += o.cost_usd;
@@ -172,8 +172,8 @@ mod tests {
             provider: "openai".into(),
             model: "gpt-4.1-mini".into(),
             usage: Usage {
-                input_tokens: 100,
-                output_tokens: 20,
+                input_tokens: Some(100),
+                output_tokens: Some(20),
                 ..Default::default()
             },
             cost_usd: cost,

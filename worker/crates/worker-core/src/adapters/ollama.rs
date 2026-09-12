@@ -7,8 +7,9 @@ use serde_json::json;
 
 use super::openai_compatible::parse_json;
 use super::tools::parse_arguments;
-use crate::adapter::ProviderAdapter;
-use crate::error::Result;
+use crate::adapter::{DeltaSink, ProviderAdapter};
+use crate::error::{Error, Result};
+use crate::retry::RetryExt;
 use crate::types::{ChatRequest, ChatResponse, ModelInfo, ToolCall, ToolCallFunction, Usage};
 
 pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:11434";
@@ -45,25 +46,28 @@ impl ProviderAdapter for OllamaAdapter {
         let resp = self
             .client
             .get(format!("{}/api/tags", self.endpoint))
-            .send()
+            .send_retried()
             .await?;
         let value = parse_json(resp).await?;
         let models = value["models"]
             .as_array()
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|m| m["name"].as_str())
-                    .map(|name| ModelInfo {
-                        name: name.to_string(),
-                        capabilities: vec![
-                            "chat".into(),
-                            "text.extract_json".into(),
-                            "ocr.extract".into(),
-                            "image.describe".into(),
-                        ],
-                        context_length: None,
-                        modalities: vec!["text".into()],
-                        uses_external_provider: false,
+                    .filter_map(|m| m["name"].as_str().map(|name| (name, m)))
+                    .map(|(name, m)| {
+                        let vision = is_vision_model(name, m);
+                        let mut modalities = vec!["text".to_string()];
+                        if vision {
+                            modalities.push("image".into());
+                        }
+
+                        ModelInfo {
+                            name: name.to_string(),
+                            capabilities: capabilities_for(vision),
+                            context_length: None,
+                            modalities,
+                            uses_external_provider: false,
+                        }
                     })
                     .collect()
             })
@@ -76,7 +80,7 @@ impl ProviderAdapter for OllamaAdapter {
         let resp = self
             .client
             .get(format!("{}/api/tags", self.endpoint))
-            .send()
+            .send_retried()
             .await?;
         Ok(resp.status().is_success())
     }
@@ -95,7 +99,7 @@ impl ProviderAdapter for OllamaAdapter {
             .client
             .post(format!("{}/api/chat", self.endpoint))
             .json(&body)
-            .send()
+            .send_retried()
             .await?;
         let value = parse_json(resp).await?;
 
@@ -105,8 +109,8 @@ impl ProviderAdapter for OllamaAdapter {
             .to_string();
         let tool_calls = parse_tool_calls(&value["message"]["tool_calls"]);
         let usage = Usage {
-            input_tokens: value["prompt_eval_count"].as_u64().unwrap_or(0),
-            output_tokens: value["eval_count"].as_u64().unwrap_or(0),
+            input_tokens: value["prompt_eval_count"].as_u64(),
+            output_tokens: value["eval_count"].as_u64(),
             ..Default::default()
         };
         Ok(ChatResponse {
@@ -115,6 +119,146 @@ impl ProviderAdapter for OllamaAdapter {
             tool_calls,
             usage,
         })
+    }
+
+    /// Ollama streams newline-delimited JSON rather than SSE: one object per line, each with a
+    /// `message.content` fragment, and a final `done` object carrying the token counts.
+    ///
+    /// Without this the trait default ran the blocking call, so a caller streaming against
+    /// Ollama waited in silence and then received the whole answer at once, with nothing
+    /// indicating the backend had not streamed.
+    async fn run_chat_completion_streaming(
+        &self,
+        req: ChatRequest,
+        on_delta: DeltaSink,
+    ) -> Result<ChatResponse> {
+        use futures_util::StreamExt;
+
+        let mut body = json!({
+            "model": req.model,
+            "messages": build_messages(&req),
+            "stream": true,
+        });
+        if let Some(tools) = &req.tools {
+            body["tools"] = tools.clone();
+        }
+
+        let resp = self
+            .client
+            .post(format!("{}/api/chat", self.endpoint))
+            .json(&body)
+            .send_retried()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await?;
+            return Err(Error::ProviderStatus {
+                status: status.as_u16(),
+                body: crate::vault::redact(&text),
+            });
+        }
+
+        let mut assembly = NdjsonAssembly::default();
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::new();
+
+        while let Some(chunk) = stream.next().await {
+            buf.push_str(&String::from_utf8_lossy(&chunk?));
+            while let Some(pos) = buf.find('\n') {
+                let line: String = buf.drain(..=pos).collect();
+                assembly.feed_line(line.trim_end(), on_delta.as_ref());
+            }
+        }
+        // A final object need not be newline-terminated.
+        if !buf.trim().is_empty() {
+            assembly.feed_line(buf.trim(), on_delta.as_ref());
+        }
+
+        Ok(assembly.finish(req.model))
+    }
+}
+
+/// Capabilities a model can actually serve. Every model used to advertise `ocr.extract` and
+/// `image.describe`, text-only ones included, so the coordinator routed vision jobs to models
+/// guaranteed to fail them.
+fn capabilities_for(vision: bool) -> Vec<String> {
+    let mut caps = vec!["chat".to_string(), "text.extract_json".to_string()];
+    if vision {
+        caps.push("ocr.extract".into());
+        caps.push("image.describe".into());
+    }
+    caps
+}
+
+/// Ollama reports a model's architecture families in `/api/tags`; a vision model carries a
+/// projector family such as `clip` or `mllama` alongside its text family. The name check is a
+/// fallback for older servers that omit `details`.
+fn is_vision_model(name: &str, meta: &serde_json::Value) -> bool {
+    const VISION_FAMILIES: [&str; 4] = ["clip", "mllama", "qwen2vl", "gemma3"];
+    const VISION_NAMES: [&str; 6] = [
+        "llava",
+        "bakllava",
+        "moondream",
+        "vision",
+        "-vl",
+        "minicpm-v",
+    ];
+
+    let families = meta["details"]["families"]
+        .as_array()
+        .map(|f| {
+            f.iter()
+                .filter_map(|v| v.as_str())
+                .any(|fam| VISION_FAMILIES.iter().any(|v| fam.eq_ignore_ascii_case(v)))
+        })
+        .unwrap_or(false);
+
+    let lowered = name.to_ascii_lowercase();
+    families || VISION_NAMES.iter().any(|v| lowered.contains(v))
+}
+
+/// Incremental state for one streamed Ollama completion. Pure — fed NDJSON lines, no I/O.
+#[derive(Default)]
+struct NdjsonAssembly {
+    content: String,
+    tool_calls: Option<Vec<ToolCall>>,
+    usage: Usage,
+}
+
+impl NdjsonAssembly {
+    fn feed_line(&mut self, line: &str, on_delta: &(dyn Fn(&str, bool) + Send + Sync)) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            return;
+        };
+
+        if let Some(text) = value["message"]["content"].as_str() {
+            if !text.is_empty() {
+                self.content.push_str(text);
+                on_delta(text, false);
+            }
+        }
+
+        // Ollama emits tool calls whole, on one object, rather than as fragments.
+        if let Some(calls) = parse_tool_calls(&value["message"]["tool_calls"]) {
+            self.tool_calls = Some(calls);
+        }
+
+        // The closing object carries the counts. Absent stays absent: a stream that ends
+        // without them reported nothing, which is not a measurement of zero.
+        if value["done"].as_bool() == Some(true) {
+            self.usage.input_tokens = value["prompt_eval_count"].as_u64();
+            self.usage.output_tokens = value["eval_count"].as_u64();
+        }
+    }
+
+    fn finish(self, model: String) -> ChatResponse {
+        ChatResponse {
+            model,
+            content: self.content,
+            tool_calls: self.tool_calls,
+            usage: self.usage,
+        }
     }
 }
 

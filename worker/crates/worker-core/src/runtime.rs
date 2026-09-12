@@ -97,7 +97,7 @@ pub async fn benchmark(adapter: &dyn ProviderAdapter, model: &str) -> BenchmarkR
         Ok(resp) => {
             let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
             let tps = if latency_ms > 0.0 {
-                resp.usage.output_tokens as f64 / (latency_ms / 1000.0)
+                resp.usage.output() as f64 / (latency_ms / 1000.0)
             } else {
                 0.0
             };
