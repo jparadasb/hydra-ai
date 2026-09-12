@@ -83,16 +83,25 @@ impl Gateway {
                         catalog.push((name.clone(), m));
                     }
                 }
-                Ok(Ok(Err(error))) => eprintln!("Model catalog probe failed for {name}: {error}"),
-                Ok(Err(_)) => eprintln!("Model catalog probe timed out for {name}"),
-                Err(_) => eprintln!("Model catalog probe panicked for {name}; skipping it"),
+                // Redacted: a probe failure carries the provider's response, which can echo
+                // the request — and therefore the credential that was on it.
+                Ok(Ok(Err(error))) => tracing::warn!(
+                    provider = %name,
+                    error = %crate::vault::redact(&error.to_string()),
+                    "model catalog probe failed"
+                ),
+                Ok(Err(_)) => tracing::warn!(provider = %name, "model catalog probe timed out"),
+                Err(_) => tracing::error!(
+                    provider = %name,
+                    "model catalog probe panicked; skipping this backend"
+                ),
             }
         }
         let mut current = self.catalog.write_recover();
         let changed = current.len() != catalog.len();
         *current = catalog;
         if changed {
-            eprintln!("Model catalog refreshed: {} model(s).", current.len());
+            tracing::info!(models = current.len(), "model catalog refreshed");
         }
     }
 

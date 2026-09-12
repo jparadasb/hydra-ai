@@ -238,6 +238,30 @@ collection; set the bearer token and go. Authenticate with a gateway key (below)
 provider secret. An upstream provider error (e.g. a rate limit) is passed through with its real
 status (`429`, …), not masked as a generic `502`.
 
+## Observability
+
+| Surface | Where |
+|---|---|
+| Metrics | `GET /metrics`, Prometheus text format |
+| Coordinator logs | stdout; JSON lines in prod (`Coordinator.LogFormatter`) |
+| Worker logs | stderr; `HYDRA_LOG` sets the level, `HYDRA_LOG_FORMAT=json` the format |
+
+`/metrics` is an operational surface, not part of the caller-facing API — it is on the same
+port for simplicity and an ingress should not route it publicly.
+
+What is measured: front-door requests, auth rejections, rate-limit and concurrency refusals,
+the job lifecycle (enqueued / leased / completed / requeued), **leases reclaimed after expiry**
+— the abandoned-worker signal — job duration from lease to result, connected workers, secret
+redactions, and the usual VM gauges.
+
+Coordinator log lines carry `job_id`, `worker_id`, `lease_id`, `peer_ip` and `attempts` as
+metadata, which the production formatter emits as JSON fields rather than as a trailing string,
+so a collector can filter on them.
+
+A headless worker should run with `HYDRA_LOG_FORMAT=json`. Until now it emitted nothing at all:
+the crate depended on `tracing` and never installed a subscriber, so every log statement in it
+was a no-op.
+
 ## Admin console (`/admin`)
 
 The coordinator serves an admin console alongside the front-door (GitHub-OAuth gated in prod,

@@ -39,6 +39,8 @@ defmodule Coordinator.Jobs do
     Repo.transaction(fn ->
       with {:ok, record} <- %JobRecord{} |> JobRecord.changeset(record_attrs) |> Repo.insert(),
            {:ok, _oban} <- enqueue_lease(id) do
+        Coordinator.Telemetry.emit([:hydra, :job, :enqueued], %{count: 1})
+        Logger.info("job enqueued", job_id: id, capability: record.capability)
         record
       else
         {:error, reason} ->
@@ -102,7 +104,15 @@ defmodule Coordinator.Jobs do
         ]
       )
 
-    if count == 1, do: {:ok, get(r.id)}, else: {:error, :not_pending}
+    if count == 1 do
+      Coordinator.Telemetry.emit([:hydra, :job, :leased], %{count: 1})
+      Logger.info("job leased", job_id: r.id, worker_id: worker_id, lease_id: lease_id)
+      {:ok, get(r.id)}
+    else
+      # Another node won the race for this job; it is already running somewhere.
+      Logger.debug("lease lost", job_id: r.id, worker_id: worker_id)
+      {:error, :not_pending}
+    end
   end
 
   def expired?(%JobRecord{} = record) do
@@ -192,8 +202,14 @@ defmodule Coordinator.Jobs do
       )
 
     if count == 1 do
-      Logger.warning(
-        "job #{record.id} failed after #{record.attempts} attempts (lease expired on #{record.worker_id})"
+      Coordinator.Telemetry.emit([:hydra, :lease, :reclaimed], %{count: 1}, %{outcome: "failed"})
+
+      # The abandoned-worker signal: a lease ran out with no result and the job has no budget
+      # left. This is what a wedged worker looks like from here.
+      Logger.warning("job failed after lease expiry",
+        job_id: record.id,
+        worker_id: record.worker_id,
+        attempts: record.attempts
       )
 
       Coordinator.WorkerChannel.cancel(record.worker_id, record.id, record.lease_id)
@@ -224,6 +240,19 @@ defmodule Coordinator.Jobs do
           )
 
         if count == 1 do
+          Coordinator.Telemetry.emit(
+            [:hydra, :lease, :reclaimed],
+            %{count: 1},
+            %{outcome: "requeued"}
+          )
+
+          Logger.warning("lease reclaimed and job requeued",
+            job_id: record.id,
+            worker_id: record.worker_id,
+            lease_id: record.lease_id,
+            attempts: record.attempts + 1
+          )
+
           case enqueue_lease(record.id, retry_delay(record.attempts + 1)) do
             {:ok, _job} -> :reclaimed
             {:error, reason} -> Repo.rollback(reason)
@@ -310,10 +339,31 @@ defmodule Coordinator.Jobs do
   end
 
   defp update_status(record, status, result) do
-    from(j in JobRecord,
-      where: j.id == ^record.id and j.status in ["pending", "leased"]
-    )
-    |> Repo.update_all(set: [status: status, result: result, updated_at: now()])
+    {count, _} =
+      from(j in JobRecord,
+        where: j.id == ^record.id and j.status in ["pending", "leased"]
+      )
+      |> Repo.update_all(set: [status: status, result: result, updated_at: now()])
+
+    if count == 1 do
+      Coordinator.Telemetry.emit([:hydra, :job, :completed], %{count: 1}, %{status: status})
+
+      Logger.info("job #{status}",
+        job_id: record.id,
+        worker_id: record.worker_id,
+        attempts: record.attempts,
+        reason: result["reason"]
+      )
+
+      # Lease to terminal result. `updated_at` was last written when the job was leased, so
+      # this is the worker's turnaround rather than the caller's total wait.
+      if record.status == "leased" and match?(%DateTime{}, record.updated_at) do
+        Coordinator.Telemetry.emit(
+          [:hydra, :job, :duration],
+          %{millisecond: DateTime.diff(now(), record.updated_at, :millisecond)}
+        )
+      end
+    end
 
     {:ok, get(record.id)}
   end
@@ -352,9 +402,13 @@ defmodule Coordinator.Jobs do
   defp requeue_lease(job_id) do
     record = get(job_id)
     delay = retry_delay(record.attempts)
+    Coordinator.Telemetry.emit([:hydra, :job, :requeued], %{count: 1})
 
-    Logger.info(
-      "job #{job_id} requeued, attempt #{record.attempts} of #{@max_attempts}, retrying in #{delay}s"
+    Logger.info("job requeued",
+      job_id: job_id,
+      attempt: record.attempts,
+      max_attempts: @max_attempts,
+      retry_in_seconds: delay
     )
 
     with {:ok, _} <- enqueue_lease(job_id, delay), do: {:ok, record}

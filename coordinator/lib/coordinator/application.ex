@@ -17,7 +17,9 @@ defmodule Coordinator.Application do
         {Phoenix.PubSub, name: Coordinator.PubSub},
         # Per-caller rate + concurrency ceilings for the HTTP front-door. Owns an ETS table,
         # so it must be up before the endpoint accepts a request.
-        Coordinator.RateLimiter
+        Coordinator.RateLimiter,
+        # Metrics reporter. Before the endpoint too, so the first request is counted.
+        Coordinator.Telemetry
       ] ++
         cluster_children() ++
         [

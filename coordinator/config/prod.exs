@@ -14,4 +14,11 @@ config :coordinator, :admin_auth_required, true
 # Repo connection + Oban engine are configured at runtime (config/runtime.exs), branching on
 # DB_ADAPTER (sqlite3 | postgres).
 
+# JSON lines in production: the metadata attached at each call site (job_id, worker_id,
+# lease_id, peer_ip) is only useful if a collector can read it as fields rather than having to
+# parse it back out of a sentence.
+config :logger, :default_formatter,
+  format: {Coordinator.LogFormatter, :format},
+  metadata: :all
+
 config :logger, level: :info

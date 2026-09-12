@@ -111,7 +111,8 @@ defmodule Coordinator.SecretGuard do
     {clean, count} = do_redact(value, 0)
 
     if count > 0 do
-      Logger.warning("SecretGuard redacted #{count} secret-shaped value(s) from a worker payload")
+      Coordinator.Telemetry.emit([:hydra, :secret_guard, :redacted], %{count: count})
+      Logger.warning("secret-shaped values redacted from a worker payload", redacted: count)
     end
 
     {clean, count}

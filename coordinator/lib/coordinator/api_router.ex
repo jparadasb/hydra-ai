@@ -49,6 +49,14 @@ defmodule Coordinator.ApiRouter do
   # Public API documentation. `/openapi.json` is an OpenAPI 3.0 spec (import it straight into
   # Postman: Import → Link → https://<host>/openapi.json), `/docs` renders it for humans. Both
   # are unauthenticated so the docs are discoverable without a key.
+  # Prometheus scrape. Deliberately not in the OpenAPI spec: this is an operational surface,
+  # not part of the caller-facing API, and an ingress should not route it publicly.
+  get "/metrics" do
+    conn
+    |> put_resp_content_type("text/plain")
+    |> send_resp(200, Coordinator.Telemetry.scrape())
+  end
+
   get "/openapi.json" do
     json(conn, 200, Coordinator.OpenApi.spec(server_url(conn)))
   end
@@ -987,6 +995,13 @@ defmodule Coordinator.ApiRouter do
           {:ok, caller}
 
         {:error, :rate_limited, retry_after} ->
+          Coordinator.Telemetry.emit([:hydra, :api, :rate_limited], %{count: 1}, %{kind: "rate"})
+
+          Logger.info("request rate limited",
+            caller: inspect(caller.key),
+            retry_after: retry_after
+          )
+
           {:error, 429, "rate limit exceeded, retry in #{retry_after}s", "rate_limit_error",
            [{"retry-after", Integer.to_string(retry_after)}]}
       end
@@ -1008,6 +1023,14 @@ defmodule Coordinator.ApiRouter do
         end
 
       {:error, :too_many_concurrent} ->
+        Coordinator.Telemetry.emit(
+          [:hydra, :api, :rate_limited],
+          %{count: 1},
+          %{kind: "concurrency"}
+        )
+
+        Logger.info("request refused at the concurrency cap", caller: inspect(caller.key))
+
         error(
           conn,
           429,
@@ -1047,15 +1070,30 @@ defmodule Coordinator.ApiRouter do
       :error ->
         cond do
           auth_required?() and is_nil(presented) ->
-            {:error, 401, "missing bearer token", "invalid_request_error", []}
+            reject_auth(conn, "missing_token", "missing bearer token")
 
           auth_required?() ->
-            {:error, 401, "invalid api key", "invalid_request_error", []}
+            reject_auth(conn, "invalid_key", "invalid api key")
 
           true ->
             {:ok, %{token_id: nil, key: {:ip, peer_ip(conn)}}}
         end
     end
+  end
+
+  # An auth failure was previously silent, so a misconfigured client and an attacker looked
+  # identical from outside: both produced nothing. The peer address is logged, never the
+  # credential that was presented.
+  defp reject_auth(conn, reason, message) do
+    Coordinator.Telemetry.emit([:hydra, :api, :auth, :rejected], %{count: 1}, %{reason: reason})
+
+    Logger.warning("front-door auth rejected",
+      reason: reason,
+      peer_ip: peer_ip(conn),
+      path: conn.request_path
+    )
+
+    {:error, 401, message, "invalid_request_error", []}
   end
 
   # `{:ok, token_id}` for an admin-issued key, `{:ok, nil}` for the env master key (valid, but

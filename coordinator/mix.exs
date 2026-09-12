@@ -44,7 +44,12 @@ defmodule Coordinator.MixProject do
       # HTTP client for the GitHub OAuth token exchange + user lookup (admin login only).
       {:req, "~> 0.5"},
       # Clusters the coordinator's BEAM nodes so >1 replica shares worker presence + PubSub.
-      {:libcluster, "~> 3.4"}
+      {:libcluster, "~> 3.4"},
+      # Metrics. `telemetry_metrics` defines them; the Prometheus core renders the scrape
+      # endpoint without pulling in a second HTTP server.
+      {:telemetry_metrics, "~> 1.0"},
+      {:telemetry_metrics_prometheus_core, "~> 1.1"},
+      {:telemetry_poller, "~> 1.0"}
     ]
   end
 end

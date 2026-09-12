@@ -176,8 +176,6 @@ defmodule Coordinator.WorkerChannel do
     end
   end
 
-  defp now_ms, do: System.monotonic_time(:millisecond)
-
   # A worker may take itself out of rotation; it may not tell us how fast it is. Latency is
   # measured here (lease out -> result in), so `avg_latency_ms` in this payload is ignored.
   def handle_in("signals", payload, socket) do
@@ -187,6 +185,8 @@ defmodule Coordinator.WorkerChannel do
     WorkerRegistry.update(self(), worker)
     {:reply, :ok, assign(socket, :worker, worker)}
   end
+
+  defp now_ms, do: System.monotonic_time(:millisecond)
 
   @impl true
   def terminate(_reason, socket) do
@@ -221,7 +221,7 @@ defmodule Coordinator.WorkerChannel do
     )
   end
 
-  defp finish_job(socket, job_id, outcome \\ :timeout) do
+  defp finish_job(socket, job_id, outcome) do
     socket.assigns.active_leases
     |> Map.keys()
     |> Enum.filter(fn {id, _lease_id} -> id == job_id end)
