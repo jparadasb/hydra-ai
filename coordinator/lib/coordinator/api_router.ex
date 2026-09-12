@@ -124,6 +124,7 @@ defmodule Coordinator.ApiRouter do
           ],
           "shell_type" => "unified_exec",
           "visibility" => "list",
+          "supported_in_api" => true,
           "object" => "model",
           "created" => created,
           "owned_by" => worker.provider_name || "hydra"
