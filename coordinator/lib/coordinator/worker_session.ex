@@ -19,7 +19,7 @@ defmodule Coordinator.WorkerSession do
   that tries to push a token is refused, never registered.
   """
 
-  alias Coordinator.{SecretGuard, Worker}
+  alias Coordinator.{Jobs, SecretGuard, Worker}
 
   @doc """
   Handle a worker's registration. Rejects any payload carrying secret-shaped data, then
@@ -64,7 +64,8 @@ defmodule Coordinator.WorkerSession do
 
   @doc """
   Handle a normalized job result from a worker. Broadcasts the (sanitized, secret-free)
-  result on the `"job_results"` PubSub topic so schedulers/tests can observe completions.
+  result on the job's own `"job_results:<job_id>"` PubSub topic so the waiting caller (and
+  schedulers/tests) observe the completion without seeing anyone else's.
   A result carrying a superseded `lease_id` is rejected (`{:error, :stale_lease}`) and never
   broadcast — the job has been re-leased and a live generation owns its outcome.
 
@@ -83,7 +84,12 @@ defmodule Coordinator.WorkerSession do
             {:error, :stale_lease}
 
           _ ->
-            Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {:job_result, clean})
+            Phoenix.PubSub.broadcast(
+              Coordinator.PubSub,
+              Jobs.result_topic(clean["job_id"]),
+              {:job_result, clean}
+            )
+
             {:ok, clean}
         end
 
@@ -114,7 +120,7 @@ defmodule Coordinator.WorkerSession do
 
   # Record the result against the durable job, if it is one we are tracking.
   defp persist_result(%{"job_id" => job_id} = result) when is_binary(job_id) do
-    Coordinator.Jobs.complete(job_id, result)
+    Jobs.complete(job_id, result)
   rescue
     # The worker may report a result for a job we don't persist (e.g. ad-hoc). Don't crash
     # the channel over it.
