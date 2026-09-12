@@ -115,7 +115,13 @@ defmodule Coordinator.ApiRouter do
           # Keep it identical to the public model id for OpenAI-compatible clients.
           "slug" => model.name,
           "display_name" => model.name,
-          "supported_reasoning_levels" => ["low", "medium", "high"],
+          "description" => "Hydra model #{model.name}",
+          "default_reasoning_level" => "medium",
+          "supported_reasoning_levels" => [
+            %{"effort" => "low", "description" => "Fast responses with lighter reasoning"},
+            %{"effort" => "medium", "description" => "Balances speed and reasoning depth"},
+            %{"effort" => "high", "description" => "Deeper reasoning for difficult tasks"}
+          ],
           "object" => "model",
           "created" => created,
           "owned_by" => worker.provider_name || "hydra"
