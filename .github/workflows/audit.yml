@@ -46,9 +46,19 @@ jobs:
 
       # The desktop crate has its own lockfile and is excluded from the workspace, so the
       # sweep above does not cover it.
+      #
+      # Two ignores, both quick-xml, both currently unfixable from here: it is pinned
+      # transitively through plist <- tauri-utils <- tauri-build, and `cargo update -p
+      # quick-xml` resolves to no newer semver-compatible version. It is reached as a *build*
+      # dependency of the Tauri bundler rather than at runtime. Dependabot watches this
+      # lockfile, so these clear themselves when Tauri bumps plist — at which point the
+      # ignores should be deleted rather than left to rot.
       - name: Audit the desktop crate
         working-directory: worker/crates/worker-app
-        run: cargo audit
+        run: |
+          cargo audit \
+            --ignore RUSTSEC-2026-0194 \
+            --ignore RUSTSEC-2026-0195
 
   hex:
     runs-on: ubuntu-latest
