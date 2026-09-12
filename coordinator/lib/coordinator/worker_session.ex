@@ -26,9 +26,9 @@ defmodule Coordinator.WorkerSession do
 
   @doc """
   Handle a worker's registration. Rejects any payload carrying secret-shaped data, then
-  sanitizes (belt and suspenders), overrides the declared privacy levels with the admin
-  grant, and returns the built `Coordinator.Worker` snapshot. The caller (the channel
-  process) tracks it in `Coordinator.Presence`.
+  sanitizes (belt and suspenders), overrides the worker's self-declared policy with the admin
+  grant, and returns the built `Coordinator.Worker` snapshot. The caller (the channel process)
+  tracks it in `Coordinator.Presence`.
   """
   def handle_register(payload) do
     with :ok <- SecretGuard.verify(payload),
@@ -36,25 +36,30 @@ defmodule Coordinator.WorkerSession do
       worker =
         payload
         |> SecretGuard.sanitize()
-        |> apply_admin_privacy()
+        |> apply_admin_policy()
         |> Worker.from_registration()
 
       {:ok, worker}
     end
   end
 
-  # Privacy acceptance is decided by the admin (`Coordinator.WorkerPolicies`), not the
-  # worker: whatever levels the registration declares are replaced with the admin-granted
-  # ones (public-only until an admin raises it).
-  defp apply_admin_privacy(%{"worker_id" => worker_id} = payload) do
+  # Both halves of a worker's routing policy are the admin's to set (`Coordinator.WorkerPolicies`),
+  # not the worker's: whatever the registration declares is replaced.
+  #
+  #   * privacy levels — public-only until an admin raises it
+  #   * trust level — untrusted until an admin raises it. The router pays a -20 score bonus for
+  #     "trusted", so a worker naming its own trust won every routing decision against honest
+  #     workers.
+  defp apply_admin_policy(%{"worker_id" => worker_id} = payload) do
     levels = Coordinator.WorkerPolicies.accepted_levels(worker_id)
 
-    Map.update(
-      payload,
+    payload
+    |> Map.update(
       "privacy",
       %{"accepted_job_levels" => levels},
       &Map.put(&1, "accepted_job_levels", levels)
     )
+    |> Map.put("trust_level", Coordinator.WorkerPolicies.trust_level(worker_id))
   end
 
   @doc """

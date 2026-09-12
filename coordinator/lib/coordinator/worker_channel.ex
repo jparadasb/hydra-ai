@@ -14,7 +14,7 @@ defmodule Coordinator.WorkerChannel do
   use Phoenix.Channel
   require Logger
 
-  alias Coordinator.{Jobs, WorkerRegistry, WorkerSession}
+  alias Coordinator.{Jobs, WorkerRegistry, WorkerSession, WorkerSignals}
 
   # Intercept job lifecycle pushes so channel-owned inflight stays accurate.
   intercept(["job", "cancel"])
@@ -40,7 +40,10 @@ defmodule Coordinator.WorkerChannel do
              socket
              |> assign(:worker_id, worker.worker_id)
              |> assign(:worker, worker)
-             |> assign(:active_leases, MapSet.new())}
+             # lease -> when it went out, so the coordinator can measure how long the worker
+             # took rather than asking the worker how fast it is.
+             |> assign(:active_leases, %{})
+             |> assign(:completions, [])}
 
           {:error, reason} ->
             {:error, %{reason: to_string(reason)}}
@@ -65,9 +68,16 @@ defmodule Coordinator.WorkerChannel do
     {:noreply, assign(socket, :worker, worker)}
   end
 
+  # Admin changed this worker's routing trust (from Coordinator.WorkerPolicies).
+  def handle_info({:set_trust_level, trust}, socket) do
+    worker = %{socket.assigns.worker | trust_level: trust}
+    WorkerRegistry.update(self(), worker)
+    {:noreply, assign(socket, :worker, worker)}
+  end
+
   def handle_info(_msg, socket), do: {:noreply, socket}
 
-  # Forward the leased job to the worker and count it as inflight.
+  # Forward the leased job to the worker, count it as inflight, and start its clock.
   @impl true
   def handle_out("job", payload, socket) do
     push(socket, "job", payload)
@@ -75,7 +85,11 @@ defmodule Coordinator.WorkerChannel do
     WorkerRegistry.update(self(), worker)
 
     active_leases =
-      MapSet.put(socket.assigns.active_leases, {payload["job_id"], payload["lease_id"]})
+      Map.put(
+        socket.assigns.active_leases,
+        {payload["job_id"], payload["lease_id"]},
+        now_ms()
+      )
 
     {:noreply, socket |> assign(:worker, worker) |> assign(:active_leases, active_leases)}
   end
@@ -162,14 +176,13 @@ defmodule Coordinator.WorkerChannel do
     end
   end
 
+  defp now_ms, do: System.monotonic_time(:millisecond)
+
+  # A worker may take itself out of rotation; it may not tell us how fast it is. Latency is
+  # measured here (lease out -> result in), so `avg_latency_ms` in this payload is ignored.
   def handle_in("signals", payload, socket) do
     w = socket.assigns.worker
-
-    worker = %{
-      w
-      | avg_latency_ms: Map.get(payload, "avg_latency_ms", w.avg_latency_ms),
-        available: Map.get(payload, "available", w.available)
-    }
+    worker = %{w | available: Map.get(payload, "available", w.available)}
 
     WorkerRegistry.update(self(), worker)
     {:reply, :ok, assign(socket, :worker, worker)}
@@ -208,35 +221,62 @@ defmodule Coordinator.WorkerChannel do
     )
   end
 
-  defp finish_job(socket, job_id) do
+  defp finish_job(socket, job_id, outcome \\ :timeout) do
     socket.assigns.active_leases
+    |> Map.keys()
     |> Enum.filter(fn {id, _lease_id} -> id == job_id end)
     |> Enum.reduce(socket, fn {_id, lease_id}, current ->
-      finish_lease(current, job_id, lease_id)
+      finish_lease(current, job_id, lease_id, outcome)
     end)
   end
 
-  defp finish_result(socket, %{"job_id" => job_id, "lease_id" => lease_id})
+  defp finish_result(socket, %{"job_id" => job_id, "lease_id" => lease_id} = payload)
        when is_binary(job_id) and is_binary(lease_id),
-       do: finish_lease(socket, job_id, lease_id)
+       do: finish_lease(socket, job_id, lease_id, WorkerSignals.outcome(payload))
 
-  defp finish_result(socket, %{"job_id" => job_id}) when is_binary(job_id),
-    do: finish_job(socket, job_id)
+  defp finish_result(socket, %{"job_id" => job_id} = payload) when is_binary(job_id),
+    do: finish_job(socket, job_id, WorkerSignals.outcome(payload))
 
   defp finish_result(socket, _payload), do: socket
 
-  defp finish_lease(socket, job_id, lease_id) do
+  # A lease that ends without a result — a cancellation, or a worker that went away — counts
+  # as the worker failing to deliver, but carries no latency sample: the elapsed time measures
+  # how long we waited, not how fast it is.
+  defp finish_lease(socket, job_id, lease_id),
+    do: finish_lease(socket, job_id, lease_id, :timeout)
+
+  defp finish_lease(socket, job_id, lease_id, outcome) do
     lease = {job_id, lease_id}
 
-    if MapSet.member?(socket.assigns.active_leases, lease) do
-      worker = %{socket.assigns.worker | inflight: max(socket.assigns.worker.inflight - 1, 0)}
-      WorkerRegistry.update(self(), worker)
+    case Map.pop(socket.assigns.active_leases, lease) do
+      {nil, _} ->
+        socket
 
-      socket
-      |> assign(:worker, worker)
-      |> assign(:active_leases, MapSet.delete(socket.assigns.active_leases, lease))
-    else
-      socket
+      {started_at, remaining} ->
+        now = now_ms()
+        w = socket.assigns.worker
+        completions = WorkerSignals.record_completion(socket.assigns.completions, now)
+
+        worker = %{
+          w
+          | inflight: max(w.inflight - 1, 0),
+            avg_latency_ms: latency_for(w, outcome, now - started_at),
+            requests_last_hour: WorkerSignals.requests_in_window(completions, now),
+            recent_failures: WorkerSignals.record_outcome(w.recent_failures, outcome)
+        }
+
+        WorkerRegistry.update(self(), worker)
+
+        socket
+        |> assign(:worker, worker)
+        |> assign(:active_leases, remaining)
+        |> assign(:completions, completions)
     end
   end
+
+  # Only a delivered result says anything about throughput.
+  defp latency_for(worker, :timeout, _elapsed), do: worker.avg_latency_ms
+
+  defp latency_for(worker, _outcome, elapsed),
+    do: WorkerSignals.observe_latency(worker.avg_latency_ms, elapsed)
 end

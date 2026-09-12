@@ -1,7 +1,8 @@
 defmodule Coordinator.Web.WorkerController do
   @moduledoc """
   Admin console for enrolled workers (`worker_keys`): grant the job privacy levels each
-  worker may accept (`Coordinator.WorkerPolicies`) and revoke/restore its device key.
+  worker may accept and its routing trust (`Coordinator.WorkerPolicies`), and revoke/restore
+  its device key.
   Uses the shared admin shell (`Coordinator.Web.AdminLayout`) for theme, nav, and flashes.
   """
   use Phoenix.Controller, formats: [:html]
@@ -32,6 +33,20 @@ defmodule Coordinator.Web.WorkerController do
     |> redirect(to: "/admin/workers")
   end
 
+  @doc """
+  Set a worker's routing trust. Trust is worth a scoring bonus, so like privacy acceptance it
+  is the admin's to grant — a worker's own claim is ignored.
+  """
+  def trust(conn, %{"id" => worker_id, "trust_level" => trust}) do
+    if trust in WorkerKey.trust_levels() do
+      WorkerPolicies.set_trust_level(worker_id, trust)
+      put_flash(conn, :info, "Trust for #{worker_id} set to: #{trust}.")
+    else
+      put_flash(conn, :error, "Unknown trust level: #{trust}.")
+    end
+    |> redirect(to: "/admin/workers")
+  end
+
   def revoke(conn, %{"id" => worker_id}) do
     DeviceAuth.revoke(worker_id)
 
@@ -55,9 +70,9 @@ defmodule Coordinator.Web.WorkerController do
 
     body = """
     <h1>Workers</h1>
-    <p class="lead">Privacy acceptance is granted here, per worker. Workers start public-only;
-    whatever a worker declares for itself is ignored. Changes apply to connected workers
-    immediately.</p>
+    <p class="lead">Privacy acceptance and routing trust are granted here, per worker. Workers
+    start public-only and untrusted; whatever a worker declares for itself is ignored. Changes
+    apply to connected workers immediately.</p>
 
     <div class="table-wrap">
       <table>
@@ -89,7 +104,7 @@ defmodule Coordinator.Web.WorkerController do
       <tr>
         <td><code>#{esc(key.worker_id)}</code><br>#{presence}</td>
         <td><span class="muted">first #{fmt_dt(key.first_seen_at)}<br>last #{fmt_dt(key.last_seen_at)}</span></td>
-        <td>#{policy_form(key, csrf)}</td>
+        <td>#{policy_form(key, csrf)}#{trust_form(key, csrf)}</td>
         <td>#{key_status(key, csrf)}</td>
       </tr>
       """
@@ -110,6 +125,25 @@ defmodule Coordinator.Web.WorkerController do
     <form method="post" action="/admin/workers/#{esc(key.worker_id)}/policy">
       <input type="hidden" name="_csrf_token" value="#{esc(csrf)}">
       <div class="chips">#{chips}<button type="submit" class="btn-sm">Save</button></div>
+    </form>
+    """
+  end
+
+  defp trust_form(key, csrf) do
+    options =
+      Enum.map_join(WorkerKey.trust_levels(), "", fn level ->
+        selected = if level == (key.trust_level || "untrusted"), do: " selected", else: ""
+        ~s(<option value="#{level}"#{selected}>#{level}</option>)
+      end)
+
+    """
+    <form method="post" action="/admin/workers/#{esc(key.worker_id)}/trust">
+      <input type="hidden" name="_csrf_token" value="#{esc(csrf)}">
+      <div class="chips">
+        <label class="chip"><span>trust</span></label>
+        <select name="trust_level">#{options}</select>
+        <button type="submit" class="btn-sm">Save</button>
+      </div>
     </form>
     """
   end
