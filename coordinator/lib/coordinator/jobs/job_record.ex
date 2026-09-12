@@ -19,6 +19,9 @@ defmodule Coordinator.Jobs.JobRecord do
     field(:lease_expires_at, :utc_datetime_usec)
     field(:attempts, :integer, default: 0)
     field(:result, :map)
+    # When the prompt and completion were dropped by `Coordinator.JobRetention`. Nil means the
+    # row still carries its text.
+    field(:redacted_at, :utc_datetime_usec)
     # The gateway key that submitted this job. Nil when the door was open or the legacy env
     # master key was used — neither has an `api_tokens` row to point at.
     field(:api_token_id, :string)
@@ -41,7 +44,8 @@ defmodule Coordinator.Jobs.JobRecord do
       :lease_expires_at,
       :attempts,
       :result,
-      :api_token_id
+      :api_token_id,
+      :redacted_at
     ])
     |> validate_required([:id, :capability, :privacy, :status])
     |> validate_inclusion(:status, @statuses)

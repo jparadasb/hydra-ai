@@ -54,6 +54,22 @@ end
 # from the /admin console alone can gate the front-door. Recommended on a public tunnel.
 config :coordinator, :require_api_token, System.get_env("HYDRA_REQUIRE_API_TOKEN") == "true"
 
+# ---- Job retention (Coordinator.JobRetention) ---------------------------------------------
+
+# How long a completed job keeps the caller's prompt and the worker's completion before both
+# are replaced with a size-only summary, and how long the (text-free) row survives after that.
+# Token accounting in `usage_records` is not pruned, so consumption history outlives the text.
+# Set either to 0 to disable that stage.
+case Integer.parse(System.get_env("HYDRA_JOB_REDACT_AFTER_HOURS") || "") do
+  {n, _} when n >= 0 -> config :coordinator, :job_redact_after_hours, n
+  _ -> :ok
+end
+
+case Integer.parse(System.get_env("HYDRA_JOB_RETENTION_DAYS") || "") do
+  {n, _} when n >= 0 -> config :coordinator, :job_retention_days, n
+  _ -> :ok
+end
+
 # ---- Admin console (/admin): GitHub OAuth login + Oban dashboard --------------------------
 
 # Override the prod default: set HYDRA_ADMIN_AUTH=false to open /admin without login (do NOT do

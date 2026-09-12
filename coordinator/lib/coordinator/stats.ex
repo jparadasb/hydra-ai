@@ -55,34 +55,72 @@ defmodule Coordinator.Stats do
   end
 
   @doc """
-  Done/failed jobs per hour for the trailing `hours` window, oldest bucket first. Buckets are
-  built in Elixir (not SQL date functions) so SQLite dev and Postgres prod behave identically.
-  Every hour in the window is present, zero-filled, so charts don't skip quiet hours.
+  Done/failed jobs per hour for the trailing `hours` window, oldest bucket first. Every hour in
+  the window is present, zero-filled, so charts don't skip quiet hours.
+
+  The counting happens in SQL. It used to load every done/failed row of the window into the
+  dashboard process and group them in Elixir — on a page that polls every few seconds, against
+  a table with no index on `updated_at`. The `(status, updated_at)` index makes the scan
+  proportional to recent activity, and only one row per (hour, status) comes back.
   """
   def throughput(hours \\ 24) do
     now = DateTime.utc_now()
     since = DateTime.add(now, -hours * 3600, :second)
-
-    finished =
-      from(j in JobRecord,
-        where: j.status in ["done", "failed"] and j.updated_at > ^since,
-        select: {j.status, j.updated_at}
-      )
-      |> Repo.all()
-      |> Enum.group_by(fn {status, at} -> {hour_bucket(at), status} end)
-
-    current = hour_bucket(now)
+    counts = finished_per_hour(since)
+    current_hour = div(DateTime.to_unix(now), 3600)
 
     for offset <- (hours - 1)..0//-1 do
-      bucket = DateTime.add(current, -offset * 3600, :second)
+      hour = current_hour - offset
 
       %{
-        "hour" => DateTime.to_iso8601(bucket),
-        "done" => finished |> Map.get({bucket, "done"}, []) |> length(),
-        "failed" => finished |> Map.get({bucket, "failed"}, []) |> length()
+        "hour" => hour |> Kernel.*(3600) |> DateTime.from_unix!() |> DateTime.to_iso8601(),
+        "done" => Map.get(counts, {hour, "done"}, 0),
+        "failed" => Map.get(counts, {hour, "failed"}, 0)
       }
     end
   end
 
-  defp hour_bucket(%DateTime{} = dt), do: %{dt | minute: 0, second: 0, microsecond: {0, 0}}
+  # `%{{epoch_hour, status} => count}` for the window, aggregated by the database.
+  defp finished_per_hour(since) do
+    since
+    |> throughput_query()
+    |> Repo.all()
+    |> Map.new(fn {status, hour, count} -> {{hour, status}, count} end)
+  end
+
+  @doc """
+  The aggregate behind `throughput/1`. Public only so a test can run it through the query
+  planner and assert it still uses the `(status, updated_at)` index.
+
+  Hour bucketing is the one place the two adapters cannot share an expression, so each gets
+  its own. Both reduce the timestamp to whole hours since the epoch — an integer, so nothing
+  downstream depends on how either database renders a datetime.
+  """
+  def throughput_query(%DateTime{} = since) do
+    case Repo.__adapter__() do
+      Ecto.Adapters.SQLite3 ->
+        from(j in JobRecord,
+          where: j.status in ["done", "failed"] and j.updated_at > ^since,
+          group_by: [
+            j.status,
+            fragment("CAST(strftime('%s', ?) / 3600 AS INTEGER)", j.updated_at)
+          ],
+          select:
+            {j.status, fragment("CAST(strftime('%s', ?) / 3600 AS INTEGER)", j.updated_at),
+             count(j.id)}
+        )
+
+      _ ->
+        from(j in JobRecord,
+          where: j.status in ["done", "failed"] and j.updated_at > ^since,
+          group_by: [
+            j.status,
+            fragment("floor(extract(epoch from ?) / 3600)::bigint", j.updated_at)
+          ],
+          select:
+            {j.status, fragment("floor(extract(epoch from ?) / 3600)::bigint", j.updated_at),
+             count(j.id)}
+        )
+    end
+  end
 end

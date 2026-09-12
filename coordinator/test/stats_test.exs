@@ -5,6 +5,7 @@ defmodule Coordinator.StatsTest do
   alias Coordinator.Jobs.JobRecord
   alias Coordinator.{Repo, Stats}
   import Coordinator.WorkerTestHelper
+  import Ecto.Query
 
   setup do
     on_exit(fn -> Repo.delete_all(JobRecord) end)
@@ -68,6 +69,47 @@ defmodule Coordinator.StatsTest do
 
     # Older buckets exist and are zero-filled integers.
     assert Enum.all?(buckets, &(is_integer(&1["done"]) and is_integer(&1["failed"])))
+  end
+
+  test "throughput buckets a completion by the hour it finished, not the hour it was asked for" do
+    job = insert_job("done")
+
+    three_hours_ago = DateTime.add(DateTime.utc_now(), -3 * 3600, :second)
+
+    Repo.update_all(
+      from(j in JobRecord, where: j.id == ^job.id),
+      set: [updated_at: three_hours_ago]
+    )
+
+    buckets = Stats.throughput(6)
+    hour = fn dt -> dt |> DateTime.to_unix() |> div(3600) end
+    target = hour.(three_hours_ago)
+
+    counted =
+      Enum.find(buckets, fn b ->
+        b["hour"] |> DateTime.from_iso8601() |> elem(1) |> hour.() == target
+      end)
+
+    assert counted["done"] >= 1
+  end
+
+  test "throughput counts in the database rather than loading the window into memory" do
+    # Each row the old implementation returned was a row the dashboard process held; the
+    # aggregate returns at most one row per (hour, status) no matter how many jobs completed.
+    for _ <- 1..25, do: insert_job("done")
+
+    assert List.last(Stats.throughput(6))["done"] >= 25
+  end
+
+  test "the throughput aggregate uses the (status, updated_at) index" do
+    # The regression this guards: with only `index(:jobs, [:status])` the dashboard's poll
+    # scanned in proportion to total job count rather than to recent activity.
+    since = DateTime.add(DateTime.utc_now(), -6 * 3600, :second)
+
+    plan = Ecto.Adapters.SQL.explain(Repo, :all, Stats.throughput_query(since))
+
+    assert plan =~ "jobs_status_updated_at_index"
+    refute plan =~ "SCAN jobs"
   end
 
   test "snapshot bundles all sections" do

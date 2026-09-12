@@ -28,7 +28,13 @@ config :coordinator, Oban,
   plugins: [
     Oban.Plugins.Pruner,
     Oban.Plugins.Lifeline,
-    {Oban.Plugins.Cron, crontab: [{"* * * * *", Coordinator.LeaseSweeper}]}
+    {Oban.Plugins.Cron,
+     crontab: [
+       {"* * * * *", Coordinator.LeaseSweeper},
+       # Prompt/completion retention. Hourly is enough: the windows are measured in hours and
+       # days, and each run works in bounded batches.
+       {"0 * * * *", Coordinator.JobRetention}
+     ]}
   ],
   queues: [leases: 10]
 
