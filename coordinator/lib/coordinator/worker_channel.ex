@@ -92,10 +92,10 @@ defmodule Coordinator.WorkerChannel do
 
   @impl true
   def handle_in("usage", payload, socket) do
-    case WorkerSession.handle_usage(payload) do
-      {:ok, _clean} -> {:reply, :ok, socket}
-      {:error, reason} -> {:reply, {:error, %{reason: to_string(reason)}}, socket}
-    end
+    # Usage reports are redacted, never refused: losing one to a false positive loses
+    # accounting and gains nothing.
+    {:ok, _clean} = WorkerSession.handle_usage(payload)
+    {:reply, :ok, socket}
   end
 
   # Refresh the advertised model catalog without forcing a reconnect. Identity remains pinned

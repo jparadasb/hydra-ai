@@ -15,8 +15,11 @@ defmodule Coordinator.WorkerSession do
       def handle_in("usage", payload, socket), do: ...WorkerSession.handle_usage(payload)...
       def handle_in("result", payload, socket), do: ...WorkerSession.handle_result(payload)...
 
-  Every inbound payload passes through `Coordinator.SecretGuard.verify/1` first; a worker
-  that tries to push a token is refused, never registered.
+  A registration passes through `Coordinator.SecretGuard.verify/1` first; a worker that tries
+  to push a token at join is refused, never registered. Results, chunks and usage reports go
+  through `Coordinator.SecretGuard.redact/1` instead: they are the caller's answer, and
+  dropping one on a false positive left the caller waiting for a timeout with nothing to
+  diagnose.
   """
 
   alias Coordinator.{Jobs, SecretGuard, Usage, Worker}
@@ -54,12 +57,14 @@ defmodule Coordinator.WorkerSession do
     )
   end
 
-  @doc "Handle an aggregated usage report (no secrets). Returns the sanitized report."
+  @doc """
+  Handle an aggregated usage report. Secret-shaped values are redacted rather than rejected —
+  a usage report is counters, and losing one to a false positive loses accounting for no gain.
+  Returns the redacted report.
+  """
   def handle_usage(payload) do
-    case SecretGuard.verify(payload) do
-      :ok -> {:ok, SecretGuard.sanitize(payload)}
-      {:error, _} = err -> err
-    end
+    {clean, _redactions} = SecretGuard.redact(payload)
+    {:ok, clean}
   end
 
   @doc """
@@ -68,6 +73,7 @@ defmodule Coordinator.WorkerSession do
   schedulers/tests) observe the completion without seeing anyone else's. The worker's usage
   report is written to `usage_records` (attributed to the key that submitted the job) instead
   of being discarded.
+  Secret-shaped values are redacted in place rather than costing the caller the whole result.
   A result carrying a superseded `lease_id` is rejected (`{:error, :stale_lease}`) and never
   broadcast — the job has been re-leased and a live generation owns its outcome.
 
@@ -75,43 +81,37 @@ defmodule Coordinator.WorkerSession do
   and the result come back), not here — so there is no reservation to release.
   """
   def handle_result(payload) do
-    case SecretGuard.verify(payload) do
-      :ok ->
-        clean = SecretGuard.sanitize(payload)
+    {clean, _redactions} = SecretGuard.redact(payload)
 
-        case persist_result(clean) do
-          # The result belongs to a lease generation that was already reclaimed; another
-          # worker owns the job now, so this output must not reach the waiting caller.
-          {:error, :stale_lease} ->
-            {:error, :stale_lease}
+    case persist_result(clean) do
+      # The result belongs to a lease generation that was already reclaimed; another
+      # worker owns the job now, so this output must not reach the waiting caller.
+      {:error, :stale_lease} ->
+        {:error, :stale_lease}
 
-          _ ->
-            # Account before broadcasting: the caller's request process returns as soon as it
-            # sees the result, and the usage row must not depend on it still being alive.
-            Usage.record_result(clean)
+      _ ->
+        # Account before broadcasting: the caller's request process returns as soon as it
+        # sees the result, and the usage row must not depend on it still being alive.
+        Usage.record_result(clean)
 
-            Phoenix.PubSub.broadcast(
-              Coordinator.PubSub,
-              Jobs.result_topic(clean["job_id"]),
-              {:job_result, clean}
-            )
+        Phoenix.PubSub.broadcast(
+          Coordinator.PubSub,
+          Jobs.result_topic(clean["job_id"]),
+          {:job_result, clean}
+        )
 
-            {:ok, clean}
-        end
-
-      {:error, _} = err ->
-        err
+        {:ok, clean}
     end
   end
 
   @doc """
-  Handle one streamed content fragment of a running job. Sanitized and broadcast on the
+  Handle one streamed content fragment of a running job. Redacted and broadcast on the
   job's own `"job_chunks:<job_id>"` topic (per-job so a busy gateway request only receives
   its own stream). Chunks are best-effort UX and are never persisted — the final result
   (`handle_result/1`) stays authoritative.
   """
   def handle_chunk(%{"job_id" => job_id} = payload) when is_binary(job_id) do
-    clean = SecretGuard.sanitize(payload)
+    {clean, _redactions} = SecretGuard.redact(payload)
 
     Phoenix.PubSub.broadcast(
       Coordinator.PubSub,

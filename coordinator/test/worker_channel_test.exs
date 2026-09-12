@@ -93,14 +93,29 @@ defmodule Coordinator.WorkerChannelTest do
              join_worker("w-topic", registration("w-different"))
   end
 
-  test "result message is accepted only when secret-free" do
+  test "a result carrying a secret is accepted with the secret redacted, not refused" do
+    # It used to be refused, which meant the caller waited out their timeout and got a 504
+    # with nothing to explain it — for a completion that may have been perfectly good.
     {:ok, _reply, socket} = join_worker("w-res", registration("w-res"))
 
     ref = push(socket, "result", %{"job_id" => "j1", "status" => "ok", "output" => %{}})
     assert_reply(ref, :ok)
 
-    ref2 = push(socket, "result", %{"job_id" => "j1", "authorization" => "Bearer abcdefgh"})
-    assert_reply(ref2, :error, %{reason: "secret_key_present"})
+    Phoenix.PubSub.subscribe(Coordinator.PubSub, Jobs.result_topic("j-redact"))
+
+    ref2 =
+      push(socket, "result", %{
+        "job_id" => "j-redact",
+        "status" => "ok",
+        "authorization" => "Bearer abcdefghijklmnopqrstuvwxyz",
+        "output" => %{"content" => "the answer"}
+      })
+
+    assert_reply(ref2, :ok)
+
+    assert_receive {:job_result, result}
+    assert result["authorization"] == "[REDACTED]"
+    assert result["output"]["content"] == "the answer"
   end
 
   test "racing cancellation and result decrement inflight only once" do
@@ -167,15 +182,21 @@ defmodule Coordinator.WorkerChannelTest do
     assert Process.alive?(socket.channel_pid)
   end
 
-  test "rejected result releases channel bookkeeping" do
+  test "a result releases channel bookkeeping even when it carries a secret" do
     {:ok, _reply, socket} = join_worker("w-rejected", registration("w-rejected"))
     wait_present("w-rejected")
     WorkerChannel.lease("w-rejected", %{"job_id" => "j-rejected", "lease_id" => "l-rejected"})
     assert_push("job", _)
     wait_inflight("w-rejected", 1)
 
-    ref = push(socket, "result", %{"job_id" => "j-rejected", "authorization" => "Bearer bad"})
-    assert_reply(ref, :error, %{reason: "secret_key_present"})
+    ref =
+      push(socket, "result", %{
+        "job_id" => "j-rejected",
+        "status" => "ok",
+        "authorization" => "Bearer abcdefghijklmnopqrstuvwxyz"
+      })
+
+    assert_reply(ref, :ok)
     wait_inflight("w-rejected", 0)
   end
 
