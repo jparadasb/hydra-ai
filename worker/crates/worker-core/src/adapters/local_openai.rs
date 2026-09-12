@@ -15,6 +15,7 @@ use crate::vault::Secret;
 
 /// llama.cpp `llama-server` default OpenAI endpoint.
 pub const LLAMACPP_DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8080/v1";
+pub const LLAMA_SWAP_DEFAULT_ENDPOINT: &str = "http://127.0.0.1:9090/v1";
 /// vLLM OpenAI-compatible server default endpoint.
 pub const VLLM_DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8000/v1";
 /// LM Studio local server default endpoint.
@@ -47,6 +48,11 @@ impl LocalOpenAiAdapter {
     /// llama.cpp at the default endpoint.
     pub fn llama_cpp(client: Client) -> Self {
         Self::new("llama_cpp", LLAMACPP_DEFAULT_ENDPOINT, None, client)
+    }
+
+    /// llama-swap at its default endpoint.
+    pub fn llama_swap(client: Client) -> Self {
+        Self::new("llama_swap", LLAMA_SWAP_DEFAULT_ENDPOINT, None, client)
     }
 
     /// vLLM at the default endpoint.

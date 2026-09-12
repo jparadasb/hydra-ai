@@ -316,6 +316,13 @@ mod networked {
             let Some(pm) = PhoenixMsg::decode(&text) else {
                 continue;
             };
+            if pm.event == "phx_reply" && pm.topic == topic {
+                match pm.payload.get("status").and_then(Value::as_str) {
+                    Some("ok") => tracing::debug!("coordinator acknowledged worker message"),
+                    Some(status) => eprintln!("Coordinator rejected worker message ({status}): {}", pm.payload),
+                    None => {}
+                }
+            }
             if pm.event == "job" && pm.topic == topic {
                 if let Ok(job) = serde_json::from_value::<Job>(pm.payload.clone()) {
                     let gateway = Arc::clone(&gateway);

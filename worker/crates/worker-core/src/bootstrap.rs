@@ -29,6 +29,7 @@ pub fn build_registry(
         // actually running contribute models — the gateway tolerates a runtime whose
         // `list_models` fails (it just yields no models).
         registry.register(Arc::new(OllamaAdapter::new(http.clone())));
+        registry.register(Arc::new(LocalOpenAiAdapter::llama_swap(http.clone())));
         registry.register(Arc::new(LocalOpenAiAdapter::llama_cpp(http.clone())));
         registry.register(Arc::new(LocalOpenAiAdapter::vllm(http.clone())));
         registry.register(Arc::new(LocalOpenAiAdapter::lm_studio(http.clone())));
