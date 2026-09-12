@@ -28,6 +28,28 @@ case System.get_env("HYDRA_API_CAPABILITY") do
   cap -> config :coordinator, :api_capability, cap
 end
 
+# ---- Front-door limits (Coordinator.RateLimiter) ------------------------------------------
+
+# Per-caller ceilings for the OpenAI-compatible front door, keyed by gateway key id (or by peer
+# IP when the door is open). Without them one key holder can saturate the whole worker network.
+# Set either to 0 to disable it. Limits are per coordinator node.
+case Integer.parse(System.get_env("HYDRA_RATE_LIMIT_PER_MINUTE") || "") do
+  {n, _} when n >= 0 -> config :coordinator, :rate_limit_per_minute, n
+  _ -> :ok
+end
+
+case Integer.parse(System.get_env("HYDRA_MAX_CONCURRENT_PER_KEY") || "") do
+  {n, _} when n >= 0 -> config :coordinator, :max_concurrent_per_key, n
+  _ -> :ok
+end
+
+# Largest request body the front door accepts. The body is persisted verbatim into
+# `jobs.payload`, so this is also the ceiling on a single job row.
+case Integer.parse(System.get_env("HYDRA_MAX_BODY_BYTES") || "") do
+  {n, _} when n > 0 -> config :coordinator, :max_body_bytes, n
+  _ -> :ok
+end
+
 # Enforce a gateway key even when no env master (HYDRA_API_TOKEN) is set — so admin-issued keys
 # from the /admin console alone can gate the front-door. Recommended on a public tunnel.
 config :coordinator, :require_api_token, System.get_env("HYDRA_REQUIRE_API_TOKEN") == "true"

@@ -9,10 +9,14 @@ defmodule Coordinator.ApiTokens do
   """
 
   import Ecto.Query, warn: false
+  require Logger
 
   alias Coordinator.{ApiToken, Repo}
 
   @prefix "hydra_sk_"
+
+  # How stale `last_used_at` may get before a request pays for a write to refresh it.
+  @touch_interval_seconds 60
 
   @doc """
   Mint a new key. Returns `{:ok, plaintext, record}` — `plaintext` is shown to the admin once
@@ -47,9 +51,11 @@ defmodule Coordinator.ApiTokens do
   end
 
   @doc """
-  Verify a presented bearer token. Returns `:ok` for an active (non-revoked) key, else
-  `{:error, :invalid}`. Best-effort touches `last_used_at`. Ignores the legacy env master key —
-  the caller (`Coordinator.ApiRouter`) checks that separately.
+  Verify a presented bearer token. Returns `{:ok, token_id}` for an active (non-revoked) key,
+  else `{:error, :invalid}`. The id is the caller identity the front-door attributes the
+  request to — it is what makes a job, a usage row, and a rate-limit bucket traceable to a key.
+  Best-effort touches `last_used_at`. Ignores the legacy env master key — the caller
+  (`Coordinator.ApiRouter`) checks that separately.
   """
   def verify(presented) when is_binary(presented) do
     digest = hash(presented)
@@ -57,7 +63,7 @@ defmodule Coordinator.ApiTokens do
     case Repo.get_by(ApiToken, token_hash: digest) do
       %ApiToken{revoked_at: nil} = token ->
         touch(token)
-        :ok
+        {:ok, token.id}
 
       _ ->
         {:error, :invalid}
@@ -71,11 +77,33 @@ defmodule Coordinator.ApiTokens do
     :crypto.hash(:sha256, token) |> Base.encode16(case: :lower)
   end
 
-  # Record usage without blocking the request path; a failed touch is harmless.
-  defp touch(%ApiToken{id: id}) do
-    from(t in ApiToken, where: t.id == ^id)
+  # Record last use coarsely. Writing on *every* authenticated request costs one DB write per
+  # request — on SQLite, one write lock per request — to refresh a field nobody reads at
+  # sub-minute resolution. Skip the write while the stored value is still fresh, and guard it
+  # on the value we read so concurrent requests for the same key collapse into one write
+  # instead of each issuing their own.
+  defp touch(%ApiToken{id: id, last_used_at: nil}) do
+    # Pinning a nil into a comparison is what Ecto refuses, so first use gets its own clause.
+    from(t in ApiToken, where: t.id == ^id and is_nil(t.last_used_at))
     |> Repo.update_all(set: [last_used_at: DateTime.utc_now()])
+
+    :ok
   rescue
-    _ -> :ok
+    # Best-effort bookkeeping: never fail a request over it, but do not hide a bug either.
+    error -> Logger.warning("last_used_at touch failed: #{inspect(error)}")
+  end
+
+  defp touch(%ApiToken{id: id, last_used_at: last_used_at}) do
+    now = DateTime.utc_now()
+
+    if DateTime.diff(now, last_used_at, :second) >= @touch_interval_seconds do
+      from(t in ApiToken, where: t.id == ^id and t.last_used_at == ^last_used_at)
+      |> Repo.update_all(set: [last_used_at: now])
+    end
+
+    :ok
+  rescue
+    # Best-effort bookkeeping: never fail a request over it, but do not hide a bug either.
+    error -> Logger.warning("last_used_at touch failed: #{inspect(error)}")
   end
 end

@@ -95,7 +95,8 @@ defmodule Coordinator.OpenApi do
               "content" => %{"application/json" => %{"schema" => ref("Model")}}
             },
             "401" => unauthorized(),
-            "404" => error_response("Model not found")
+            "404" => error_response("Model not found"),
+            "429" => rate_limited()
           }
         }
       },
@@ -142,7 +143,8 @@ defmodule Coordinator.OpenApi do
             },
             "400" => error_response("Invalid request (e.g. empty `messages`)"),
             "401" => unauthorized(),
-            "429" => error_response("Upstream provider rate limit"),
+            "413" => error_response("Request body larger than the gateway accepts"),
+            "429" => rate_limited(),
             "502" => error_response("Worker or upstream provider error"),
             "504" => error_response("No worker completed the job in time")
           }
@@ -169,6 +171,8 @@ defmodule Coordinator.OpenApi do
             },
             "400" => error_response("Invalid request (e.g. empty input)"),
             "401" => unauthorized(),
+            "413" => error_response("Request body larger than the gateway accepts"),
+            "429" => rate_limited(),
             "502" => error_response("Worker or upstream provider error"),
             "504" => error_response("No worker completed the job in time")
           }
@@ -349,6 +353,18 @@ defmodule Coordinator.OpenApi do
   defp ref(name), do: %{"$ref" => "#/components/schemas/#{name}"}
 
   defp unauthorized, do: error_response("Missing or invalid API key")
+
+  # The gateway's own ceilings, not an upstream provider's: too many requests per minute for
+  # this key, or too many of its requests already in flight. `retry-after` says when to retry.
+  defp rate_limited do
+    error_response("Rate limit or concurrency cap for this key exceeded")
+    |> Map.put("headers", %{
+      "retry-after" => %{
+        "description" => "Seconds to wait before retrying",
+        "schema" => %{"type" => "integer"}
+      }
+    })
+  end
 
   defp error_response(desc) do
     %{

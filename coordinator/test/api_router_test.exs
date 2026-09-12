@@ -649,6 +649,126 @@ defmodule Coordinator.ApiRouterTest do
     end
   end
 
+  describe "caller identity and quotas" do
+    setup do
+      Coordinator.RateLimiter.reset()
+
+      on_exit(fn ->
+        Application.put_env(:coordinator, :rate_limit_per_minute, 0)
+        Application.put_env(:coordinator, :max_concurrent_per_key, 0)
+        Coordinator.RateLimiter.reset()
+      end)
+
+      :ok
+    end
+
+    test "a job records the gateway key that submitted it" do
+      {:ok, plaintext, token} = Coordinator.ApiTokens.create("attribution")
+      Application.put_env(:coordinator, :require_api_token, true)
+
+      nonce = "attrib-#{System.unique_integer([:positive])}"
+
+      task =
+        Task.async(fn ->
+          post(
+            "/v1/chat/completions",
+            %{
+              "model" => "test-model",
+              "messages" => [%{"role" => "user", "content" => nonce}],
+              "timeout_ms" => 1000
+            },
+            [{"authorization", "Bearer " <> plaintext}]
+          )
+        end)
+
+      job_id = wait_for(fn -> find_job_id(nonce) end)
+      assert Repo.get(JobRecord, job_id).api_token_id == token.id
+
+      Task.await(task, 5000)
+    end
+
+    test "a key over its per-minute rate limit gets 429 with retry-after" do
+      Application.put_env(:coordinator, :rate_limit_per_minute, 2)
+
+      body = %{"model" => "test-model", "messages" => [%{"role" => "user", "content" => "x"}]}
+
+      # /v1/models is counted by the same limiter and needs no worker to answer.
+      assert get_json("/v1/models").status == 200
+      assert get_json("/v1/models").status == 200
+
+      conn = post("/v1/chat/completions", body)
+      assert conn.status == 429
+      assert Jason.decode!(conn.resp_body)["error"]["type"] == "rate_limit_error"
+      assert [retry_after] = get_resp_header(conn, "retry-after")
+      assert String.to_integer(retry_after) > 0
+    end
+
+    test "a key at its concurrency cap gets 429 while the in-flight request still completes" do
+      Application.put_env(:coordinator, :max_concurrent_per_key, 1)
+
+      nonce = "concurrency-#{System.unique_integer([:positive])}"
+
+      # One long-running request holds the only slot.
+      task =
+        Task.async(fn ->
+          post("/v1/chat/completions", %{
+            "model" => "test-model",
+            "messages" => [%{"role" => "user", "content" => nonce}],
+            "timeout_ms" => 3000
+          })
+        end)
+
+      job_id = wait_for(fn -> find_job_id(nonce) end)
+
+      rejected =
+        post("/v1/chat/completions", %{
+          "model" => "test-model",
+          "messages" => [%{"role" => "user", "content" => "second"}],
+          "timeout_ms" => 1000
+        })
+
+      assert rejected.status == 429
+      assert Jason.decode!(rejected.resp_body)["error"]["message"] =~ "concurrent"
+
+      Phoenix.PubSub.broadcast(Coordinator.PubSub, Coordinator.Jobs.result_topic(job_id), {
+        :job_result,
+        %{
+          "job_id" => job_id,
+          "status" => "ok",
+          "output" => %{"content" => "done"},
+          "usage" => %{"input_tokens" => 1, "output_tokens" => 2}
+        }
+      })
+
+      assert Task.await(task, 10_000).status == 200
+
+      # The slot is given back, so the next request is admitted again.
+      assert post("/v1/chat/completions", %{"model" => "test-model"}).status == 400
+    end
+
+    test "a caller that abandons a request does not leak its concurrency slot" do
+      Application.put_env(:coordinator, :max_concurrent_per_key, 1)
+
+      nonce = "abandoned-#{System.unique_integer([:positive])}"
+
+      task =
+        Task.async(fn ->
+          post("/v1/chat/completions", %{
+            "model" => "test-model",
+            "messages" => [%{"role" => "user", "content" => nonce}],
+            "timeout_ms" => 30_000
+          })
+        end)
+
+      _job_id = wait_for(fn -> find_job_id(nonce) end)
+      Task.shutdown(task, :brutal_kill)
+
+      # The limiter monitors the holder, so the slot comes back without an explicit release.
+      wait_for(fn -> if Coordinator.RateLimiter.inflight({:ip, "127.0.0.1"}) == 0, do: :free end)
+      assert post("/v1/chat/completions", %{"model" => "test-model"}).status == 400
+    end
+  end
+
   # Poll a function until it returns non-nil (the just-created job appears).
   defp wait_for(fun, tries \\ 100)
   defp wait_for(_fun, 0), do: flunk("job never appeared")

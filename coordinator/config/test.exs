@@ -20,3 +20,9 @@ config :coordinator, Coordinator.Repo,
 config :coordinator, Oban, testing: :manual
 
 config :logger, level: :warning
+
+# Front-door limits off by default in tests: the suite drives many requests from one identity
+# (loopback) and each test that cares about a limit sets its own.
+config :coordinator,
+  rate_limit_per_minute: 0,
+  max_concurrent_per_key: 0
