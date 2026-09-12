@@ -68,6 +68,9 @@ pub struct WorkerRegistration {
     /// workers are behind. Informational only — never gates routing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// Enables lease-generation-aware cancellation acknowledgements.
+    #[serde(default)]
+    pub supports_cancel_ack: bool,
 }
 
 impl WorkerRegistration {
@@ -105,6 +108,7 @@ impl WorkerRegistration {
             },
             trust_level: "untrusted".to_string(),
             version: Some(crate::self_update::build_version()),
+            supports_cancel_ack: true,
         }
     }
 }

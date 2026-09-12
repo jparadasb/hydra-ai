@@ -21,6 +21,7 @@ defmodule Coordinator.Worker do
           accepted_job_levels: [Coordinator.Job.privacy()],
           trust_level: String.t(),
           max_requests_per_hour: non_neg_integer() | nil,
+          supports_cancel_ack: boolean(),
           # live scheduling signals
           inflight: non_neg_integer(),
           avg_latency_ms: float(),
@@ -34,6 +35,7 @@ defmodule Coordinator.Worker do
             accepted_job_levels: [:public],
             trust_level: "untrusted",
             max_requests_per_hour: nil,
+            supports_cancel_ack: false,
             inflight: 0,
             avg_latency_ms: 0.0,
             available: true
@@ -52,7 +54,8 @@ defmodule Coordinator.Worker do
         (get_in(reg, ["privacy", "accepted_job_levels"]) || ["public"])
         |> Enum.map(&Coordinator.Job.parse_privacy/1),
       trust_level: reg["trust_level"] || "untrusted",
-      max_requests_per_hour: get_in(reg, ["limits", "max_requests_per_hour"])
+      max_requests_per_hour: get_in(reg, ["limits", "max_requests_per_hour"]),
+      supports_cancel_ack: reg["supports_cancel_ack"] == true
     }
   end
 

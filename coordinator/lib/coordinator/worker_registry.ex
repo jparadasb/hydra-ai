@@ -38,12 +38,20 @@ defmodule Coordinator.WorkerRegistry do
 
   @doc "Track a newly-registered worker. Call from its channel process."
   def track(pid, %Worker{worker_id: id} = worker) do
-    Presence.track(pid, @topic, id, %{worker: worker})
+    Presence.track(pid, @topic, id, %{worker: worker, channel_pid: pid})
   end
 
   @doc "Replace the tracked snapshot for a worker. Call from its channel process."
   def update(pid, %Worker{worker_id: id} = worker) do
-    Presence.update(pid, @topic, id, %{worker: worker})
+    Presence.update(pid, @topic, id, %{worker: worker, channel_pid: pid})
+  end
+
+  @doc "Whether another live channel exists for this worker id."
+  def other_connection?(worker_id, channel_pid) do
+    case Presence.get_by_key(@topic, worker_id) do
+      %{metas: metas} -> Enum.any?(metas, &(&1[:channel_pid] != channel_pid))
+      _ -> false
+    end
   end
 
   # A worker has a single channel, so normally a single meta. During a brief reconnect overlap

@@ -53,6 +53,7 @@ defmodule Coordinator.JobsTest do
   test "lease worker assigns a pending job to an eligible worker" do
     register_local_worker("w1")
     {:ok, rec} = enqueue()
+    before_lease = DateTime.utc_now()
 
     assert :ok = perform_job(LeaseWorker, %{job_id: rec.id})
 
@@ -61,7 +62,7 @@ defmodule Coordinator.JobsTest do
     assert leased.worker_id == "w1"
     assert leased.lease_id != nil
     assert DateTime.compare(leased.lease_expires_at, leased.expires_at) == :lt
-    assert DateTime.diff(leased.lease_expires_at, DateTime.utc_now(), :second) in 58..60
+    assert DateTime.diff(leased.lease_expires_at, before_lease, :second) in 60..61
   end
 
   test "a stale pending snapshot cannot lease a cancelled job" do
@@ -82,19 +83,20 @@ defmodule Coordinator.JobsTest do
     assert leased.attempts == 4
   end
 
-  test "disconnect reclamation ignores leases from a newer channel" do
-    register_local_worker("w-reconnect")
+  test "lease heartbeat renews only the active generation" do
+    register_local_worker("w-renew")
     {:ok, rec} = enqueue()
     assert :ok = perform_job(LeaseWorker, %{job_id: rec.id})
-    first_lease = Jobs.get(rec.id).lease_id
+    leased = Jobs.get(rec.id)
+    old_deadline = DateTime.add(DateTime.utc_now(), -1, :second)
 
-    assert {:ok, _} = Jobs.requeue(Jobs.get(rec.id))
-    assert :ok = perform_job(LeaseWorker, %{job_id: rec.id})
-    second_lease = Jobs.get(rec.id).lease_id
-    refute second_lease == first_lease
+    from(j in JobRecord, where: j.id == ^rec.id)
+    |> Coordinator.Repo.update_all(set: [lease_expires_at: old_deadline])
 
-    assert :ok = Jobs.reclaim_worker_leases("w-reconnect", [first_lease])
-    assert %{status: "leased", lease_id: ^second_lease} = Jobs.get(rec.id)
+    assert {:error, :stale_lease} = Jobs.renew_lease("w-renew", rec.id, "stale")
+    assert Jobs.get(rec.id).lease_expires_at == old_deadline
+    assert :ok = Jobs.renew_lease("w-renew", rec.id, leased.lease_id)
+    assert DateTime.compare(Jobs.get(rec.id).lease_expires_at, old_deadline) == :gt
   end
 
   test "lease worker snoozes when no eligible worker is connected" do

@@ -4,8 +4,9 @@
   "title": "Job cancellation",
   "type": "object",
   "additionalProperties": false,
-  "required": ["job_id"],
+  "required": ["job_id", "lease_id"],
   "properties": {
-    "job_id": { "type": "string", "minLength": 1 }
+    "job_id": { "type": "string", "minLength": 1 },
+    "lease_id": { "type": "string", "minLength": 1 }
   }
 }

@@ -78,7 +78,12 @@ defmodule Coordinator.WorkerChannel do
 
   def handle_out("cancel", payload, socket) do
     push(socket, "cancel", payload)
-    {:noreply, socket}
+
+    if socket.assigns.worker.supports_cancel_ack do
+      {:noreply, socket}
+    else
+      {:noreply, finish_job(socket, payload["job_id"])}
+    end
   end
 
   @impl true
@@ -100,13 +105,37 @@ defmodule Coordinator.WorkerChannel do
         {:reply, :ok, assign(socket, :worker, worker)}
 
       {:error, reason} ->
-        {:reply, {:error, %{reason: to_string(reason)}}, finish_job(socket, payload["job_id"])}
+        {:reply, {:error, %{reason: to_string(reason)}}, socket}
     end
   end
 
-  def handle_in("cancelled", %{"job_id" => job_id}, socket) do
-    {:reply, :ok, finish_job(socket, job_id)}
+  def handle_in("cancelled", %{"job_id" => job_id, "lease_id" => lease_id} = payload, socket)
+      when is_binary(job_id) and is_binary(lease_id) do
+    case Coordinator.SecretGuard.verify(payload) do
+      :ok -> {:reply, :ok, finish_lease(socket, job_id, lease_id)}
+      {:error, reason} -> {:reply, {:error, %{reason: to_string(reason)}}, socket}
+    end
   end
+
+  def handle_in("cancelled", _payload, socket),
+    do: {:reply, {:error, %{reason: "invalid_cancellation_ack"}}, socket}
+
+  def handle_in(
+        "lease_heartbeat",
+        %{"job_id" => job_id, "lease_id" => lease_id} = payload,
+        socket
+      )
+      when is_binary(job_id) and is_binary(lease_id) do
+    with :ok <- Coordinator.SecretGuard.verify(payload),
+         :ok <- Jobs.renew_lease(socket.assigns.worker_id, job_id, lease_id) do
+      {:reply, :ok, socket}
+    else
+      {:error, reason} -> {:reply, {:error, %{reason: to_string(reason)}}, socket}
+    end
+  end
+
+  def handle_in("lease_heartbeat", _payload, socket),
+    do: {:reply, {:error, %{reason: "invalid_lease_heartbeat"}}, socket}
 
   def handle_in("registration", _payload, socket),
     do: {:reply, {:error, %{reason: "worker_id_mismatch"}}, socket}
@@ -125,7 +154,7 @@ defmodule Coordinator.WorkerChannel do
         {:reply, :ok, finish_job(socket, payload["job_id"])}
 
       {:error, reason} ->
-        {:reply, {:error, %{reason: to_string(reason)}}, socket}
+        {:reply, {:error, %{reason: to_string(reason)}}, finish_job(socket, payload["job_id"])}
     end
   end
 
@@ -145,13 +174,8 @@ defmodule Coordinator.WorkerChannel do
   @impl true
   def terminate(_reason, socket) do
     if worker_id = socket.assigns[:worker_id] do
-      lease_ids =
-        socket.assigns[:active_leases]
-        |> Kernel.||(%{})
-        |> Map.values()
-        |> Enum.filter(&is_binary/1)
-
-      Jobs.reclaim_worker_leases(worker_id, lease_ids)
+      if not WorkerRegistry.other_connection?(worker_id, self()),
+        do: Jobs.reclaim_worker_leases(worker_id)
     end
 
     :ok
@@ -167,8 +191,13 @@ defmodule Coordinator.WorkerChannel do
   end
 
   @doc "Tell a worker to abort an in-flight or queued job. Safe when job already finished."
-  def cancel(worker_id, job_id) when is_binary(worker_id) and is_binary(job_id) do
-    Coordinator.Endpoint.broadcast("worker:#{worker_id}", "cancel", %{"job_id" => job_id})
+  def cancel(worker_id, job_id, lease_id)
+      when is_binary(worker_id) and is_binary(job_id) and is_binary(lease_id) do
+    Coordinator.Endpoint.broadcast(
+      "worker:#{worker_id}",
+      "cancel",
+      %{"job_id" => job_id, "lease_id" => lease_id}
+    )
   end
 
   defp finish_job(socket, job_id) do
@@ -182,5 +211,11 @@ defmodule Coordinator.WorkerChannel do
     else
       socket
     end
+  end
+
+  defp finish_lease(socket, job_id, lease_id) do
+    if socket.assigns.active_leases[job_id] == lease_id,
+      do: finish_job(socket, job_id),
+      else: socket
   end
 end
