@@ -516,3 +516,65 @@ async fn without_fallback_a_provider_only_worker_still_works() {
         JobStatus::Ok
     );
 }
+
+// ---- lock poisoning ---------------------------------------------------------------------------
+
+/// An adapter that panics on every call, to poison whatever lock is held around it.
+struct PanickingAdapter;
+
+#[async_trait]
+impl ProviderAdapter for PanickingAdapter {
+    fn name(&self) -> &str {
+        "panicky"
+    }
+    fn uses_external_provider(&self) -> bool {
+        false
+    }
+    async fn list_models(&self) -> worker_core::error::Result<Vec<ModelInfo>> {
+        panic!("catalog probe blew up")
+    }
+    async fn validate_credentials(&self) -> worker_core::error::Result<bool> {
+        Ok(true)
+    }
+    async fn run_chat_completion(
+        &self,
+        _req: ChatRequest,
+    ) -> worker_core::error::Result<ChatResponse> {
+        panic!("inference blew up")
+    }
+}
+
+#[tokio::test]
+async fn a_panicking_adapter_does_not_break_subsequent_jobs() {
+    // The catalog lock was acquired with `.expect("catalog lock poisoned")`. One panic in an
+    // adapter task holding it poisoned the lock, and every later job panicked on acquire — one
+    // recoverable failure turned into a permanently dead worker.
+    let mut reg = AdapterRegistry::new();
+    reg.register(Arc::new(PanickingAdapter));
+    reg.register(Arc::new(FakeAdapter {
+        name: "ollama",
+        external: false,
+        reply: "still working",
+    }));
+
+    let g = Gateway::new(
+        reg,
+        RoutingPolicy::default(),
+        accept_all_levels(),
+        LimitGuard::new(Limits::default()),
+        Arc::new(MemoryUsageStore::default()),
+    );
+
+    // The panicking probe runs while the catalog write lock is held.
+    g.refresh_catalog().await;
+
+    // The healthy backend is still reachable, and the gateway still serves jobs.
+    assert!(
+        !g.model_catalog().is_empty(),
+        "the healthy adapter is catalogued"
+    );
+
+    let r = g.execute(&job(PrivacyLevel::Public, false)).await;
+    assert_eq!(r.status, JobStatus::Ok);
+    assert_eq!(r.usage.unwrap().provider, "ollama");
+}

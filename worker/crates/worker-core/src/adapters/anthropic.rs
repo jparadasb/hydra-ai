@@ -99,12 +99,18 @@ impl AnthropicAdapter {
                         "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
                         "content": m.content,
                     });
-                    match msgs
+                    // The filter checks `content[0]`, which indexing a non-array also answers
+                    // — so `as_array_mut` was not guaranteed to be `Some` and the unwrap was a
+                    // panic waiting for a malformed history. Start a new message instead.
+                    let merged = msgs
                         .last_mut()
                         .filter(|l| l["role"] == "user" && l["content"][0]["type"] == "tool_result")
-                    {
-                        Some(last) => last["content"].as_array_mut().unwrap().push(block),
-                        None => msgs.push(json!({ "role": "user", "content": [block] })),
+                        .and_then(|last| last["content"].as_array_mut())
+                        .map(|blocks| blocks.push(block.clone()))
+                        .is_some();
+
+                    if !merged {
+                        msgs.push(json!({ "role": "user", "content": [block] }));
                     }
                 }
                 _ => msgs.push(json!({ "role": m.role, "content": m.content })),

@@ -14,8 +14,10 @@ use crate::adapter::{AdapterRegistry, DeltaSink, ProviderAdapter};
 use crate::config::{Preference, PrivacyPrefs, RoutingPolicy};
 use crate::limits::LimitGuard;
 use crate::privacy::{self, Decision};
+use crate::sync::RwLockExt;
 use crate::types::{ChatRequest, Job, JobResult, JobStatus, ModelInfo, ResultUsage, Usage};
 use crate::usage::{CallOutcome, UsageStore};
+use futures_util::FutureExt;
 
 /// A capability candidate: which adapter + model can serve it.
 struct Candidate {
@@ -62,23 +64,31 @@ impl Gateway {
         // stall startup for `timeout × adapter count` against silent or firewalled hosts.
         let probes = self.registry.iter().map(|adapter| async move {
             let name = adapter.name().to_string();
-            let probe = tokio::time::timeout(Self::CATALOG_PROBE_TIMEOUT, adapter.list_models());
+            // `catch_unwind` because these run in one task: a panic inside any adapter would
+            // otherwise abort the whole sweep and take the caller with it, so one broken
+            // backend could stop the worker from cataloguing the healthy ones.
+            let probe = std::panic::AssertUnwindSafe(tokio::time::timeout(
+                Self::CATALOG_PROBE_TIMEOUT,
+                adapter.list_models(),
+            ))
+            .catch_unwind();
             (name, probe.await)
         });
 
         let mut catalog = Vec::new();
         for (name, outcome) in futures_util::future::join_all(probes).await {
             match outcome {
-                Ok(Ok(models)) => {
+                Ok(Ok(Ok(models))) => {
                     for m in models {
                         catalog.push((name.clone(), m));
                     }
                 }
-                Ok(Err(error)) => eprintln!("Model catalog probe failed for {name}: {error}"),
-                Err(_) => eprintln!("Model catalog probe timed out for {name}"),
+                Ok(Ok(Err(error))) => eprintln!("Model catalog probe failed for {name}: {error}"),
+                Ok(Err(_)) => eprintln!("Model catalog probe timed out for {name}"),
+                Err(_) => eprintln!("Model catalog probe panicked for {name}; skipping it"),
             }
         }
-        let mut current = self.catalog.write().expect("catalog lock poisoned");
+        let mut current = self.catalog.write_recover();
         let changed = current.len() != catalog.len();
         *current = catalog;
         if changed {
@@ -88,14 +98,13 @@ impl Gateway {
 
     /// Seed the catalog directly (tests / static configs).
     pub fn set_catalog(&self, catalog: Vec<(String, ModelInfo)>) {
-        *self.catalog.write().expect("catalog lock poisoned") = catalog;
+        *self.catalog.write_recover() = catalog;
     }
 
     /// The discovered models, for building the registration payload.
     pub fn model_catalog(&self) -> Vec<ModelInfo> {
         self.catalog
-            .read()
-            .expect("catalog lock poisoned")
+            .read_recover()
             .iter()
             .map(|(_, m)| m.clone())
             .collect()
@@ -108,7 +117,7 @@ impl Gateway {
     /// there a local option?") are about the models that could actually serve this request,
     /// not about the worker's catalog in general.
     fn candidates_for(&self, capability: &str, requested_model: Option<&str>) -> Vec<Candidate> {
-        let catalog = self.catalog.read().expect("catalog lock poisoned");
+        let catalog = self.catalog.read_recover();
         let mut cands: Vec<Candidate> = catalog
             .iter()
             .filter(|(_, m)| m.capabilities.iter().any(|c| c == capability))

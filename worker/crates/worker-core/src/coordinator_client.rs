@@ -231,6 +231,14 @@ mod networked {
         !targets.is_empty()
     }
 
+    /// Outbound queue depth. Deep enough that a brief write stall does not stutter streaming,
+    /// shallow enough that a coordinator which stops reading is bounded rather than fatal.
+    const OUTBOUND_CAPACITY: usize = 1024;
+
+    /// Largest WebSocket message accepted from the coordinator. A leased job is text, not
+    /// media; tungstenite's 64 MiB default let the other end decide this process's memory use.
+    const MAX_WS_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
+
     pub struct ClientConfig {
         /// Base ws/wss URL, e.g. `ws://127.0.0.1:4000`.
         pub base_url: String,
@@ -279,9 +287,15 @@ mod networked {
             url.push_str(&framing::percent_encode(&a.sig));
         }
 
+        // Without an explicit config, tungstenite allows a 64 MiB message. A leased job is
+        // messages, not media; cap what the coordinator can make this process buffer.
+        let mut ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
+        ws_config.max_message_size = Some(MAX_WS_MESSAGE_BYTES);
+        ws_config.max_frame_size = Some(MAX_WS_MESSAGE_BYTES);
+
         let (ws, _resp) = tokio::time::timeout(
             crate::http::CONNECT_TIMEOUT,
-            tokio_tungstenite::connect_async(&url),
+            tokio_tungstenite::connect_async_with_config(&url, Some(ws_config), false),
         )
         .await
         .map_err(|_| Error::Other("ws connect timed out".into()))?
@@ -290,7 +304,12 @@ mod networked {
         let (mut sink, mut stream) = ws.split();
 
         // Outbound channel: heartbeat + results funnel through one writer.
-        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        //
+        // Bounded. Unbounded meant a coordinator that stopped reading let streamed
+        // `result_chunk` messages queue until the process ran out of memory — the failure was
+        // in the worker, for a fault on the other end. Senders that can wait do
+        // (`send().await`, real backpressure); the streamed-chunk sink cannot, so it drops.
+        let (tx, mut rx) = mpsc::channel::<String>(OUTBOUND_CAPACITY);
         let refs = Arc::new(AtomicU64::new(1));
         let next_ref = {
             let refs = Arc::clone(&refs);
@@ -299,7 +318,7 @@ mod networked {
 
         // Join.
         let join = framing::join("1", &topic, config.registration.clone());
-        tx.send(join.encode()).ok();
+        tx.send(join.encode()).await.ok();
 
         // Writer task.
         let writer = tokio::spawn(async move {
@@ -318,7 +337,11 @@ mod networked {
             let mut tick = tokio::time::interval(hb_interval);
             loop {
                 tick.tick().await;
-                if hb_tx.send(framing::heartbeat(&hb_ref()).encode()).is_err() {
+                if hb_tx
+                    .send(framing::heartbeat(&hb_ref()).encode())
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -350,7 +373,7 @@ mod networked {
                     "registration",
                     registration,
                 );
-                if catalog_tx.send(msg.encode()).is_err() {
+                if catalog_tx.send(msg.encode()).await.is_err() {
                     break;
                 }
             }
@@ -360,6 +383,9 @@ mod networked {
         // spawned and acquires a permit inside its task, so the loop keeps reading the socket
         // (heartbeat replies, Close frames) while at most `max_parallel_jobs` run at once.
         let sem = Arc::new(Semaphore::new(config.max_parallel_jobs.max(1)));
+        // Shared across jobs so the log reflects the connection, not one job.
+        let dropped_chunks_counter = Arc::new(AtomicU64::new(0));
+        let mut undecodable_frames: u64 = 0;
         let mut jobs = HashMap::<JobKey, RunningJob>::new();
 
         // Reader loop: dispatch leased jobs to bounded background tasks; each replies with its
@@ -372,6 +398,17 @@ mod networked {
                 Ok(_) => continue,
             };
             let Some(pm) = PhoenixMsg::decode(&text) else {
+                // Silently dropping these hid a protocol mismatch: the worker looked idle
+                // while the coordinator believed it was talking to it. Logged on a doubling
+                // scale so a persistent mismatch is loud without a flood.
+                undecodable_frames += 1;
+                if undecodable_frames.is_power_of_two() {
+                    eprintln!(
+                        "coordinator sent {undecodable_frames} undecodable frame(s); \
+                         last was {} bytes",
+                        text.len()
+                    );
+                }
                 continue;
             };
             // Reap completed handles while traffic is flowing. Retaining the handles lets a
@@ -428,13 +465,14 @@ mod networked {
                                     }),
                                 );
 
-                                if tx.send(heartbeat.encode()).is_err() {
+                                if tx.send(heartbeat.encode()).await.is_err() {
                                     break;
                                 }
                             }
                         })
                     };
                     let heartbeat_abort = heartbeat.abort_handle();
+                    let dropped_chunks = Arc::clone(&dropped_chunks_counter);
                     let handle = tokio::spawn(async move {
                         // Wait for a free slot; if the semaphore is gone we're shutting down.
                         let Ok(_permit) = sem.acquire_owned().await else {
@@ -447,6 +485,7 @@ mod networked {
                         let on_delta: crate::adapter::DeltaSink = {
                             let tx = tx.clone();
                             let topic = topic.clone();
+                            let dropped_chunks = Arc::clone(&dropped_chunks);
                             let next_ref = next_ref.clone();
                             let job_id = job.job_id.clone();
                             Arc::new(move |delta: &str, is_reasoning: bool| {
@@ -464,7 +503,19 @@ mod networked {
                                     "result_chunk",
                                     payload,
                                 );
-                                tx.send(out.encode()).ok();
+                                // A sync closure cannot wait, and a chunk is best-effort UX —
+                                // the final "result" is authoritative. Drop it rather than
+                                // queue without limit, and count the drop so a coordinator
+                                // that has stopped reading is visible.
+                                if tx.try_send(out.encode()).is_err() {
+                                    let dropped =
+                                        dropped_chunks.fetch_add(1, Ordering::Relaxed) + 1;
+                                    if dropped.is_power_of_two() {
+                                        eprintln!(
+                                            "coordinator not keeping up: dropped {dropped} streamed chunk(s)"
+                                        );
+                                    }
+                                }
                             })
                         };
                         let result = gateway.execute_streaming(&job, on_delta).await;
@@ -490,7 +541,7 @@ mod networked {
                         );
                         // Send fails silently if the socket already closed; the coordinator
                         // re-leases the job on lease timeout.
-                        tx.send(out.encode()).ok();
+                        tx.send(out.encode()).await.ok();
                         status.incr_jobs();
                         heartbeat_abort.abort();
                     });
@@ -511,7 +562,7 @@ mod networked {
                             "cancelled",
                             serde_json::json!({"job_id": job_id, "lease_id": lease_id}),
                         );
-                        tx.send(cancelled.encode()).ok();
+                        tx.send(cancelled.encode()).await.ok();
                     }
                 }
             }
