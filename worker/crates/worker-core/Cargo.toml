@@ -26,6 +26,7 @@ webbrowser = { workspace = true }
 tokio-tungstenite = { workspace = true, optional = true }
 # Non-optional: the adapters' streaming chat path consumes reqwest byte streams.
 futures-util = { workspace = true }
+jsonschema = { workspace = true }
 
 [features]
 default = []

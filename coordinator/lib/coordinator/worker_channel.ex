@@ -80,6 +80,24 @@ defmodule Coordinator.WorkerChannel do
     end
   end
 
+  # Refresh the advertised model catalog without forcing a reconnect. Identity remains pinned
+  # to the authenticated channel topic; inflight is channel-owned and therefore preserved.
+  def handle_in("registration", %{"worker_id" => worker_id} = payload, socket)
+      when worker_id == socket.assigns.worker_id do
+    case WorkerSession.handle_register(payload) do
+      {:ok, refreshed} ->
+        worker = %{refreshed | inflight: socket.assigns.worker.inflight}
+        WorkerRegistry.update(self(), worker)
+        {:reply, :ok, assign(socket, :worker, worker)}
+
+      {:error, reason} ->
+        {:reply, {:error, %{reason: to_string(reason)}}, socket}
+    end
+  end
+
+  def handle_in("registration", _payload, socket),
+    do: {:reply, {:error, %{reason: "worker_id_mismatch"}}, socket}
+
   # Streamed content fragments. No reply: a per-token ack round trip would double the
   # message rate for zero value — the worker fires and forgets, the final "result" is
   # the acknowledged message.

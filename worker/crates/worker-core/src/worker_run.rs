@@ -171,7 +171,7 @@ pub async fn build_and_run(params: RunParams, status: Arc<RunStatus>) -> Result<
         JsonUsageStore::new(JsonUsageStore::default_path())
             .map_err(|e| Error::Other(format!("usage store: {e}")))?,
     );
-    let mut gateway = Gateway::new(
+    let gateway = Gateway::new(
         registry,
         cfg.routing.clone(),
         LimitGuard::new(cfg.limits.clone()),

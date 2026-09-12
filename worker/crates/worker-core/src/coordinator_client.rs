@@ -270,6 +270,35 @@ mod networked {
             }
         });
 
+        // Backends can become ready after this daemon starts. Re-probe and update the live
+        // registration so the coordinator's model catalog heals without restarting us.
+        let catalog_tx = tx.clone();
+        let catalog_topic = topic.clone();
+        let catalog_ref = next_ref.clone();
+        let catalog_gateway = Arc::clone(&gateway);
+        let registration_template = config.registration.clone();
+        let catalog_refresh = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(30));
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                catalog_gateway.refresh_catalog().await;
+                let mut registration = registration_template.clone();
+                registration["models"] = serde_json::to_value(catalog_gateway.model_catalog())
+                    .unwrap_or_else(|_| Value::Array(Vec::new()));
+                let msg = PhoenixMsg::new(
+                    Some("1".into()),
+                    Some(catalog_ref()),
+                    &catalog_topic,
+                    "registration",
+                    registration,
+                );
+                if catalog_tx.send(msg.encode()).is_err() {
+                    break;
+                }
+            }
+        });
+
         // Bounds how many jobs execute concurrently. The reader never blocks on it: each job is
         // spawned and acquires a permit inside its task, so the loop keeps reading the socket
         // (heartbeat replies, Close frames) while at most `max_parallel_jobs` run at once.
@@ -316,8 +345,7 @@ mod networked {
                                     delta: delta.to_string(),
                                     reasoning: is_reasoning,
                                 };
-                                let payload =
-                                    serde_json::to_value(&chunk).unwrap_or(Value::Null);
+                                let payload = serde_json::to_value(&chunk).unwrap_or(Value::Null);
                                 let out = PhoenixMsg::new(
                                     Some("1".into()),
                                     Some(next_ref()),
@@ -360,6 +388,7 @@ mod networked {
 
         status.mark_connected(false);
         heartbeat.abort();
+        catalog_refresh.abort();
         writer.abort();
         Ok(())
     }

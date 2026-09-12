@@ -169,6 +169,9 @@ fn chat_body(req: &ChatRequest) -> serde_json::Value {
     if let Some(choice) = &req.tool_choice {
         body["tool_choice"] = choice.clone();
     }
+    if let Some(format) = &req.response_format {
+        body["response_format"] = format.clone();
+    }
     body
 }
 
@@ -450,7 +453,12 @@ mod tests {
         let mut a = StreamAssembly::default();
         feed(
             &mut a,
-            &["data: not json", "", "event: ping", r#"data: {"choices":[{"index":0,"delta":{"content":"ok"}}]}"#],
+            &[
+                "data: not json",
+                "",
+                "event: ping",
+                r#"data: {"choices":[{"index":0,"delta":{"content":"ok"}}]}"#,
+            ],
             &deltas,
         );
         assert_eq!(a.finish("m".into()).content, "ok");

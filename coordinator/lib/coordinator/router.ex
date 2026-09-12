@@ -31,16 +31,11 @@ defmodule Coordinator.Router do
     end
   end
 
-  # Honor the OpenAI `model` param: if any eligible worker actually serves the requested model,
-  # restrict routing to those workers (so `model: qwen…` doesn't get answered by gemma). If no
-  # connected worker serves it, fall back to all eligible workers (best-effort availability).
+  # A requested model is an exact constraint. Never silently substitute another model.
   defp prefer_requested_model(eligible, %Job{model: nil}), do: eligible
 
   defp prefer_requested_model(eligible, %Job{model: model} = job) do
-    case Enum.filter(eligible, &Worker.serves_model?(&1, job.capability, model)) do
-      [] -> eligible
-      with_model -> with_model
-    end
+    Enum.filter(eligible, &Worker.serves_model?(&1, job.capability, model))
   end
 
   @doc "All workers eligible to run `job` (capability + privacy + availability)."

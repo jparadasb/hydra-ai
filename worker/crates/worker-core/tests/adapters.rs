@@ -24,6 +24,7 @@ fn chat(model: &str) -> ChatRequest {
         temperature: None,
         tools: None,
         tool_choice: None,
+        response_format: None,
     }
 }
 
