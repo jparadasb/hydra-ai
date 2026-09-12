@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://hydra.local/proto/job_cancel.schema.json",
-  "title": "Job cancellation",
+  "$id": "https://hydra.local/proto/lease_heartbeat.schema.json",
+  "title": "Lease heartbeat",
   "type": "object",
   "additionalProperties": false,
   "required": ["job_id", "lease_id"],

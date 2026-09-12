@@ -48,6 +48,7 @@ defmodule Coordinator.WorkerChannelTest do
 
     job = %{
       "job_id" => "j1",
+      "lease_id" => "lease-j1",
       "capability" => "text.extract_json",
       "privacy" => "public",
       "allow_external_providers" => true,
@@ -56,9 +57,11 @@ defmodule Coordinator.WorkerChannelTest do
 
     WorkerChannel.lease("w-chan", job)
     assert_push("job", %{"job_id" => "j1"})
+    wait_inflight("w-chan", 1)
 
-    WorkerChannel.cancel("w-chan", "j1")
-    assert_push("cancel", %{"job_id" => "j1"})
+    WorkerChannel.cancel("w-chan", "j1", "lease-j1")
+    assert_push("cancel", %{"job_id" => "j1", "lease_id" => "lease-j1"})
+    wait_inflight("w-chan", 0)
   end
 
   test "join is refused when registration carries a token; nothing is registered" do
@@ -83,20 +86,98 @@ defmodule Coordinator.WorkerChannelTest do
   end
 
   test "racing cancellation and result decrement inflight only once" do
-    {:ok, _reply, socket} = join_worker("w-race", registration("w-race"))
+    reg = Map.put(registration("w-race"), "supports_cancel_ack", true)
+    {:ok, _reply, socket} = join_worker("w-race", reg)
     wait_present("w-race")
 
-    WorkerChannel.lease("w-race", %{"job_id" => "j-race"})
+    WorkerChannel.lease("w-race", %{"job_id" => "j-race", "lease_id" => "lease-race"})
     assert_push("job", %{"job_id" => "j-race"})
     wait_inflight("w-race", 1)
 
-    WorkerChannel.cancel("w-race", "j-race")
-    assert_push("cancel", %{"job_id" => "j-race"})
+    WorkerChannel.cancel("w-race", "j-race", "lease-race")
+    assert_push("cancel", %{"job_id" => "j-race", "lease_id" => "lease-race"})
+    wait_inflight("w-race", 1)
+
+    stale_ref = push(socket, "cancelled", %{"job_id" => "j-race", "lease_id" => "stale"})
+    assert_reply(stale_ref, :ok)
+    wait_inflight("w-race", 1)
+
+    cancel_ref =
+      push(socket, "cancelled", %{"job_id" => "j-race", "lease_id" => "lease-race"})
+
+    assert_reply(cancel_ref, :ok)
     wait_inflight("w-race", 0)
 
     ref = push(socket, "result", %{"job_id" => "j-race", "status" => "ok", "output" => %{}})
     assert_reply(ref, :ok)
     wait_inflight("w-race", 0)
+  end
+
+  test "re-lease tracks both generations until each one finishes" do
+    reg = Map.put(registration("w-generations"), "supports_cancel_ack", true)
+    {:ok, _reply, socket} = join_worker("w-generations", reg)
+    wait_present("w-generations")
+
+    WorkerChannel.lease("w-generations", %{"job_id" => "j-gen", "lease_id" => "lease-1"})
+    assert_push("job", _)
+    WorkerChannel.lease("w-generations", %{"job_id" => "j-gen", "lease_id" => "lease-2"})
+    assert_push("job", _)
+    wait_inflight("w-generations", 2)
+
+    WorkerChannel.cancel("w-generations", "j-gen", "lease-1")
+    assert_push("cancel", _)
+    ack = push(socket, "cancelled", %{"job_id" => "j-gen", "lease_id" => "lease-1"})
+    assert_reply(ack, :ok)
+    wait_inflight("w-generations", 1)
+
+    result =
+      push(socket, "result", %{
+        "job_id" => "j-gen",
+        "lease_id" => "lease-2",
+        "status" => "ok",
+        "output" => %{}
+      })
+
+    assert_reply(result, :ok)
+    wait_inflight("w-generations", 0)
+  end
+
+  test "malformed cancellation acknowledgement is rejected without closing channel" do
+    {:ok, _reply, socket} = join_worker("w-malformed", registration("w-malformed"))
+    ref = push(socket, "cancelled", %{})
+    assert_reply(ref, :error, %{reason: "invalid_cancellation_ack"})
+    assert Process.alive?(socket.channel_pid)
+  end
+
+  test "rejected result releases channel bookkeeping" do
+    {:ok, _reply, socket} = join_worker("w-rejected", registration("w-rejected"))
+    wait_present("w-rejected")
+    WorkerChannel.lease("w-rejected", %{"job_id" => "j-rejected", "lease_id" => "l-rejected"})
+    assert_push("job", _)
+    wait_inflight("w-rejected", 1)
+
+    ref = push(socket, "result", %{"job_id" => "j-rejected", "authorization" => "Bearer bad"})
+    assert_reply(ref, :error, %{reason: "secret_key_present"})
+    wait_inflight("w-rejected", 0)
+  end
+
+  test "closing an overlapping stale channel does not reclaim live reconnect leases" do
+    {:ok, _reply, stale} = join_worker("w-overlap", registration("w-overlap"))
+    {:ok, _reply, _live} = join_worker("w-overlap", registration("w-overlap"))
+    wait_present("w-overlap")
+
+    {:ok, rec} =
+      Jobs.enqueue(%{
+        capability: "text.extract_json",
+        privacy: "public",
+        allow_external_providers: true,
+        payload: %{"messages" => []}
+      })
+
+    assert :ok = perform_job(LeaseWorker, %{job_id: rec.id})
+    Process.unlink(stale.channel_pid)
+    close(stale)
+    assert Jobs.get(rec.id).status == "leased"
   end
 
   test "closing a worker channel requeues its in-flight jobs" do

@@ -182,9 +182,25 @@ mod networked {
     use crate::gateway::Gateway;
     use crate::types::Job;
 
-    fn cancel_job(jobs: &mut HashMap<String, tokio::task::JoinHandle<()>>, job_id: &str) -> bool {
-        if let Some(handle) = jobs.remove(job_id) {
-            handle.abort();
+    struct RunningJob {
+        lease_id: Option<String>,
+        handle: tokio::task::JoinHandle<()>,
+        heartbeat: tokio::task::JoinHandle<()>,
+    }
+
+    fn cancel_job(
+        jobs: &mut HashMap<String, RunningJob>,
+        job_id: &str,
+        lease_id: Option<&str>,
+    ) -> bool {
+        let matches = jobs
+            .get(job_id)
+            .is_some_and(|running| lease_id.is_none() || running.lease_id.as_deref() == lease_id);
+
+        if matches {
+            let running = jobs.remove(job_id).expect("running job disappeared");
+            running.heartbeat.abort();
+            running.handle.abort();
             true
         } else {
             false
@@ -317,7 +333,7 @@ mod networked {
         // spawned and acquires a permit inside its task, so the loop keeps reading the socket
         // (heartbeat replies, Close frames) while at most `max_parallel_jobs` run at once.
         let sem = Arc::new(Semaphore::new(config.max_parallel_jobs.max(1)));
-        let mut jobs = HashMap::<String, tokio::task::JoinHandle<()>>::new();
+        let mut jobs = HashMap::<String, RunningJob>::new();
 
         // Reader loop: dispatch leased jobs to bounded background tasks; each replies with its
         // own result. Running jobs in tasks (not inline) lets a worker process many leases in
@@ -333,7 +349,14 @@ mod networked {
             };
             // Reap completed handles while traffic is flowing. Retaining the handles lets a
             // cancellation abort both jobs waiting for a semaphore permit and active adapters.
-            jobs.retain(|_, handle| !handle.is_finished());
+            jobs.retain(|_, running| {
+                if running.handle.is_finished() {
+                    running.heartbeat.abort();
+                    false
+                } else {
+                    true
+                }
+            });
             if pm.event == "phx_reply" && pm.topic == topic {
                 match pm.payload.get("status").and_then(Value::as_str) {
                     Some("ok") => tracing::debug!("coordinator acknowledged worker message"),
@@ -353,6 +376,38 @@ mod networked {
                     let tx = tx.clone();
                     let topic = topic.clone();
                     let next_ref = next_ref.clone();
+                    let lease_id = job.lease_id.clone();
+                    let heartbeat = {
+                        let tx = tx.clone();
+                        let topic = topic.clone();
+                        let next_ref = next_ref.clone();
+                        let job_id = job_id.clone();
+                        let lease_id = lease_id.clone();
+
+                        tokio::spawn(async move {
+                            let Some(lease_id) = lease_id else { return };
+                            let mut tick = tokio::time::interval(Duration::from_secs(20));
+
+                            loop {
+                                tick.tick().await;
+                                let heartbeat = PhoenixMsg::new(
+                                    Some("1".into()),
+                                    Some(next_ref()),
+                                    &topic,
+                                    "lease_heartbeat",
+                                    serde_json::json!({
+                                        "job_id": job_id,
+                                        "lease_id": lease_id,
+                                    }),
+                                );
+
+                                if tx.send(heartbeat.encode()).is_err() {
+                                    break;
+                                }
+                            }
+                        })
+                    };
+                    let heartbeat_abort = heartbeat.abort_handle();
                     let handle = tokio::spawn(async move {
                         // Wait for a free slot; if the semaphore is gone we're shutting down.
                         let Ok(_permit) = sem.acquire_owned().await else {
@@ -410,23 +465,46 @@ mod networked {
                         // re-leases the job on lease timeout.
                         tx.send(out.encode()).ok();
                         status.incr_jobs();
+                        heartbeat_abort.abort();
                     });
                     // Duplicate leases replace and abort older work for the same logical job.
-                    if let Some(old) = jobs.insert(job_id, handle) {
-                        old.abort();
+                    if let Some(old) = jobs.insert(
+                        job_id,
+                        RunningJob {
+                            lease_id,
+                            handle,
+                            heartbeat,
+                        },
+                    ) {
+                        old.heartbeat.abort();
+                        old.handle.abort();
                     }
                 }
             }
             if pm.event == "cancel" && pm.topic == topic {
                 if let Some(job_id) = pm.payload.get("job_id").and_then(Value::as_str) {
-                    cancel_job(&mut jobs, job_id);
+                    let lease_id = pm.payload.get("lease_id").and_then(Value::as_str);
+
+                    cancel_job(&mut jobs, job_id, lease_id);
+
+                    if let Some(lease_id) = lease_id {
+                        let cancelled = PhoenixMsg::new(
+                            Some("1".into()),
+                            Some(next_ref()),
+                            &topic,
+                            "cancelled",
+                            serde_json::json!({"job_id": job_id, "lease_id": lease_id}),
+                        );
+                        tx.send(cancelled.encode()).ok();
+                    }
                 }
             }
         }
 
         status.mark_connected(false);
-        for (_, handle) in jobs {
-            handle.abort();
+        for (_, running) in jobs {
+            running.heartbeat.abort();
+            running.handle.abort();
         }
         heartbeat.abort();
         catalog_refresh.abort();
@@ -442,11 +520,20 @@ mod networked {
         async fn cancel_aborts_and_removes_running_job() {
             let mut jobs = HashMap::new();
             let handle = tokio::spawn(std::future::pending::<()>());
-            jobs.insert("job-1".to_string(), handle);
+            let heartbeat = tokio::spawn(std::future::pending::<()>());
+            jobs.insert(
+                "job-1".to_string(),
+                RunningJob {
+                    lease_id: Some("lease-1".into()),
+                    handle,
+                    heartbeat,
+                },
+            );
 
-            assert!(cancel_job(&mut jobs, "job-1"));
+            assert!(!cancel_job(&mut jobs, "job-1", Some("stale-lease")));
+            assert!(cancel_job(&mut jobs, "job-1", Some("lease-1")));
             assert!(jobs.is_empty());
-            assert!(!cancel_job(&mut jobs, "job-1"));
+            assert!(!cancel_job(&mut jobs, "job-1", Some("lease-1")));
         }
     }
 }

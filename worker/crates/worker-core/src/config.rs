@@ -99,7 +99,8 @@ pub struct WorkerConfig {
     /// Coordinator base URL, e.g. `ws://127.0.0.1:4000`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coordinator_url: Option<String>,
-    /// Maximum idle time between response bytes from local runtimes and external providers.
+    /// Maximum idle time between response bytes from external providers. Local inference is
+    /// bounded by coordinator job deadlines and cancellation instead.
     #[serde(default = "default_request_timeout_secs")]
     pub request_timeout_secs: u64,
 }

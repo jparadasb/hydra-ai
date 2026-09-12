@@ -7,6 +7,7 @@
 //!   * **locality** — secrets stay inside the adapter; the result carries usage, never tokens.
 
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 use std::time::Instant;
 
 use crate::adapter::{AdapterRegistry, DeltaSink, ProviderAdapter};
@@ -32,6 +33,7 @@ pub struct Gateway {
 }
 
 impl Gateway {
+    const CATALOG_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
     pub fn new(
         registry: AdapterRegistry,
         policy: RoutingPolicy,
@@ -52,15 +54,16 @@ impl Gateway {
     pub async fn refresh_catalog(&self) {
         let mut catalog = Vec::new();
         for adapter in self.registry.iter() {
-            match adapter.list_models().await {
-                Ok(models) => {
+            match tokio::time::timeout(Self::CATALOG_PROBE_TIMEOUT, adapter.list_models()).await {
+                Ok(Ok(models)) => {
                     for m in models {
                         catalog.push((adapter.name().to_string(), m));
                     }
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     eprintln!("Model catalog probe failed for {}: {error}", adapter.name())
                 }
+                Err(_) => eprintln!("Model catalog probe timed out for {}", adapter.name()),
             }
         }
         let mut current = self.catalog.write().expect("catalog lock poisoned");

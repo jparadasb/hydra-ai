@@ -20,7 +20,14 @@ defmodule Coordinator.LeaseWorker do
         :ok
 
       %{status: "pending"} = record ->
-        if Jobs.expired?(record), do: Jobs.fail_expired(record), else: lease(record)
+        if Jobs.expired?(record) do
+          case Jobs.fail_expired(record) do
+            {:error, :not_pending} -> :ok
+            result -> result
+          end
+        else
+          lease(record)
+        end
 
       _already_handled ->
         :ok
@@ -38,7 +45,14 @@ defmodule Coordinator.LeaseWorker do
       {:ok, worker} ->
         lease_id = Jobs.gen_lease_id()
 
-        case Jobs.mark_leased(record, worker.worker_id, lease_id) do
+        # Worker snapshots arrive via Presence and may have been replicated by a coordinator
+        # node that predates this field, so read it defensively rather than by dot-access.
+        case Jobs.mark_leased(
+               record,
+               worker.worker_id,
+               lease_id,
+               Map.get(worker, :supports_lease_heartbeat, false)
+             ) do
           {:ok, leased} -> WorkerChannel.lease(worker.worker_id, Jobs.to_lease_payload(leased))
           {:error, :not_pending} -> :ok
         end

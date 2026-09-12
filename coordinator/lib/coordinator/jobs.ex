@@ -15,7 +15,7 @@ defmodule Coordinator.Jobs do
 
   @max_attempts 5
   @default_job_timeout_ms 300_000
-  @default_lease_timeout_ms 300_000
+  @default_lease_timeout_ms 60_000
 
   @doc "Persist a new job and enqueue its lease assignment."
   def enqueue(attrs) do
@@ -64,7 +64,7 @@ defmodule Coordinator.Jobs do
     }
   end
 
-  def mark_leased(%JobRecord{} = r, worker_id, lease_id) do
+  def mark_leased(%JobRecord{} = r, worker_id, lease_id, renewable? \\ false) do
     {count, _} =
       from(j in JobRecord, where: j.id == ^r.id and j.status == "pending")
       |> Repo.update_all(
@@ -72,10 +72,10 @@ defmodule Coordinator.Jobs do
           status: "leased",
           worker_id: worker_id,
           lease_id: lease_id,
-          lease_expires_at: lease_deadline(r),
-          attempts: r.attempts + 1,
+          lease_expires_at: lease_deadline(r, renewable?),
           updated_at: now()
-        ]
+        ],
+        inc: [attempts: 1]
       )
 
     if count == 1, do: {:ok, get(r.id)}, else: {:error, :not_pending}
@@ -115,18 +115,40 @@ defmodule Coordinator.Jobs do
       where: j.status == "leased" and j.lease_expires_at <= ^now()
     )
     |> Repo.all()
-    |> Enum.each(&reclaim_lease/1)
-
-    :ok
+    |> Enum.reduce(:ok, fn record, result ->
+      merge_reclaim_result(result, reclaim_lease(record))
+    end)
   end
 
-  @doc "Reclaim all active leases owned by a disconnected worker."
+  @doc "Reclaim all active leases when a worker's final channel disconnects."
   def reclaim_worker_leases(worker_id) when is_binary(worker_id) do
     from(j in JobRecord, where: j.status == "leased" and j.worker_id == ^worker_id)
     |> Repo.all()
-    |> Enum.each(&reclaim_lease/1)
+    |> Enum.reduce(:ok, fn record, result ->
+      merge_reclaim_result(result, reclaim_lease(record))
+    end)
+  end
 
-    :ok
+  @doc "Renew one lease generation without extending it past the caller deadline."
+  def renew_lease(worker_id, job_id, lease_id)
+      when is_binary(worker_id) and is_binary(job_id) and is_binary(lease_id) do
+    case get(job_id) do
+      %JobRecord{} = record ->
+        {count, _} =
+          from(j in JobRecord,
+            where:
+              j.id == ^job_id and j.status == "leased" and j.worker_id == ^worker_id and
+                j.lease_id == ^lease_id
+          )
+          |> Repo.update_all(
+            set: [lease_expires_at: lease_deadline(record, true), updated_at: now()]
+          )
+
+        if count == 1, do: :ok, else: {:error, :stale_lease}
+
+      nil ->
+        {:error, :unknown_job}
+    end
   end
 
   defp reclaim_lease(%JobRecord{attempts: attempts} = record) when attempts >= @max_attempts do
@@ -146,7 +168,7 @@ defmodule Coordinator.Jobs do
       )
 
     if count == 1 do
-      Coordinator.WorkerChannel.cancel(record.worker_id, record.id)
+      Coordinator.WorkerChannel.cancel(record.worker_id, record.id, record.lease_id)
       broadcast_result(%{"job_id" => record.id, "status" => "error", "reason" => "lease_expired"})
     end
 
@@ -154,27 +176,42 @@ defmodule Coordinator.Jobs do
   end
 
   defp reclaim_lease(%JobRecord{} = record) do
-    {count, _} =
-      from(j in JobRecord,
-        where: j.id == ^record.id and j.status == "leased" and j.lease_id == ^record.lease_id
-      )
-      |> Repo.update_all(
-        set: [
-          status: "pending",
-          worker_id: nil,
-          lease_id: nil,
-          lease_expires_at: nil,
-          updated_at: now()
-        ]
-      )
+    result =
+      Repo.transaction(fn ->
+        {count, _} =
+          from(j in JobRecord,
+            where: j.id == ^record.id and j.status == "leased" and j.lease_id == ^record.lease_id
+          )
+          |> Repo.update_all(
+            set: [
+              status: "pending",
+              worker_id: nil,
+              lease_id: nil,
+              lease_expires_at: nil,
+              updated_at: now()
+            ]
+          )
 
-    if count == 1 do
-      Coordinator.WorkerChannel.cancel(record.worker_id, record.id)
-      enqueue_lease(record.id)
+        if count == 1 do
+          Coordinator.WorkerChannel.cancel(record.worker_id, record.id, record.lease_id)
+
+          case enqueue_lease(record.id) do
+            {:ok, _job} -> :reclaimed
+            {:error, reason} -> Repo.rollback(reason)
+          end
+        else
+          :unchanged
+        end
+      end)
+
+    case result do
+      {:error, reason} -> {:error, reason}
+      _ -> :ok
     end
-
-    :ok
   end
+
+  defp merge_reclaim_result(:ok, next), do: next
+  defp merge_reclaim_result({:error, _} = error, _next), do: error
 
   @doc """
   Record a worker's result. `ok` → done. Otherwise re-queue for another attempt until
@@ -260,8 +297,21 @@ defmodule Coordinator.Jobs do
   defp lease_timeout_ms,
     do: Application.get_env(:coordinator, :lease_timeout_ms, @default_lease_timeout_ms)
 
-  defp lease_deadline(%JobRecord{expires_at: %DateTime{} = expires_at}), do: expires_at
-  defp lease_deadline(_record), do: deadline(lease_timeout_ms())
+  defp lease_deadline(%JobRecord{} = record, true) do
+    lease_expires_at = deadline(lease_timeout_ms())
+
+    case Map.get(record, :expires_at) do
+      %DateTime{} = expires_at ->
+        if DateTime.compare(expires_at, lease_expires_at) == :lt,
+          do: expires_at,
+          else: lease_expires_at
+
+      _ ->
+        lease_expires_at
+    end
+  end
+
+  defp lease_deadline(%JobRecord{} = record, false), do: Map.get(record, :expires_at)
 
   defp broadcast_result(result) do
     Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {:job_result, result})

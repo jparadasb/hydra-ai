@@ -8,9 +8,24 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub fn client(read_timeout: Duration) -> Result<reqwest::Client> {
+    if read_timeout.is_zero() {
+        return Err(crate::error::Error::Other(
+            "request_timeout_secs must be greater than zero".into(),
+        ));
+    }
+
     reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .read_timeout(read_timeout)
+        .build()
+        .map_err(Into::into)
+}
+
+/// Local inference may legitimately take minutes before emitting its first byte. Keep only the
+/// connection bound here; job deadlines and coordinator cancellation bound total execution.
+pub fn local_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
         .build()
         .map_err(Into::into)
 }
@@ -22,6 +37,7 @@ pub fn default_client() -> Result<reqwest::Client> {
 pub fn download_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(DEFAULT_REQUEST_TIMEOUT)
         .build()
         .map_err(Into::into)
 }
@@ -47,5 +63,10 @@ mod tests {
         assert!(error.is_err(), "silent server unexpectedly returned");
         assert!(started.elapsed() < Duration::from_secs(1));
         server.abort();
+    }
+
+    #[test]
+    fn zero_request_timeout_is_rejected() {
+        assert!(client(Duration::ZERO).is_err());
     }
 }

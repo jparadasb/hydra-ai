@@ -12,6 +12,7 @@ defmodule Coordinator.WorkerChannel do
   the worker replies with a `"result"` message.
   """
   use Phoenix.Channel
+  require Logger
 
   alias Coordinator.{Jobs, WorkerRegistry, WorkerSession}
 
@@ -39,7 +40,7 @@ defmodule Coordinator.WorkerChannel do
              socket
              |> assign(:worker_id, worker.worker_id)
              |> assign(:worker, worker)
-             |> assign(:active_job_ids, MapSet.new())}
+             |> assign(:active_leases, MapSet.new())}
 
           {:error, reason} ->
             {:error, %{reason: to_string(reason)}}
@@ -72,13 +73,21 @@ defmodule Coordinator.WorkerChannel do
     push(socket, "job", payload)
     worker = %{socket.assigns.worker | inflight: socket.assigns.worker.inflight + 1}
     WorkerRegistry.update(self(), worker)
-    active_job_ids = MapSet.put(socket.assigns.active_job_ids, payload["job_id"])
-    {:noreply, socket |> assign(:worker, worker) |> assign(:active_job_ids, active_job_ids)}
+
+    active_leases =
+      MapSet.put(socket.assigns.active_leases, {payload["job_id"], payload["lease_id"]})
+
+    {:noreply, socket |> assign(:worker, worker) |> assign(:active_leases, active_leases)}
   end
 
   def handle_out("cancel", payload, socket) do
     push(socket, "cancel", payload)
-    {:noreply, finish_job(socket, payload["job_id"])}
+
+    if Map.get(socket.assigns.worker, :supports_cancel_ack, false) do
+      {:noreply, socket}
+    else
+      {:noreply, finish_lease(socket, payload["job_id"], payload["lease_id"])}
+    end
   end
 
   @impl true
@@ -104,6 +113,34 @@ defmodule Coordinator.WorkerChannel do
     end
   end
 
+  def handle_in("cancelled", %{"job_id" => job_id, "lease_id" => lease_id} = payload, socket)
+      when is_binary(job_id) and is_binary(lease_id) do
+    case Coordinator.SecretGuard.verify(payload) do
+      :ok -> {:reply, :ok, finish_lease(socket, job_id, lease_id)}
+      {:error, reason} -> {:reply, {:error, %{reason: to_string(reason)}}, socket}
+    end
+  end
+
+  def handle_in("cancelled", _payload, socket),
+    do: {:reply, {:error, %{reason: "invalid_cancellation_ack"}}, socket}
+
+  def handle_in(
+        "lease_heartbeat",
+        %{"job_id" => job_id, "lease_id" => lease_id} = payload,
+        socket
+      )
+      when is_binary(job_id) and is_binary(lease_id) do
+    with :ok <- Coordinator.SecretGuard.verify(payload),
+         :ok <- Jobs.renew_lease(socket.assigns.worker_id, job_id, lease_id) do
+      {:reply, :ok, socket}
+    else
+      {:error, reason} -> {:reply, {:error, %{reason: to_string(reason)}}, socket}
+    end
+  end
+
+  def handle_in("lease_heartbeat", _payload, socket),
+    do: {:reply, {:error, %{reason: "invalid_lease_heartbeat"}}, socket}
+
   def handle_in("registration", _payload, socket),
     do: {:reply, {:error, %{reason: "worker_id_mismatch"}}, socket}
 
@@ -118,10 +155,10 @@ defmodule Coordinator.WorkerChannel do
   def handle_in("result", payload, socket) do
     case WorkerSession.handle_result(payload) do
       {:ok, _clean} ->
-        {:reply, :ok, finish_job(socket, payload["job_id"])}
+        {:reply, :ok, finish_result(socket, payload)}
 
       {:error, reason} ->
-        {:reply, {:error, %{reason: to_string(reason)}}, socket}
+        {:reply, {:error, %{reason: to_string(reason)}}, finish_result(socket, payload)}
     end
   end
 
@@ -140,7 +177,15 @@ defmodule Coordinator.WorkerChannel do
 
   @impl true
   def terminate(_reason, socket) do
-    if worker_id = socket.assigns[:worker_id], do: Jobs.reclaim_worker_leases(worker_id)
+    if worker_id = socket.assigns[:worker_id] do
+      if not WorkerRegistry.other_connection?(worker_id, self()) do
+        case Jobs.reclaim_worker_leases(worker_id) do
+          :ok -> :ok
+          {:error, reason} -> Logger.error("worker lease reclaim failed: #{inspect(reason)}")
+        end
+      end
+    end
+
     :ok
   end
 
@@ -154,18 +199,42 @@ defmodule Coordinator.WorkerChannel do
   end
 
   @doc "Tell a worker to abort an in-flight or queued job. Safe when job already finished."
-  def cancel(worker_id, job_id) when is_binary(worker_id) and is_binary(job_id) do
-    Coordinator.Endpoint.broadcast("worker:#{worker_id}", "cancel", %{"job_id" => job_id})
+  def cancel(worker_id, job_id, lease_id)
+      when is_binary(worker_id) and is_binary(job_id) and is_binary(lease_id) do
+    Coordinator.Endpoint.broadcast(
+      "worker:#{worker_id}",
+      "cancel",
+      %{"job_id" => job_id, "lease_id" => lease_id}
+    )
   end
 
   defp finish_job(socket, job_id) do
-    if MapSet.member?(socket.assigns.active_job_ids, job_id) do
+    socket.assigns.active_leases
+    |> Enum.filter(fn {id, _lease_id} -> id == job_id end)
+    |> Enum.reduce(socket, fn {_id, lease_id}, current ->
+      finish_lease(current, job_id, lease_id)
+    end)
+  end
+
+  defp finish_result(socket, %{"job_id" => job_id, "lease_id" => lease_id})
+       when is_binary(job_id) and is_binary(lease_id),
+       do: finish_lease(socket, job_id, lease_id)
+
+  defp finish_result(socket, %{"job_id" => job_id}) when is_binary(job_id),
+    do: finish_job(socket, job_id)
+
+  defp finish_result(socket, _payload), do: socket
+
+  defp finish_lease(socket, job_id, lease_id) do
+    lease = {job_id, lease_id}
+
+    if MapSet.member?(socket.assigns.active_leases, lease) do
       worker = %{socket.assigns.worker | inflight: max(socket.assigns.worker.inflight - 1, 0)}
       WorkerRegistry.update(self(), worker)
 
       socket
       |> assign(:worker, worker)
-      |> assign(:active_job_ids, MapSet.delete(socket.assigns.active_job_ids, job_id))
+      |> assign(:active_leases, MapSet.delete(socket.assigns.active_leases, lease))
     else
       socket
     end

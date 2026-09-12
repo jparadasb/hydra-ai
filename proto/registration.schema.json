@@ -67,6 +67,8 @@
       }
     },
     "trust_level": { "type": "string" },
-    "version": { "type": "string", "description": "Worker build identity (e.g. \"0.1.0 (abc1234)\"). Informational; never gates routing." }
+    "version": { "type": "string", "description": "Worker build identity (e.g. \"0.1.0 (abc1234)\"). Informational; never gates routing." },
+    "supports_cancel_ack": { "type": "boolean", "default": false },
+    "supports_lease_heartbeat": { "type": "boolean", "default": false }
   }
 }
