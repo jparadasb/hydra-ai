@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::Limits;
 use crate::error::{Error, Result};
+use crate::sync::MutexExt;
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -38,7 +39,7 @@ pub struct Reservation {
 impl Drop for Reservation {
     fn drop(&mut self) {
         if self.provider_slot {
-            let mut s = self.state.lock().unwrap();
+            let mut s = self.state.lock_recover();
             s.inflight = s.inflight.saturating_sub(1);
         }
     }
@@ -55,7 +56,7 @@ impl LimitGuard {
     /// Count every request, and reserve a parallel slot for external-provider calls.
     pub fn try_reserve(&self, uses_external_provider: bool) -> Result<Reservation> {
         let now = now_secs();
-        let mut s = self.state.lock().unwrap();
+        let mut s = self.state.lock_recover();
 
         // Rolling-hour request count.
         let cutoff = now.saturating_sub(3600);

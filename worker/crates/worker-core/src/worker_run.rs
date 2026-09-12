@@ -8,7 +8,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -199,8 +199,8 @@ pub async fn build_and_run(params: RunParams, status: Arc<RunStatus>) -> Result<
     // Reconnect-with-backoff. A worker is a long-running daemon: a dropped socket (coordinator
     // restart, network blip) or a failed connect must not end the run — we retry forever. The
     // loop only stops when the task is cancelled (desktop Stop -> `Runner::stop` aborts it) or
-    // the process exits (CLI Ctrl-C). Backoff grows on repeated *connect failures* and resets
-    // after a connection that actually came up, so a brief outage recovers fast while a downed
+    // the process exits (CLI Ctrl-C). Backoff grows on repeated failures and resets after a
+    // connection that actually *stayed up*, so a brief outage recovers fast while a downed
     // coordinator isn't hammered.
     let base = Duration::from_secs(1);
     let max = Duration::from_secs(30);
@@ -220,26 +220,47 @@ pub async fn build_and_run(params: RunParams, status: Arc<RunStatus>) -> Result<
             max_parallel_jobs,
         };
 
-        match connect_and_run(client, Arc::clone(&gateway), Arc::clone(&status)).await {
-            // Connected then disconnected: recover quickly.
-            Ok(()) => backoff = base,
-            // Never connected: record why, then back off harder.
-            Err(e) => status.note_error(e.to_string()),
+        let started = Instant::now();
+        let outcome = connect_and_run(client, Arc::clone(&gateway), Arc::clone(&status)).await;
+        let uptime = started.elapsed();
+
+        if let Err(e) = outcome {
+            status.note_error(e.to_string());
         }
 
+        // Reset only after a connection that lasted. `Ok(())` also covers a socket that came
+        // up and died immediately, so resetting on it meant a flapping coordinator was retried
+        // at one-second intervals forever — the backoff never backed off.
+        backoff = next_backoff(backoff, uptime, base, max);
+
         tokio::time::sleep(backoff + jitter(backoff)).await;
-        backoff = (backoff * 2).min(max);
     }
 }
 
-// Up to +25% jitter so many workers reconnecting after the same outage don't synchronize.
+/// How long a connection must survive to count as "working" and clear the backoff.
+const STABLE_CONNECTION: Duration = Duration::from_secs(30);
+
+/// The backoff decision, extracted so it can be tested without a coordinator to flap.
+///
+/// A connection that came up and died immediately is not evidence that the coordinator is
+/// healthy — treating it as such is what let a flapping coordinator be retried at one-second
+/// intervals indefinitely.
+fn next_backoff(current: Duration, uptime: Duration, base: Duration, max: Duration) -> Duration {
+    if uptime >= STABLE_CONNECTION {
+        base
+    } else {
+        (current * 2).min(max)
+    }
+}
+
+/// Up to +25% jitter so many workers reconnecting after the same outage don't synchronize.
+///
+/// Previously derived from the clock's sub-second nanoseconds, which is not a random source:
+/// workers that restart together read similar values and stay in step — exactly the pile-up
+/// jitter exists to break up.
 fn jitter(d: Duration) -> Duration {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|t| t.subsec_nanos())
-        .unwrap_or(0);
-    let pct = (nanos % 250) as u128; // 0..249 -> up to ~24.9%
-    Duration::from_millis((d.as_millis() * pct / 1000) as u64)
+    let pct = rand::random::<u32>() % 250; // 0..249 -> up to ~24.9%
+    Duration::from_millis((d.as_millis() * pct as u128 / 1000) as u64)
 }
 
 /// How many leased jobs the worker runs in parallel. `HYDRA_MAX_PARALLEL_JOBS` overrides the
@@ -303,5 +324,57 @@ mod tests {
         // No explicit/env/config/baked -> built-in default (env not set in this test).
         std::env::remove_var("HYDRA_COORDINATOR_URL");
         assert_eq!(resolve_coordinator_url(None, &cfg), "ws://127.0.0.1:4000");
+    }
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    use super::*;
+
+    const BASE: Duration = Duration::from_secs(1);
+    const MAX: Duration = Duration::from_secs(30);
+
+    #[test]
+    fn a_connection_that_dies_immediately_does_not_reset_the_backoff() {
+        // The regression: `connect_and_run` returns `Ok(())` for a socket that came up and
+        // died, so resetting on `Ok(())` meant a flapping coordinator was retried at one-second
+        // intervals forever.
+        let flap = Duration::from_millis(200);
+
+        let mut backoff = BASE;
+        for _ in 0..5 {
+            backoff = next_backoff(backoff, flap, BASE, MAX);
+        }
+
+        assert!(
+            backoff > Duration::from_secs(8),
+            "backoff stalled at {backoff:?}"
+        );
+    }
+
+    #[test]
+    fn backoff_is_capped() {
+        let mut backoff = BASE;
+        for _ in 0..20 {
+            backoff = next_backoff(backoff, Duration::ZERO, BASE, MAX);
+        }
+        assert_eq!(backoff, MAX);
+    }
+
+    #[test]
+    fn a_connection_that_lasted_resets_it() {
+        let settled = next_backoff(MAX, STABLE_CONNECTION, BASE, MAX);
+        assert_eq!(settled, BASE);
+
+        // Exactly at the threshold counts as stable.
+        assert_eq!(next_backoff(MAX, STABLE_CONNECTION, BASE, MAX), BASE);
+    }
+
+    #[test]
+    fn jitter_stays_within_its_advertised_quarter() {
+        let d = Duration::from_secs(4);
+        for _ in 0..200 {
+            assert!(jitter(d) < d / 3, "jitter exceeded its bound");
+        }
     }
 }

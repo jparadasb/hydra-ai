@@ -20,6 +20,7 @@ pub mod registration;
 pub mod retry;
 pub mod runtime;
 pub mod self_update;
+pub mod sync;
 pub mod types;
 pub mod usage;
 pub mod vault;

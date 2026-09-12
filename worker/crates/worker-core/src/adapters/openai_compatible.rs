@@ -244,20 +244,50 @@ pub(crate) async fn oai_chat_stream(
     let mut buf = String::new();
     while let Some(chunk) = stream.next().await {
         buf.push_str(&String::from_utf8_lossy(&chunk?));
+
+        // A backend that never emits a newline would otherwise grow this without limit. Fail
+        // the job rather than the process.
+        if buf.len() > MAX_SSE_LINE_BYTES {
+            return Err(Error::Other(format!(
+                "streaming response line exceeded {MAX_SSE_LINE_BYTES} bytes without a newline"
+            )));
+        }
+
         while let Some(pos) = buf.find('\n') {
             let line: String = buf.drain(..=pos).collect();
             assembly.feed_line(line.trim_end(), on_delta.as_ref());
         }
     }
 
+    if assembly.overflowed() {
+        return Err(Error::Other(format!(
+            "streamed completion exceeded {MAX_STREAMED_CONTENT_BYTES} bytes"
+        )));
+    }
+
     Ok(assembly.finish(req.model))
 }
+
+/// A model emits a handful of parallel tool calls, not hundreds. The cap exists because the
+/// index that selects a slot is supplied by the provider and used to size an allocation.
+pub(crate) const MAX_TOOL_CALLS: usize = 64;
+
+/// Largest run of streamed bytes accepted without a newline. Generous for an SSE frame,
+/// bounded so a backend that never delimits cannot grow the buffer without limit.
+pub(crate) const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
+
+/// Largest completion accepted from a stream. A backend that never stops is a runaway bill and
+/// a growing allocation; the job fails instead of the process.
+pub(crate) const MAX_STREAMED_CONTENT_BYTES: usize = 32 * 1024 * 1024;
 
 /// Incremental state for one streamed completion: accumulated content, tool-call fragments
 /// (keyed by delta `index`), and the trailing usage chunk. Pure — fed SSE lines, no I/O.
 #[derive(Default)]
 pub(crate) struct StreamAssembly {
     content: String,
+    /// Set once the content cap is hit, so the truncation is reported rather than silently
+    /// handing back a partial answer as if it were whole.
+    overflowed: bool,
     // (id, name, arguments) per tool-call index; streamed deltas set id/name once and
     // append argument fragments.
     calls: Vec<(String, String, String)>,
@@ -299,13 +329,24 @@ impl StreamAssembly {
         }
         if let Some(text) = delta["content"].as_str() {
             if !text.is_empty() {
-                self.content.push_str(text);
-                on_delta(text, false);
+                if self.content.len() + text.len() > MAX_STREAMED_CONTENT_BYTES {
+                    self.overflowed = true;
+                } else {
+                    self.content.push_str(text);
+                    on_delta(text, false);
+                }
             }
         }
         if let Some(fragments) = delta["tool_calls"].as_array() {
             for frag in fragments {
                 let idx = frag["index"].as_u64().unwrap_or(0) as usize;
+                // `index` is the provider's number, and it sized an allocation: a backend
+                // answering `index: 4294967295` asked this process to allocate four billion
+                // elements. A model does not emit hundreds of parallel tool calls, so anything
+                // past the cap is a malformed response — drop the fragment, keep the stream.
+                if idx >= MAX_TOOL_CALLS {
+                    continue;
+                }
                 if self.calls.len() <= idx {
                     self.calls.resize(idx + 1, Default::default());
                 }
@@ -321,6 +362,11 @@ impl StreamAssembly {
                 }
             }
         }
+    }
+
+    /// Did the stream exceed the content cap?
+    pub(crate) fn overflowed(&self) -> bool {
+        self.overflowed
     }
 
     pub(crate) fn finish(self, model: String) -> ChatResponse {
@@ -343,10 +389,30 @@ impl StreamAssembly {
     }
 }
 
+/// Largest non-streaming response body accepted. `resp.text()` with no ceiling meant the
+/// provider decided this process's memory usage.
+pub(crate) const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Read a response body whole, refusing one that announces itself as larger than we will hold.
+///
+/// `Content-Length` is the provider's claim rather than a guarantee, so this bounds the common
+/// case cheaply; the transport's own frame limits bound the rest.
+pub(crate) async fn body_text(resp: reqwest::Response) -> Result<String> {
+    if let Some(len) = resp.content_length() {
+        if len > MAX_BODY_BYTES {
+            return Err(Error::Other(format!(
+                "provider response of {len} bytes exceeds the {MAX_BODY_BYTES} byte limit"
+            )));
+        }
+    }
+
+    Ok(resp.text().await?)
+}
+
 /// Read a response, mapping non-2xx into a [`Error::ProviderStatus`] with the body.
 pub(crate) async fn parse_json(resp: reqwest::Response) -> Result<serde_json::Value> {
     let status = resp.status();
-    let text = resp.text().await?;
+    let text = body_text(resp).await?;
     if !status.is_success() {
         return Err(Error::ProviderStatus {
             status: status.as_u16(),

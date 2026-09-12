@@ -742,3 +742,94 @@ async fn a_provider_reporting_zero_is_distinguishable_from_one_reporting_nothing
     assert_eq!(resp.usage.input_tokens, Some(0));
     assert!(resp.usage.is_reported());
 }
+
+// ---- robustness -------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_huge_tool_call_index_is_rejected_rather_than_allocated() {
+    // `index` is the provider's number and it sized a `Vec::resize`. A backend answering
+    // `index: 4294967295` asked this process for a four-billion-element allocation.
+    let server = MockServer::start().await;
+
+    let sse = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":4294967295,\"id\":\"x\",\"function\":{\"name\":\"boom\",\"arguments\":\"{}\"}}]}}]}\n",
+        "data: [DONE]\n",
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(sse))
+        .mount(&server)
+        .await;
+
+    let adapter =
+        OpenAICompatibleAdapter::new("openai", server.uri(), Secret::new("sk-x"), Client::new());
+    let (sink, _seen) = delta_sink();
+
+    // Completes with the content it did get, instead of dying on the allocation.
+    let resp = adapter
+        .run_chat_completion_streaming(chat("gpt-4.1-mini"), sink)
+        .await
+        .unwrap();
+
+    assert_eq!(resp.content, "hi");
+    assert!(resp.tool_calls.is_none(), "the malformed call is dropped");
+}
+
+#[tokio::test]
+async fn tool_calls_within_the_bound_still_work() {
+    // The cap must not break ordinary parallel tool calls.
+    let server = MockServer::start().await;
+
+    let sse = concat!(
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"a\",\"function\":{\"name\":\"one\",\"arguments\":\"{}\"}}]}}]}\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"b\",\"function\":{\"name\":\"two\",\"arguments\":\"{}\"}}]}}]}\n",
+        "data: [DONE]\n",
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(sse))
+        .mount(&server)
+        .await;
+
+    let adapter =
+        OpenAICompatibleAdapter::new("openai", server.uri(), Secret::new("sk-x"), Client::new());
+    let (sink, _seen) = delta_sink();
+
+    let resp = adapter
+        .run_chat_completion_streaming(chat("gpt-4.1-mini"), sink)
+        .await
+        .unwrap();
+
+    let calls = resp.tool_calls.expect("both calls survive");
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].function.name, "one");
+    assert_eq!(calls[1].function.name, "two");
+}
+
+#[tokio::test]
+async fn a_stream_with_no_newline_fails_the_job_not_the_process() {
+    // Without a cap this buffer grew for as long as the backend kept sending.
+    let server = MockServer::start().await;
+
+    let unterminated = "data: ".to_string() + &"x".repeat(2 * 1024 * 1024);
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(unterminated))
+        .mount(&server)
+        .await;
+
+    let adapter =
+        OpenAICompatibleAdapter::new("openai", server.uri(), Secret::new("sk-x"), Client::new());
+    let (sink, _seen) = delta_sink();
+
+    let error = adapter
+        .run_chat_completion_streaming(chat("gpt-4.1-mini"), sink)
+        .await
+        .expect_err("an undelimited stream is refused");
+
+    assert!(format!("{error}").contains("without a newline"), "{error}");
+}

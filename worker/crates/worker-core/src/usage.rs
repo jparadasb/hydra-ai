@@ -13,6 +13,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::sync::MutexExt;
 use crate::types::Usage;
 
 /// One rollup row, mirroring `proto/usage_report.schema.json`.
@@ -90,7 +91,7 @@ pub struct MemoryUsageStore {
 
 impl UsageStore for MemoryUsageStore {
     fn record(&self, period: &str, outcome: &CallOutcome) -> Result<()> {
-        let mut rows = self.rows.lock().unwrap();
+        let mut rows = self.rows.lock_recover();
         let rec = rows
             .entry(key(&outcome.provider, &outcome.model, period))
             .or_default();
@@ -99,7 +100,7 @@ impl UsageStore for MemoryUsageStore {
     }
 
     fn query(&self, period: Option<&str>) -> Result<Vec<UsageRecord>> {
-        let rows = self.rows.lock().unwrap();
+        let rows = self.rows.lock_recover();
         Ok(rows
             .values()
             .filter(|r| period.map(|p| r.period.starts_with(p)).unwrap_or(true))
@@ -145,7 +146,7 @@ impl JsonUsageStore {
 
 impl UsageStore for JsonUsageStore {
     fn record(&self, period: &str, outcome: &CallOutcome) -> Result<()> {
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.lock_recover();
         let rec = cache
             .entry(key(&outcome.provider, &outcome.model, period))
             .or_default();
@@ -154,7 +155,7 @@ impl UsageStore for JsonUsageStore {
     }
 
     fn query(&self, period: Option<&str>) -> Result<Vec<UsageRecord>> {
-        let cache = self.cache.lock().unwrap();
+        let cache = self.cache.lock_recover();
         Ok(cache
             .values()
             .filter(|r| period.map(|p| r.period.starts_with(p)).unwrap_or(true))
