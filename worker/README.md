@@ -17,9 +17,13 @@ cargo test --workspace          # all unit + integration tests
 cargo build -p worker-cli       # the hydra-worker binary
 ```
 
-Secret storage defaults to an encrypted local file (ChaCha20-Poly1305 + Argon2id, `0600`).
-Build with `--features worker-core/os-keychain` to use the OS keychain (Secret Service /
-Keychain / Credential Manager) instead — requires platform crypto libs.
+Secrets are stored in an encrypted local file (ChaCha20-Poly1305 + Argon2id, `0600`) on every
+platform. That is what the worker reports to the coordinator as `token_storage:
+"local_encrypted"`.
+
+An OS keychain backend used to be documented here. It was never reachable — nothing
+constructed it, the feature was off by default, and no shipped binary had it compiled in — so
+it has been removed rather than left as a promise the code did not keep.
 
 ## CLI quickstart
 
