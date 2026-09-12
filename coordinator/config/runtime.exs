@@ -129,10 +129,27 @@ case System.get_env("HYDRA_CLUSTER_SERVICE") do
 end
 
 # Production database + Oban configuration, resolved at boot from the environment.
-# DB_ADAPTER selects the backend (and MUST match the value used when the release was built,
-# since the repo adapter is compiled in — see Coordinator.Repo).
+#
+# DB_ADAPTER has no default here on purpose. It used to fall back to "sqlite3", which meant the
+# documented multi-replica scaling path silently gave every pod its own database and its own
+# Oban queue. Choosing the backend is a deployment decision, not something to inherit.
+#
+# It must also match the value the release was *built* with, since Coordinator.Repo's adapter
+# is compiled in. `Coordinator.BootCheck` asserts that at startup.
 if config_env() == :prod do
-  case System.get_env("DB_ADAPTER", "sqlite3") do
+  db_adapter =
+    System.get_env("DB_ADAPTER") ||
+      raise """
+      DB_ADAPTER must be set explicitly in production: "postgres" or "sqlite3".
+
+      Use "postgres" for anything running more than one replica — SQLite is a file local to one
+      pod, so replicas would not share jobs, leases, or Oban. It must match the DB_ADAPTER the
+      release was built with.
+      """
+
+  config :coordinator, :db_adapter, db_adapter
+
+  case db_adapter do
     adapter when adapter in ["postgres", "postgresql"] ->
       database_url =
         System.get_env("DATABASE_URL") ||
@@ -150,7 +167,9 @@ if config_env() == :prod do
         repo: Coordinator.Repo,
         queues: [leases: 10]
 
-    _sqlite ->
+    adapter when adapter in ["sqlite", "sqlite3"] ->
+      # Single node only. `Coordinator.BootCheck` refuses to start if a cluster topology is
+      # also configured.
       config :coordinator, Coordinator.Repo,
         database: System.get_env("DATABASE_PATH") || "/var/lib/hydra/coordinator.db",
         pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10")
@@ -161,6 +180,9 @@ if config_env() == :prod do
         notifier: Oban.Notifiers.PG,
         repo: Coordinator.Repo,
         queues: [leases: 10]
+
+    other ->
+      raise ~s(unknown DB_ADAPTER #{inspect(other)} — expected "postgres" or "sqlite3")
   end
 
   if secret = System.get_env("SECRET_KEY_BASE") do

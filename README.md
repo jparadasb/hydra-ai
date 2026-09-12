@@ -291,3 +291,13 @@ coordinator replica presents one unified view (a worker connected to any replica
 dashboard). On Kubernetes: a headless Service for peer discovery plus
 `RELEASE_DISTRIBUTION=name`, `RELEASE_NODE=<name>@<pod-ip>`, a shared `RELEASE_COOKIE`, and
 `HYDRA_CLUSTER_SERVICE=<headless-svc>`. With no cluster env set it runs as a single node.
+
+**More than one replica requires Postgres.** Presence and PubSub span replicas, but the database
+does not: SQLite is a file on one pod's filesystem, so each replica would get its own jobs,
+leases and Oban queue while the dashboard showed a single unified system. The coordinator
+refuses to start with a cluster topology configured on SQLite.
+
+`DB_ADAPTER` has no default in production — set it explicitly to `postgres` or `sqlite3`. It is
+compiled into the release (`Coordinator.Repo` picks its Ecto adapter at build time), so the
+value at boot must match the value the image was built with; a mismatch is a named startup
+error rather than a downstream failure. Postgres also needs `DATABASE_URL`.

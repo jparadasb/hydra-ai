@@ -7,6 +7,9 @@ defmodule Coordinator.Application do
 
   @impl true
   def start(_type, _args) do
+    # A misconfigured deploy should crash-loop with a named error, not half-work.
+    Coordinator.BootCheck.verify!()
+
     children =
       [
         Coordinator.Repo,

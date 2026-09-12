@@ -39,8 +39,15 @@ connection details + the matching Oban engine/notifier are set at runtime
 
 | `DB_ADAPTER` | adapter | Oban engine | notifier | use |
 |--------------|---------|-------------|----------|-----|
-| unset / `sqlite3` | SQLite3 | Lite | PG (process-group) | dev / test / single-node — no DB server |
-| `postgres` | Postgres | Basic | Postgres LISTEN/NOTIFY | production / multi-node |
+| unset | SQLite3 | Lite | PG (process-group) | dev / test only — **rejected in production** |
+| `sqlite3` | SQLite3 | Lite | PG (process-group) | single-node — no DB server, one replica |
+| `postgres` | Postgres | Basic | Postgres LISTEN/NOTIFY | production / multi-replica |
+
+In production `DB_ADAPTER` has no default: boot fails with a named error if it is unset, if it
+disagrees with the adapter the release was compiled against, or if a cluster topology
+(`HYDRA_CLUSTER_SERVICE`) is configured while on SQLite — a SQLite file cannot be shared
+between replicas, so each would run its own jobs table and its own Oban queue.
+See `Coordinator.BootCheck`.
 
 **Production (Postgres):**
 ```sh

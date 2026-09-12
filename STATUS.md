@@ -66,7 +66,8 @@ with `cargo tauri dev` after the system deps in `worker/crates/worker-app/SETUP.
 - `Coordinator.submit_job/1` public entrypoint
 
 **Database backend (SQLite ↔ Postgres)**
-- `DB_ADAPTER` env selects the backend: unset/`sqlite3` (Lite engine, dev/test/single-node)
+- `DB_ADAPTER` env selects the backend: unset/`sqlite3` (Lite engine, dev/test/single-node;
+  required explicitly in prod, and refused alongside clustering)
   or `postgres` (Basic engine, Postgres LISTEN/NOTIFY, production/multi-node)
 - Repo adapter is compile-time (`Coordinator.Repo`); connection + Oban engine/notifier set at
   runtime (`config/runtime.exs`). Migration + Oban tables are adapter-agnostic
