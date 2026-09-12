@@ -110,7 +110,7 @@ defmodule Coordinator.WorkerSessionTest do
     refute Enum.any?(WorkerRegistry.list(), &(&1.worker_id == "w-ext"))
   end
 
-  test "usage report passes only when secret-free" do
+  test "a usage report is redacted rather than refused" do
     assert {:ok, _} =
              WorkerSession.handle_usage(%{
                "worker_id" => "w",
@@ -120,7 +120,16 @@ defmodule Coordinator.WorkerSessionTest do
                "requests" => 10
              })
 
-    assert {:error, _} = WorkerSession.handle_usage(%{"authorization" => "Bearer xyzxyzxyz"})
+    # A usage report is counters. Refusing one over a false positive loses accounting and
+    # gains nothing, so the value is redacted and the report still lands.
+    assert {:ok, clean} =
+             WorkerSession.handle_usage(%{
+               "requests" => 3,
+               "authorization" => "Bearer abcdefghijklmnopqrstuvwxyz"
+             })
+
+    assert clean["authorization"] == "[REDACTED]"
+    assert clean["requests"] == 3
   end
 
   test "handle_chunk broadcasts a sanitized fragment on the job's own topic" do
@@ -130,12 +139,12 @@ defmodule Coordinator.WorkerSessionTest do
              WorkerSession.handle_chunk(%{
                "job_id" => "job-chunk-test",
                "seq" => 0,
-               "delta" => "my key is sk-abcdefghijkl and"
+               "delta" => "my key is sk-abcdefghijklmnopqrstuvwxyz and"
              })
 
     # Secret-shaped values are redacted, not rejected — a chunk is transient UX, never stored.
     assert clean["delta"] =~ "[REDACTED]"
-    refute clean["delta"] =~ "sk-abcdefghijkl"
+    refute clean["delta"] =~ "sk-abcdefghijklmnopqrstuvwxyz"
     assert_receive {:job_chunk, ^clean}
 
     # Chunks for other jobs don't land on this topic.
