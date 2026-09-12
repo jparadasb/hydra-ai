@@ -5,6 +5,13 @@ defmodule Coordinator.Release do
       bin/coordinator eval "Coordinator.Release.migrate()"
 
   Works for whichever backend the release was built against (`DB_ADAPTER`).
+
+  **Concurrent replicas.** `entrypoint.sh` runs this on every pod start, so N replicas can
+  race. On Postgres they do not collide: `Ecto.Migrator` takes its migration lock
+  (`:migration_lock`, `:table_lock` by default) on `schema_migrations`, so the second migrator
+  blocks and then finds nothing left to run. On SQLite the question does not arise —
+  `Coordinator.BootCheck` refuses to start a clustered SQLite deployment, so there is only ever
+  one pod holding that file.
   """
   @app :coordinator
 
