@@ -92,6 +92,10 @@ defmodule Coordinator.WorkerChannelTest do
 
     WorkerChannel.cancel("w-race", "j-race")
     assert_push("cancel", %{"job_id" => "j-race"})
+    wait_inflight("w-race", 1)
+
+    cancel_ref = push(socket, "cancelled", %{"job_id" => "j-race"})
+    assert_reply(cancel_ref, :ok)
     wait_inflight("w-race", 0)
 
     ref = push(socket, "result", %{"job_id" => "j-race", "status" => "ok", "output" => %{}})

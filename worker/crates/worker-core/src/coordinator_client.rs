@@ -182,9 +182,13 @@ mod networked {
     use crate::gateway::Gateway;
     use crate::types::Job;
 
-    fn cancel_job(jobs: &mut HashMap<String, tokio::task::JoinHandle<()>>, job_id: &str) -> bool {
+    async fn cancel_job(
+        jobs: &mut HashMap<String, tokio::task::JoinHandle<()>>,
+        job_id: &str,
+    ) -> bool {
         if let Some(handle) = jobs.remove(job_id) {
             handle.abort();
+            let _ = handle.await;
             true
         } else {
             false
@@ -419,7 +423,15 @@ mod networked {
             }
             if pm.event == "cancel" && pm.topic == topic {
                 if let Some(job_id) = pm.payload.get("job_id").and_then(Value::as_str) {
-                    cancel_job(&mut jobs, job_id);
+                    cancel_job(&mut jobs, job_id).await;
+                    let cancelled = PhoenixMsg::new(
+                        Some("1".into()),
+                        Some(next_ref()),
+                        &topic,
+                        "cancelled",
+                        serde_json::json!({"job_id": job_id}),
+                    );
+                    tx.send(cancelled.encode()).ok();
                 }
             }
         }
@@ -444,9 +456,9 @@ mod networked {
             let handle = tokio::spawn(std::future::pending::<()>());
             jobs.insert("job-1".to_string(), handle);
 
-            assert!(cancel_job(&mut jobs, "job-1"));
+            assert!(cancel_job(&mut jobs, "job-1").await);
             assert!(jobs.is_empty());
-            assert!(!cancel_job(&mut jobs, "job-1"));
+            assert!(!cancel_job(&mut jobs, "job-1").await);
         }
     }
 }

@@ -165,8 +165,9 @@ pub async fn build_and_run(params: RunParams, status: Arc<RunStatus>) -> Result<
         EncryptedFileStore::default_path(),
         params.passphrase,
     )));
-    let http = crate::http::client(Duration::from_secs(cfg.request_timeout_secs))?;
-    let registry = build_registry(&cfg, &vault, http.clone());
+    let external_http = crate::http::client(Duration::from_secs(cfg.request_timeout_secs))?;
+    let local_http = crate::http::local_client()?;
+    let registry = build_registry(&cfg, &vault, local_http, external_http);
     let usage = Arc::new(
         JsonUsageStore::new(JsonUsageStore::default_path())
             .map_err(|e| Error::Other(format!("usage store: {e}")))?,

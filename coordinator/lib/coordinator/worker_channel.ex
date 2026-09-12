@@ -39,7 +39,7 @@ defmodule Coordinator.WorkerChannel do
              socket
              |> assign(:worker_id, worker.worker_id)
              |> assign(:worker, worker)
-             |> assign(:active_job_ids, MapSet.new())}
+             |> assign(:active_leases, %{})}
 
           {:error, reason} ->
             {:error, %{reason: to_string(reason)}}
@@ -72,13 +72,13 @@ defmodule Coordinator.WorkerChannel do
     push(socket, "job", payload)
     worker = %{socket.assigns.worker | inflight: socket.assigns.worker.inflight + 1}
     WorkerRegistry.update(self(), worker)
-    active_job_ids = MapSet.put(socket.assigns.active_job_ids, payload["job_id"])
-    {:noreply, socket |> assign(:worker, worker) |> assign(:active_job_ids, active_job_ids)}
+    active_leases = Map.put(socket.assigns.active_leases, payload["job_id"], payload["lease_id"])
+    {:noreply, socket |> assign(:worker, worker) |> assign(:active_leases, active_leases)}
   end
 
   def handle_out("cancel", payload, socket) do
     push(socket, "cancel", payload)
-    {:noreply, finish_job(socket, payload["job_id"])}
+    {:noreply, socket}
   end
 
   @impl true
@@ -100,8 +100,12 @@ defmodule Coordinator.WorkerChannel do
         {:reply, :ok, assign(socket, :worker, worker)}
 
       {:error, reason} ->
-        {:reply, {:error, %{reason: to_string(reason)}}, socket}
+        {:reply, {:error, %{reason: to_string(reason)}}, finish_job(socket, payload["job_id"])}
     end
+  end
+
+  def handle_in("cancelled", %{"job_id" => job_id}, socket) do
+    {:reply, :ok, finish_job(socket, job_id)}
   end
 
   def handle_in("registration", _payload, socket),
@@ -140,7 +144,16 @@ defmodule Coordinator.WorkerChannel do
 
   @impl true
   def terminate(_reason, socket) do
-    if worker_id = socket.assigns[:worker_id], do: Jobs.reclaim_worker_leases(worker_id)
+    if worker_id = socket.assigns[:worker_id] do
+      lease_ids =
+        socket.assigns[:active_leases]
+        |> Kernel.||(%{})
+        |> Map.values()
+        |> Enum.filter(&is_binary/1)
+
+      Jobs.reclaim_worker_leases(worker_id, lease_ids)
+    end
+
     :ok
   end
 
@@ -159,13 +172,13 @@ defmodule Coordinator.WorkerChannel do
   end
 
   defp finish_job(socket, job_id) do
-    if MapSet.member?(socket.assigns.active_job_ids, job_id) do
+    if Map.has_key?(socket.assigns.active_leases, job_id) do
       worker = %{socket.assigns.worker | inflight: max(socket.assigns.worker.inflight - 1, 0)}
       WorkerRegistry.update(self(), worker)
 
       socket
       |> assign(:worker, worker)
-      |> assign(:active_job_ids, MapSet.delete(socket.assigns.active_job_ids, job_id))
+      |> assign(:active_leases, Map.delete(socket.assigns.active_leases, job_id))
     else
       socket
     end

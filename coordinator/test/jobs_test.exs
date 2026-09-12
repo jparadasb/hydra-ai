@@ -60,7 +60,8 @@ defmodule Coordinator.JobsTest do
     assert leased.status == "leased"
     assert leased.worker_id == "w1"
     assert leased.lease_id != nil
-    assert leased.lease_expires_at == leased.expires_at
+    assert DateTime.compare(leased.lease_expires_at, leased.expires_at) == :lt
+    assert DateTime.diff(leased.lease_expires_at, DateTime.utc_now(), :second) in 58..60
   end
 
   test "a stale pending snapshot cannot lease a cancelled job" do
@@ -68,6 +69,32 @@ defmodule Coordinator.JobsTest do
     assert {:ok, %{status: "cancelled"}} = Jobs.cancel(rec.id)
     assert {:error, :not_pending} = Jobs.mark_leased(rec, "w-race", Jobs.gen_lease_id())
     assert Jobs.get(rec.id).status == "cancelled"
+  end
+
+  test "mark_leased increments current database attempts, not a stale snapshot" do
+    register_local_worker("w-attempts")
+    {:ok, stale} = enqueue()
+
+    from(j in JobRecord, where: j.id == ^stale.id)
+    |> Coordinator.Repo.update_all(set: [attempts: 3])
+
+    assert {:ok, leased} = Jobs.mark_leased(stale, "w-attempts", Jobs.gen_lease_id())
+    assert leased.attempts == 4
+  end
+
+  test "disconnect reclamation ignores leases from a newer channel" do
+    register_local_worker("w-reconnect")
+    {:ok, rec} = enqueue()
+    assert :ok = perform_job(LeaseWorker, %{job_id: rec.id})
+    first_lease = Jobs.get(rec.id).lease_id
+
+    assert {:ok, _} = Jobs.requeue(Jobs.get(rec.id))
+    assert :ok = perform_job(LeaseWorker, %{job_id: rec.id})
+    second_lease = Jobs.get(rec.id).lease_id
+    refute second_lease == first_lease
+
+    assert :ok = Jobs.reclaim_worker_leases("w-reconnect", [first_lease])
+    assert %{status: "leased", lease_id: ^second_lease} = Jobs.get(rec.id)
   end
 
   test "lease worker snoozes when no eligible worker is connected" do
@@ -100,6 +127,7 @@ defmodule Coordinator.JobsTest do
                     %{"job_id" => job_id, "status" => "error", "reason" => "deadline_expired"}}
 
     assert job_id == rec.id
+    assert :ok = perform_job(LeaseWorker, %{job_id: rec.id})
   end
 
   test "expired lease sweeper requeues an abandoned job" do

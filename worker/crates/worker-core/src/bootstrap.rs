@@ -17,7 +17,8 @@ use crate::vault::Vault;
 pub fn build_registry(
     config: &WorkerConfig,
     vault: &Vault,
-    http: reqwest::Client,
+    local_http: reqwest::Client,
+    external_http: reqwest::Client,
 ) -> AdapterRegistry {
     let mut registry = AdapterRegistry::new();
 
@@ -28,11 +29,11 @@ pub fn build_registry(
         // Register all supported local runtimes at their default endpoints. Only the ones
         // actually running contribute models — the gateway tolerates a runtime whose
         // `list_models` fails (it just yields no models).
-        registry.register(Arc::new(OllamaAdapter::new(http.clone())));
-        registry.register(Arc::new(LocalOpenAiAdapter::llama_swap(http.clone())));
-        registry.register(Arc::new(LocalOpenAiAdapter::llama_cpp(http.clone())));
-        registry.register(Arc::new(LocalOpenAiAdapter::vllm(http.clone())));
-        registry.register(Arc::new(LocalOpenAiAdapter::lm_studio(http.clone())));
+        registry.register(Arc::new(OllamaAdapter::new(local_http.clone())));
+        registry.register(Arc::new(LocalOpenAiAdapter::llama_swap(local_http.clone())));
+        registry.register(Arc::new(LocalOpenAiAdapter::llama_cpp(local_http.clone())));
+        registry.register(Arc::new(LocalOpenAiAdapter::vllm(local_http.clone())));
+        registry.register(Arc::new(LocalOpenAiAdapter::lm_studio(local_http.clone())));
     }
 
     if matches!(
@@ -43,9 +44,12 @@ pub fn build_registry(
             let Some(token) = vault.get(&entry.name).ok().flatten() else {
                 continue; // no token stored yet; skip
             };
-            if let Ok(adapter) =
-                build_external_adapter(&entry.name, entry.base_url.clone(), token, http.clone())
-            {
+            if let Ok(adapter) = build_external_adapter(
+                &entry.name,
+                entry.base_url.clone(),
+                token,
+                external_http.clone(),
+            ) {
                 registry.register(adapter);
             }
         }
@@ -85,7 +89,7 @@ mod tests {
         let mut cfg = WorkerConfig::new("w-gemini", ExecutionMode::ExternalProvider);
         cfg.upsert_provider("gemini", None);
 
-        let registry = build_registry(&cfg, &vault, reqwest::Client::new());
+        let registry = build_registry(&cfg, &vault, reqwest::Client::new(), reqwest::Client::new());
         let adapter = registry
             .get("gemini")
             .expect("gemini adapter must be registered");
@@ -119,7 +123,7 @@ mod tests {
         // execution_mode is external, but no providers configured.
         let cfg = WorkerConfig::new("w-empty", ExecutionMode::ExternalProvider);
 
-        let registry = build_registry(&cfg, &vault, reqwest::Client::new());
+        let registry = build_registry(&cfg, &vault, reqwest::Client::new(), reqwest::Client::new());
         assert!(
             registry.get("gemini").is_err(),
             "no provider should be registered"
