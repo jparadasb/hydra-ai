@@ -41,6 +41,41 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  # ---- version agreement --------------------------------------------------------------------
+  # The desktop crate is excluded from the workspace, so it cannot inherit
+  # `[workspace.package] version`, and Tauri reads its own JSON. Nothing compared the three and
+  # `worker-app/Cargo.toml` sat at 0.1.0 through four releases.
+  versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/check-versions.sh
+
+  # ---- desktop crate builds -----------------------------------------------------------------
+  # `cargo build --workspace` never touches worker-app (it is excluded), so skew between the
+  # tested `worker-tauri` crate and the shipped desktop app was undetectable until a release.
+  # A check build on every PR is enough to catch it, without the cost of bundling.
+  desktop-check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf build-essential curl wget file libssl-dev libxdo-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: worker/crates/worker-app
+
+      - name: Check the desktop crate against the current worker-core
+        working-directory: worker/crates/worker-app
+        run: cargo check --locked --all-targets
+
   # ---- headless CLI binary (worker-cli) ----------------------------------------------------
   cli:
     needs: test
@@ -75,6 +110,12 @@ jobs:
           ver="${GITHUB_REF_NAME#v}"
           echo "Stamping version $ver"
           perl -0pi -e "s/^version = \"[0-9][^\"]*\"/version = \"$ver\"/m" worker/Cargo.toml
+          # Stamp the lockfile's entries for the workspace members too. Rewriting only
+          # Cargo.toml left the lock disagreeing about their versions, which is why this build
+          # could not use --locked — and so a tag build resolved a different dependency graph
+          # than any local build. The members' own entries are the only thing that changes;
+          # every third-party pin stays exactly as committed.
+          perl -0pi -e "s/(name = \"worker-(?:core|cli|tauri)\"\nversion = )\"[0-9][^\"]*\"/\${1}\"$ver\"/g" worker/Cargo.lock
           grep -E '^version = ' worker/Cargo.toml
 
       - name: Install Rust
@@ -97,7 +138,9 @@ jobs:
         # share version 0.1.0).
         env:
           HYDRA_BUILD_SHA: ${{ github.sha }}
-        run: cargo build -p worker-cli --release --target ${{ matrix.target }}
+        # --locked: build the dependency graph that was committed and tested, not whatever
+        # resolves today. Without it a release could ship transitive versions no one ran.
+        run: cargo build --locked -p worker-cli --release --target ${{ matrix.target }}
 
       - name: Stage binary
         shell: bash
@@ -163,6 +206,8 @@ jobs:
           echo "Stamping version $ver"
           perl -0pi -e "s/^version = \"[0-9][^\"]*\"/version = \"$ver\"/m" worker/crates/worker-app/Cargo.toml
           perl -0pi -e "s/(\"version\": )\"[0-9][^\"]*\"/\${1}\"$ver\"/" worker/crates/worker-app/tauri.conf.json
+          # Keep this crate's own lockfile in step, for the same reason as the CLI job's.
+          perl -0pi -e "s/(name = \"worker-(?:app|core|tauri)\"\nversion = )\"[0-9][^\"]*\"/\${1}\"$ver\"/g" worker/crates/worker-app/Cargo.lock
           grep -E '^version = ' worker/crates/worker-app/Cargo.toml
           grep -E '"version"' worker/crates/worker-app/tauri.conf.json
 
@@ -221,6 +266,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
+          # HTML comments: invisible in the rendered release, and a stable anchor for replacing
+          # this block on a re-run.
+          MARKER_START: '<!-- hydra:downloads:start -->'
+          MARKER_END: '<!-- hydra:downloads:end -->'
         run: |
           base="https://github.com/$REPO/releases/download/$TAG"
           assets=$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name')
@@ -229,8 +278,14 @@ jobs:
             echo "| $1 | [\`$2\`]($base/$2) |"
           }
 
+          # Idempotent: strip any block this job wrote before, so re-running it replaces the
+          # download tables instead of prepending a second copy above the first.
+          existing=$(gh release view "$TAG" --repo "$REPO" --json body --jq '.body')
+          body=$(printf '%s' "$existing" | sed "/$MARKER_START/,/$MARKER_END/d")
+
           notes=$(mktemp)
           {
+            echo "$MARKER_START"
             echo "## Downloads"
             echo
             echo "### Desktop app (UI)"
@@ -259,9 +314,11 @@ jobs:
               esac
             done <<< "$assets"
             echo
+            echo "$MARKER_END"
+            echo
             # Keep whatever body the release already has (tauri-action stub or generated
-            # notes) below the download tables.
-            gh release view "$TAG" --repo "$REPO" --json body --jq '.body'
+            # notes) below the download tables — minus any previous copy of this block.
+            printf '%s\n' "$body"
           } > "$notes"
 
           gh release edit "$TAG" --repo "$REPO" --notes-file "$notes"

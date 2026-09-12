@@ -1,0 +1,75 @@
+name: dependency audit
+
+# Nothing flagged a vulnerable dependency before this. The scheduled run matters more than the
+# PR run: a CVE is published against code that is already merged, so waiting for someone to
+# open a PR is waiting for the wrong event.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/Cargo.lock'
+      - '**/Cargo.toml'
+      - 'coordinator/mix.lock'
+      - 'coordinator/mix.exs'
+      - '.github/workflows/audit.yml'
+  pull_request:
+    paths:
+      - '**/Cargo.lock'
+      - '**/Cargo.toml'
+      - 'coordinator/mix.lock'
+      - 'coordinator/mix.exs'
+      - '.github/workflows/audit.yml'
+  schedule:
+    # Mondays, early. A weekly sweep catches advisories published against unchanged code.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  cargo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: worker
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit the workspace
+        working-directory: worker
+        run: cargo audit
+
+      # The desktop crate has its own lockfile and is excluded from the workspace, so the
+      # sweep above does not cover it.
+      - name: Audit the desktop crate
+        working-directory: worker/crates/worker-app
+        run: cargo audit
+
+  hex:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: coordinator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '28'
+          elixir-version: '1.19'
+      - uses: actions/cache@v4
+        with:
+          path: |
+            coordinator/deps
+            coordinator/_build
+          key: ${{ runner.os }}-mix-audit-${{ hashFiles('coordinator/mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-audit-
+
+      # --check-locked fails if resolving would change mix.lock, so the lockfile is the
+      # authority rather than a snapshot of whatever resolved last.
+      - run: mix deps.get --check-locked
+
+      # Retired packages: pulled, deprecated, or withdrawn for a security reason.
+      - run: mix hex.audit
