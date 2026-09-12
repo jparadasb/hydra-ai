@@ -35,8 +35,10 @@ jobs:
         with:
           workspaces: worker
 
+      # A prebuilt binary. `cargo install cargo-audit` compiles it from source on every run,
+      # which cost about five minutes per job for a scan that takes seconds.
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        uses: taiki-e/install-action@cargo-audit
 
       - name: Audit the workspace
         working-directory: worker
