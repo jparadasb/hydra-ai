@@ -19,6 +19,9 @@ defmodule Coordinator.Jobs.JobRecord do
     field(:lease_expires_at, :utc_datetime_usec)
     field(:attempts, :integer, default: 0)
     field(:result, :map)
+    # The gateway key that submitted this job. Nil when the door was open or the legacy env
+    # master key was used — neither has an `api_tokens` row to point at.
+    field(:api_token_id, :string)
 
     timestamps(type: :utc_datetime_usec)
   end
@@ -37,7 +40,8 @@ defmodule Coordinator.Jobs.JobRecord do
       :expires_at,
       :lease_expires_at,
       :attempts,
-      :result
+      :result,
+      :api_token_id
     ])
     |> validate_required([:id, :capability, :privacy, :status])
     |> validate_inclusion(:status, @statuses)

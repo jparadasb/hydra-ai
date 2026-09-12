@@ -52,43 +52,43 @@ defmodule Coordinator.ApiRouter do
   end
 
   post "/v1/chat/completions" do
-    case authorize(conn) do
-      :ok -> chat_completion(conn)
-      {:error, code, msg} -> error(conn, code, msg, "invalid_request_error")
+    case admit(conn) do
+      {:ok, caller} -> metered(conn, caller, &chat_completion(&1, caller))
+      {:error, code, msg, type, headers} -> error(conn, code, msg, type, headers)
     end
   end
 
   # Codex speaks the OpenAI Responses API. Keep the worker/job protocol in its existing
   # chat-shaped form and translate at this boundary so older OpenAI clients remain compatible.
   post "/v1/responses" do
-    case authorize(conn) do
-      :ok -> response_completion(conn)
-      {:error, code, msg} -> error(conn, code, msg, "invalid_request_error")
+    case admit(conn) do
+      {:ok, caller} -> metered(conn, caller, &response_completion(&1, caller))
+      {:error, code, msg, type, headers} -> error(conn, code, msg, type, headers)
     end
   end
 
   get "/v1/models" do
-    case authorize(conn) do
-      :ok ->
+    case admit(conn) do
+      {:ok, _caller} ->
         models = list_models()
         # `data` is the OpenAI shape; `models` is accepted by Codex's provider model loader.
         json(conn, 200, %{"object" => "list", "data" => models, "models" => models})
 
-      {:error, code, msg} ->
-        error(conn, code, msg, "invalid_request_error")
+      {:error, code, msg, type, headers} ->
+        error(conn, code, msg, type, headers)
     end
   end
 
   get "/v1/models/:id" do
-    case authorize(conn) do
-      :ok ->
+    case admit(conn) do
+      {:ok, _caller} ->
         case Enum.find(list_models(), &(&1["id"] == id)) do
           nil -> error(conn, 404, "model '#{id}' not found", "invalid_request_error")
           model -> json(conn, 200, model)
         end
 
-      {:error, code, msg} ->
-        error(conn, code, msg, "invalid_request_error")
+      {:error, code, msg, type, headers} ->
+        error(conn, code, msg, type, headers)
     end
   end
 
@@ -138,7 +138,7 @@ defmodule Coordinator.ApiRouter do
 
   # ---- chat completions ---------------------------------------------------------------------
 
-  defp chat_completion(conn) do
+  defp chat_completion(conn, caller) do
     params = conn.body_params
 
     # The job id is generated here (not by the insert) so both of this job's topics can be
@@ -158,7 +158,7 @@ defmodule Coordinator.ApiRouter do
          :ok <- requested_model_available(params),
          timeout = resolve_timeout(conn, params),
          payload = build_payload(params, messages),
-         {:ok, record} <- submit(payload, job_id, timeout) do
+         {:ok, record} <- submit(payload, job_id, timeout, caller) do
       if stream? do
         # Flush headers + a first byte immediately, then relay the worker's streamed chunks
         # as they arrive (heartbeating while none do, so an edge proxy — Cloudflare's ~100s
@@ -180,7 +180,7 @@ defmodule Coordinator.ApiRouter do
     end
   end
 
-  defp response_completion(conn) do
+  defp response_completion(conn, caller) do
     params = conn.body_params
     stream? = params["stream"] in [true, "true"]
     job_id = Coordinator.Jobs.gen_id()
@@ -191,7 +191,7 @@ defmodule Coordinator.ApiRouter do
          :ok <- requested_model_available(params),
          timeout = resolve_timeout(conn, params),
          payload = build_response_payload(params, messages),
-         {:ok, record} <- submit(payload, job_id, timeout) do
+         {:ok, record} <- submit(payload, job_id, timeout, caller) do
       if stream? do
         response_stream(conn, record.id, params, timeout)
       else
@@ -602,7 +602,7 @@ defmodule Coordinator.ApiRouter do
   # The routing capability is configurable (`HYDRA_API_CAPABILITY`): the worker runs a chat
   # completion for whatever capability it is asked to serve, so this just has to match a string
   # the connected workers advertise (e.g. "text.extract_json"). Defaults to "chat".
-  defp submit(payload, job_id, timeout_ms) do
+  defp submit(payload, job_id, timeout_ms, caller) do
     capability = Application.get_env(:coordinator, :api_capability, "chat")
 
     case Coordinator.submit_job(%{
@@ -611,7 +611,10 @@ defmodule Coordinator.ApiRouter do
            privacy: "public",
            allow_external_providers: true,
            expires_at: DateTime.add(DateTime.utc_now(), timeout_ms, :millisecond),
-           payload: payload
+           payload: payload,
+           # Attribution travels with the job: the usage row written when it completes reads
+           # the key from here, not from the worker's (untrusted) result.
+           api_token_id: caller.token_id
          }) do
       {:ok, record} -> {:ok, record}
       {:error, reason} -> {:error, {:submit, reason}}
@@ -915,6 +918,49 @@ defmodule Coordinator.ApiRouter do
     end
   end
 
+  # ---- admission: identity, then rate ---------------------------------------------------------
+
+  # The front door. Authenticate, then charge the request against the caller's rate window.
+  # Returns `{:ok, caller}` — the identity every downstream artifact is attributed to — or a
+  # ready-to-render error.
+  defp admit(conn) do
+    with {:ok, caller} <- authorize(conn) do
+      case Coordinator.RateLimiter.check_rate(caller.key) do
+        :ok ->
+          {:ok, caller}
+
+        {:error, :rate_limited, retry_after} ->
+          {:error, 429, "rate limit exceeded, retry in #{retry_after}s", "rate_limit_error",
+           [{"retry-after", Integer.to_string(retry_after)}]}
+      end
+    end
+  end
+
+  # Hold one of the caller's concurrency slots for the lifetime of the request. A request that
+  # pins a Bandit process, a subscription and a job row for up to `@max_timeout_ms` is exactly
+  # what the cap exists to bound, so the slot covers the whole handler — streaming included —
+  # and is released even if it raises. (A caller that vanishes mid-stream is covered too: the
+  # limiter monitors this process.)
+  defp metered(conn, caller, handler) do
+    case Coordinator.RateLimiter.acquire(caller.key) do
+      :ok ->
+        try do
+          handler.(conn)
+        after
+          Coordinator.RateLimiter.release(caller.key)
+        end
+
+      {:error, :too_many_concurrent} ->
+        error(
+          conn,
+          429,
+          "too many concurrent requests for this key",
+          "rate_limit_error",
+          [{"retry-after", "1"}]
+        )
+    end
+  end
+
   # ---- auth + helpers -----------------------------------------------------------------------
 
   # Gateway access control. A request is authorized by EITHER the legacy env master key
@@ -922,6 +968,11 @@ defmodule Coordinator.ApiRouter do
   # (`Coordinator.ApiTokens`, looked up by hash). The door is only *enforced* when a credential
   # is required — i.e. an env master key is set, or `:require_api_token` is true (set that in
   # prod so admin-issued keys alone can gate the door). Otherwise it stays open for loopback dev.
+  #
+  # Success carries a caller identity rather than a bare `:ok`: `token_id` is the `api_tokens`
+  # row to attribute jobs and usage to (nil for the env master key and for an open door), and
+  # `key` is the bucket the rate/concurrency limits count against. An unidentified caller is
+  # bucketed by peer IP so an open or master-key door is still bounded.
   defp authorize(conn) do
     presented =
       case get_req_header(conn, "authorization") do
@@ -929,21 +980,54 @@ defmodule Coordinator.ApiRouter do
         _ -> nil
       end
 
-    cond do
-      valid_credential?(presented) -> :ok
-      auth_required?() and is_nil(presented) -> {:error, 401, "missing bearer token"}
-      auth_required?() -> {:error, 401, "invalid api key"}
-      true -> :ok
+    case credential(presented) do
+      {:ok, token_id} when is_binary(token_id) ->
+        {:ok, %{token_id: token_id, key: {:token, token_id}}}
+
+      {:ok, nil} ->
+        {:ok, %{token_id: nil, key: {:ip, peer_ip(conn)}}}
+
+      :error ->
+        cond do
+          auth_required?() and is_nil(presented) ->
+            {:error, 401, "missing bearer token", "invalid_request_error", []}
+
+          auth_required?() ->
+            {:error, 401, "invalid api key", "invalid_request_error", []}
+
+          true ->
+            {:ok, %{token_id: nil, key: {:ip, peer_ip(conn)}}}
+        end
     end
   end
 
-  defp valid_credential?(nil), do: false
+  # `{:ok, token_id}` for an admin-issued key, `{:ok, nil}` for the env master key (valid, but
+  # not a row we can attribute to), `:error` for anything else.
+  defp credential(nil), do: :error
 
-  defp valid_credential?(presented) do
+  defp credential(presented) do
     master = Application.get_env(:coordinator, :api_token)
 
-    (is_binary(master) and master != "" and Plug.Crypto.secure_compare(presented, master)) or
-      Coordinator.ApiTokens.verify(presented) == :ok
+    if is_binary(master) and master != "" and Plug.Crypto.secure_compare(presented, master) do
+      {:ok, nil}
+    else
+      case Coordinator.ApiTokens.verify(presented) do
+        {:ok, token_id} -> {:ok, token_id}
+        {:error, :invalid} -> :error
+      end
+    end
+  end
+
+  # Peer address as a rate-limit bucket. Behind an ingress this is the proxy unless it sets
+  # `x-forwarded-for`; the first hop in that header is the client the proxy saw.
+  defp peer_ip(conn) do
+    case get_req_header(conn, "x-forwarded-for") do
+      [value | _] ->
+        value |> String.split(",") |> List.first() |> String.trim()
+
+      [] ->
+        conn.remote_ip |> :inet.ntoa() |> to_string()
+    end
   end
 
   defp auth_required? do
@@ -993,7 +1077,9 @@ defmodule Coordinator.ApiRouter do
     |> send_resp(status, Jason.encode!(body))
   end
 
-  defp error(conn, status, message, type) do
-    json(conn, status, %{"error" => %{"message" => message, "type" => type}})
+  defp error(conn, status, message, type, headers \\ []) do
+    conn
+    |> merge_resp_headers(headers)
+    |> json(status, %{"error" => %{"message" => message, "type" => type}})
   end
 end

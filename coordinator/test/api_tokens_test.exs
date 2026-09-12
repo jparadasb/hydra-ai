@@ -2,6 +2,8 @@ defmodule Coordinator.ApiTokensTest do
   @moduledoc "Issue / verify / revoke gateway API keys. Plaintext is only ever returned once."
   use ExUnit.Case, async: false
 
+  import Ecto.Query
+
   alias Coordinator.{ApiToken, ApiTokens, Repo}
 
   setup do
@@ -20,10 +22,10 @@ defmodule Coordinator.ApiTokensTest do
     assert record.token_hash == ApiTokens.hash(plaintext)
   end
 
-  test "verify accepts an active key and rejects unknown / revoked ones" do
+  test "verify returns the key's id so a request can be attributed to it" do
     {:ok, plaintext, record} = ApiTokens.create("staging")
 
-    assert ApiTokens.verify(plaintext) == :ok
+    assert ApiTokens.verify(plaintext) == {:ok, record.id}
     assert ApiTokens.verify("hydra_sk_nope") == {:error, :invalid}
 
     :ok = ApiTokens.revoke(record.id)
@@ -34,8 +36,29 @@ defmodule Coordinator.ApiTokensTest do
     {:ok, plaintext, record} = ApiTokens.create("touch")
     assert is_nil(record.last_used_at)
 
-    assert ApiTokens.verify(plaintext) == :ok
+    assert {:ok, _id} = ApiTokens.verify(plaintext)
     assert %ApiToken{last_used_at: %DateTime{}} = Repo.get(ApiToken, record.id)
+  end
+
+  test "verify does not write last_used_at again while it is still fresh" do
+    {:ok, plaintext, record} = ApiTokens.create("sampled-touch")
+
+    assert {:ok, _id} = ApiTokens.verify(plaintext)
+    first = Repo.get(ApiToken, record.id).last_used_at
+
+    # A second request inside the sampling interval must not pay for another write — on SQLite
+    # every one of those is a write lock taken to refresh a field read at minute resolution.
+    assert {:ok, _id} = ApiTokens.verify(plaintext)
+    assert Repo.get(ApiToken, record.id).last_used_at == first
+
+    # Backdate past the interval and the next request refreshes it.
+    Repo.update_all(
+      from(t in ApiToken, where: t.id == ^record.id),
+      set: [last_used_at: DateTime.add(DateTime.utc_now(), -3600, :second)]
+    )
+
+    assert {:ok, _id} = ApiTokens.verify(plaintext)
+    assert DateTime.compare(Repo.get(ApiToken, record.id).last_used_at, first) == :gt
   end
 
   test "list returns issued keys newest first" do

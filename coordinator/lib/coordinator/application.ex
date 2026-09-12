@@ -11,7 +11,10 @@ defmodule Coordinator.Application do
       [
         Coordinator.Repo,
         {Oban, Application.fetch_env!(:coordinator, Oban)},
-        {Phoenix.PubSub, name: Coordinator.PubSub}
+        {Phoenix.PubSub, name: Coordinator.PubSub},
+        # Per-caller rate + concurrency ceilings for the HTTP front-door. Owns an ETS table,
+        # so it must be up before the endpoint accepts a request.
+        Coordinator.RateLimiter
       ] ++
         cluster_children() ++
         [

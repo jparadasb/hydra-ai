@@ -34,6 +34,24 @@ defmodule Coordinator.WorkerChannelTest do
     }
   end
 
+  test "the worker socket binds the peer address so abuse can be traced to a host" do
+    {:ok, socket} =
+      connect(WorkerSocket, %{}, connect_info: %{peer_data: %{address: {203, 0, 113, 7}}})
+
+    assert socket.assigns.peer_ip == "203.0.113.7"
+
+    # Behind an ingress the TCP peer is the proxy, so the forwarded client wins.
+    {:ok, proxied} =
+      connect(WorkerSocket, %{},
+        connect_info: %{
+          peer_data: %{address: {10, 0, 0, 1}},
+          x_headers: [{"x-forwarded-for", "198.51.100.4, 10.0.0.1"}]
+        }
+      )
+
+    assert proxied.assigns.peer_ip == "198.51.100.4"
+  end
+
   defp join_worker(id, payload) do
     {:ok, socket} = connect(WorkerSocket, %{})
     subscribe_and_join(socket, WorkerChannel, "worker:#{id}", payload)

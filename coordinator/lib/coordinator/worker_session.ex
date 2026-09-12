@@ -19,7 +19,7 @@ defmodule Coordinator.WorkerSession do
   that tries to push a token is refused, never registered.
   """
 
-  alias Coordinator.{Jobs, SecretGuard, Worker}
+  alias Coordinator.{Jobs, SecretGuard, Usage, Worker}
 
   @doc """
   Handle a worker's registration. Rejects any payload carrying secret-shaped data, then
@@ -65,7 +65,9 @@ defmodule Coordinator.WorkerSession do
   @doc """
   Handle a normalized job result from a worker. Broadcasts the (sanitized, secret-free)
   result on the job's own `"job_results:<job_id>"` PubSub topic so the waiting caller (and
-  schedulers/tests) observe the completion without seeing anyone else's.
+  schedulers/tests) observe the completion without seeing anyone else's. The worker's usage
+  report is written to `usage_records` (attributed to the key that submitted the job) instead
+  of being discarded.
   A result carrying a superseded `lease_id` is rejected (`{:error, :stale_lease}`) and never
   broadcast — the job has been re-leased and a live generation owns its outcome.
 
@@ -84,6 +86,10 @@ defmodule Coordinator.WorkerSession do
             {:error, :stale_lease}
 
           _ ->
+            # Account before broadcasting: the caller's request process returns as soon as it
+            # sees the result, and the usage row must not depend on it still being alive.
+            Usage.record_result(clean)
+
             Phoenix.PubSub.broadcast(
               Coordinator.PubSub,
               Jobs.result_topic(clean["job_id"]),

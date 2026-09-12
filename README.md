@@ -221,6 +221,23 @@ open on loopback dev):
   with throughput charts.
 - **Oban dashboard** (`/admin/oban`) — the real Oban Web UI for tracking jobs, queues, retries.
 
+### Front-door limits
+
+Every request is attributed to the gateway key that made it (or to its peer IP when the door is
+open). That identity is stored on the job row and on a `usage_records` row written when the job
+completes, so token consumption is traceable to a key after the fact, and it is the bucket the
+following ceilings count against:
+
+| Variable | Default | What it bounds |
+|---|---|---|
+| `HYDRA_RATE_LIMIT_PER_MINUTE` | `120` | Requests started per minute, per key. `0` disables. |
+| `HYDRA_MAX_CONCURRENT_PER_KEY` | `8` | Requests in flight at once, per key. `0` disables. |
+| `HYDRA_MAX_BODY_BYTES` | `2000000` | Largest accepted request body; it is persisted into `jobs.payload`. |
+
+Over either ceiling the gateway answers `429` with a `retry-after` header; an over-size body gets
+`413`. Limits are counted per coordinator node, so with N replicas the effective ceiling is
+`limit × N`.
+
 **Access is protected by GitHub OAuth in prod, and open on loopback dev.** To enable it:
 
 1. Register a GitHub **OAuth app** with Authorization callback URL

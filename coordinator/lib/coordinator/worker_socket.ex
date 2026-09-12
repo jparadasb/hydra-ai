@@ -16,8 +16,13 @@ defmodule Coordinator.WorkerSocket do
   #
   # Set `HYDRA_REQUIRE_DEVICE_AUTH=true` to reject any worker that does not present a device
   # key (recommended for a public coordinator).
+  # The peer address is also bound to the socket (`:peer_ip`) so a misbehaving worker can be
+  # traced back to a host. It is evidence for an operator, never an authorization input —
+  # identity comes from the device key.
   @impl true
-  def connect(params, socket, _connect_info) do
+  def connect(params, socket, connect_info) do
+    socket = assign(socket, :peer_ip, peer_ip(connect_info))
+
     cond do
       Coordinator.DeviceAuth.present?(params) ->
         case Coordinator.DeviceAuth.verify(params) do
@@ -33,6 +38,24 @@ defmodule Coordinator.WorkerSocket do
           :ok -> {:ok, socket}
           :error -> :error
         end
+    end
+  end
+
+  # Behind an ingress the TCP peer is the proxy, so prefer the first hop of `x-forwarded-for`
+  # when one is present. Returns nil when the transport gave us neither (e.g. a test socket).
+  defp peer_ip(connect_info) do
+    forwarded =
+      connect_info
+      |> Map.get(:x_headers, [])
+      |> Enum.find_value(fn
+        {"x-forwarded-for", value} -> value |> String.split(",") |> List.first() |> String.trim()
+        _ -> nil
+      end)
+
+    case {forwarded, connect_info} do
+      {ip, _} when is_binary(ip) and ip != "" -> ip
+      {_, %{peer_data: %{address: address}}} -> address |> :inet.ntoa() |> to_string()
+      _ -> nil
     end
   end
 
