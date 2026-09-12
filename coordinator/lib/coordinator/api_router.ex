@@ -115,6 +115,7 @@ defmodule Coordinator.ApiRouter do
           # Keep it identical to the public model id for OpenAI-compatible clients.
           "slug" => model.name,
           "display_name" => model.name,
+          "supported_reasoning_levels" => ["low", "medium", "high"],
           "object" => "model",
           "created" => created,
           "owned_by" => worker.provider_name || "hydra"
