@@ -244,6 +244,10 @@ fn worker_status(state: State<'_, AppState>) -> worker_core::worker_run::RunStat
 }
 
 fn main() {
+    // The desktop app runs the same worker-core paths as the CLI, and they logged nothing
+    // because no subscriber was ever installed.
+    worker_core::logging::init();
+
     tauri::Builder::default()
         // Signed in-app updates (checks the GitHub `latest.json`) + relaunch after install.
         // The UI drives these via window.__TAURI__.updater / .process.

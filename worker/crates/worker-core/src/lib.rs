@@ -14,6 +14,7 @@ pub mod gateway;
 pub mod http;
 pub mod identity;
 pub mod limits;
+pub mod logging;
 pub mod oauth;
 pub mod privacy;
 pub mod registration;

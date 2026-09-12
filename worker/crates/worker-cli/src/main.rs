@@ -137,6 +137,11 @@ fn save_config(cfg: &WorkerConfig) -> std::io::Result<()> {
 
 #[tokio::main]
 async fn main() {
+    // Without this every `tracing::` call in worker-core was a no-op, including the ones a
+    // headless worker depends on. CLI output stays `println!` — that is a person's terminal,
+    // not a log stream.
+    worker_core::logging::init();
+
     let cli = Cli::parse();
     match cli.command {
         Command::Init { mode } => cmd_init(mode),

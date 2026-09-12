@@ -403,10 +403,10 @@ mod networked {
                 // scale so a persistent mismatch is loud without a flood.
                 undecodable_frames += 1;
                 if undecodable_frames.is_power_of_two() {
-                    eprintln!(
-                        "coordinator sent {undecodable_frames} undecodable frame(s); \
-                         last was {} bytes",
-                        text.len()
+                    tracing::warn!(
+                        frames = undecodable_frames,
+                        last_frame_bytes = text.len(),
+                        "coordinator sent undecodable frame(s)"
                     );
                 }
                 continue;
@@ -424,9 +424,10 @@ mod networked {
             if pm.event == "phx_reply" && pm.topic == topic {
                 match pm.payload.get("status").and_then(Value::as_str) {
                     Some("ok") => tracing::debug!("coordinator acknowledged worker message"),
-                    Some(status) => eprintln!(
-                        "Coordinator rejected worker message ({status}): {}",
-                        pm.payload
+                    Some(status) => tracing::warn!(
+                        status = %status,
+                        payload = %crate::vault::redact(&pm.payload.to_string()),
+                        "coordinator rejected worker message"
                     ),
                     None => {}
                 }
@@ -511,8 +512,9 @@ mod networked {
                                     let dropped =
                                         dropped_chunks.fetch_add(1, Ordering::Relaxed) + 1;
                                     if dropped.is_power_of_two() {
-                                        eprintln!(
-                                            "coordinator not keeping up: dropped {dropped} streamed chunk(s)"
+                                        tracing::warn!(
+                                            dropped,
+                                            "coordinator not keeping up; dropping streamed chunks"
                                         );
                                     }
                                 }
