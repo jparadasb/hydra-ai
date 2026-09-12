@@ -53,6 +53,57 @@ pub struct ChatRequest {
     /// `{"type":"function","function":{"name":...}}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<serde_json::Value>,
+    /// OpenAI Chat Completions response format. Strict JSON-schema formats are forwarded to
+    /// capable backends and independently validated by the gateway before success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<serde_json::Value>,
+}
+
+/// Message content may be plain text or OpenAI multimodal content parts. Keeping parts intact
+/// is required for `image_url` requests routed through a local OpenAI-compatible VLM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MessageContent {
+    Text(String),
+    Parts(Vec<serde_json::Value>),
+}
+
+impl Default for MessageContent {
+    fn default() -> Self {
+        Self::Text(String::new())
+    }
+}
+
+impl MessageContent {
+    pub fn text(&self) -> String {
+        match self {
+            Self::Text(text) => text.clone(),
+            Self::Parts(parts) => parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(serde_json::Value::as_str))
+                .collect::<Vec<_>>()
+                .join(""),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Text(text) => text.is_empty(),
+            Self::Parts(parts) => parts.is_empty(),
+        }
+    }
+}
+
+impl From<String> for MessageContent {
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
+
+impl From<&str> for MessageContent {
+    fn from(value: &str) -> Self {
+        Self::Text(value.to_string())
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -60,8 +111,8 @@ pub struct ChatMessage {
     pub role: String,
     /// Message text. OpenAI clients send `null` on assistant tool-call turns and sometimes an
     /// array of content parts; both normalize to a plain string here.
-    #[serde(default, deserialize_with = "content_as_string")]
-    pub content: String,
+    #[serde(default, deserialize_with = "content_from_wire")]
+    pub content: MessageContent,
     /// Tool calls made on an assistant turn (OpenAI wire shape).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
@@ -92,20 +143,16 @@ fn function_call_type() -> String {
 }
 
 /// Accept `"text"`, `null`, or `[{"type":"text","text":...}, ...]` for message content.
-fn content_as_string<'de, D>(de: D) -> std::result::Result<String, D::Error>
+fn content_from_wire<'de, D>(de: D) -> std::result::Result<MessageContent, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let value = serde_json::Value::deserialize(de)?;
     Ok(match value {
-        serde_json::Value::String(s) => s,
-        serde_json::Value::Null => String::new(),
-        serde_json::Value::Array(parts) => parts
-            .iter()
-            .filter_map(|p| p["text"].as_str())
-            .collect::<Vec<_>>()
-            .join(""),
-        other => other.to_string(),
+        serde_json::Value::String(s) => MessageContent::Text(s),
+        serde_json::Value::Null => MessageContent::default(),
+        serde_json::Value::Array(parts) => MessageContent::Parts(parts),
+        other => MessageContent::Text(other.to_string()),
     })
 }
 

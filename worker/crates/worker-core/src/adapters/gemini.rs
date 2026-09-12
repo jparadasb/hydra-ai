@@ -118,8 +118,9 @@ pub(crate) fn build_generate_content_body(req: &ChatRequest) -> serde_json::Valu
     let mut contents = Vec::new();
     let mut system = None;
     for m in &req.messages {
+        let text = m.content.text();
         match m.role.as_str() {
-            "system" => system = Some(m.content.clone()),
+            "system" => system = Some(text.clone()),
             "assistant" | "model" => {
                 let mut parts = Vec::new();
                 if !m.content.is_empty() {
@@ -143,10 +144,10 @@ pub(crate) fn build_generate_content_body(req: &ChatRequest) -> serde_json::Valu
                     .and_then(|id| call_names.get(id).copied())
                     .unwrap_or_default();
                 // Gemini wants an object; wrap plain-text results.
-                let response = serde_json::from_str::<serde_json::Value>(&m.content)
+                let response = serde_json::from_str::<serde_json::Value>(&text)
                     .ok()
                     .filter(serde_json::Value::is_object)
-                    .unwrap_or_else(|| json!({ "result": m.content }));
+                    .unwrap_or_else(|| json!({ "result": text }));
                 contents.push(json!({
                     "role": "user",
                     "parts": [{ "functionResponse": { "name": name, "response": response } }]

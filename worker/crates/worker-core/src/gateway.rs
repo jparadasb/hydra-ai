@@ -6,7 +6,7 @@
 //!   * **limits**  — [`LimitGuard`] reserves before any paid call;
 //!   * **locality** — secrets stay inside the adapter; the result carries usage, never tokens.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use crate::adapter::{AdapterRegistry, DeltaSink, ProviderAdapter};
@@ -28,7 +28,7 @@ pub struct Gateway {
     limits: LimitGuard,
     usage: Arc<dyn UsageStore>,
     /// Cached (adapter, model) catalog, refreshed via [`Gateway::refresh_catalog`].
-    catalog: Vec<(String, ModelInfo)>,
+    catalog: RwLock<Vec<(String, ModelInfo)>>,
 }
 
 impl Gateway {
@@ -43,13 +43,13 @@ impl Gateway {
             policy,
             limits,
             usage,
-            catalog: Vec::new(),
+            catalog: RwLock::new(Vec::new()),
         }
     }
 
     /// Probe every adapter's models and cache the capability catalog. Call at startup and
     /// whenever providers/models change.
-    pub async fn refresh_catalog(&mut self) {
+    pub async fn refresh_catalog(&self) {
         let mut catalog = Vec::new();
         for adapter in self.registry.iter() {
             if let Ok(models) = adapter.list_models().await {
@@ -58,22 +58,27 @@ impl Gateway {
                 }
             }
         }
-        self.catalog = catalog;
+        *self.catalog.write().expect("catalog lock poisoned") = catalog;
     }
 
     /// Seed the catalog directly (tests / static configs).
-    pub fn set_catalog(&mut self, catalog: Vec<(String, ModelInfo)>) {
-        self.catalog = catalog;
+    pub fn set_catalog(&self, catalog: Vec<(String, ModelInfo)>) {
+        *self.catalog.write().expect("catalog lock poisoned") = catalog;
     }
 
     /// The discovered models, for building the registration payload.
     pub fn model_catalog(&self) -> Vec<ModelInfo> {
-        self.catalog.iter().map(|(_, m)| m.clone()).collect()
+        self.catalog
+            .read()
+            .expect("catalog lock poisoned")
+            .iter()
+            .map(|(_, m)| m.clone())
+            .collect()
     }
 
     fn candidates_for(&self, capability: &str) -> Vec<Candidate> {
-        let mut cands: Vec<Candidate> = self
-            .catalog
+        let catalog = self.catalog.read().expect("catalog lock poisoned");
+        let mut cands: Vec<Candidate> = catalog
             .iter()
             .filter(|(_, m)| m.capabilities.iter().any(|c| c == capability))
             .filter_map(|(name, m)| {
@@ -118,15 +123,12 @@ impl Gateway {
             usage: None,
         };
 
-        // 1. Pick the first candidate allowed by the privacy policy. If the job requested a
-        //    specific model, prefer the candidate serving that exact model (over the default
-        //    first-capable one) so `model: qwen…` isn't answered by whatever model happens to
-        //    be first. Falls back to any capable model when the requested one isn't available.
+        // 1. Pick the first privacy-compatible candidate. A requested model is an exact
+        //    constraint: silently substituting a different model violates the API contract.
         let requested_model = job.payload.get("model").and_then(|v| v.as_str());
         let mut candidates = self.candidates_for(&job.capability);
         if let Some(req) = requested_model {
-            // Stable sort keeps the local-first ordering within each group.
-            candidates.sort_by_key(|c| c.model.name != req);
+            candidates.retain(|c| c.model.name == req);
         }
 
         let mut chosen: Option<Candidate> = None;
@@ -149,7 +151,11 @@ impl Gateway {
             return reject(
                 last_denial
                     .map(|d| format!("privacy_violation: {d}"))
-                    .unwrap_or_else(|| format!("no_capable_backend: {}", job.capability))
+                    .unwrap_or_else(|| {
+                        requested_model
+                            .map(|m| format!("model_unavailable: {m}"))
+                            .unwrap_or_else(|| format!("no_capable_backend: {}", job.capability))
+                    })
                     .as_str(),
             );
         };
@@ -179,15 +185,54 @@ impl Gateway {
             None
         };
 
+        let strict_schema = match strict_json_schema(req.response_format.as_ref()) {
+            Ok(schema) => schema,
+            Err(e) => return error_result(job, &format!("bad_payload: {e}")),
+        };
+        let must_buffer = strict_schema.is_some() || req.tools.is_some();
+        let backend_sink = if must_buffer {
+            Arc::new(|_: &str, _: bool| {}) as DeltaSink
+        } else {
+            on_delta.clone()
+        };
+
         // 4. Run.
         let started = Instant::now();
-        let result = cand.adapter.run_chat_completion_streaming(req, on_delta).await;
+        let tools = req.tools.clone();
+        let result = cand
+            .adapter
+            .run_chat_completion_streaming(req, backend_sink)
+            .await;
         let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
         let provider = cand.adapter.name().to_string();
         let model = cand.model.name.clone();
 
         match result {
-            Ok(resp) => {
+            Ok(mut resp) => {
+                if resp.tool_calls.is_none() {
+                    if let Some(offered) = tools.as_ref() {
+                        match crate::adapters::tools::normalize_tool_markup(&resp.content, offered)
+                        {
+                            Ok(Some((content, calls))) => {
+                                resp.content = content;
+                                resp.tool_calls = Some(calls);
+                            }
+                            Ok(None) => {}
+                            Err(e) => return error_result(job, &e.to_string()),
+                        }
+                    }
+                }
+                if let Some(schema) = strict_schema {
+                    match validate_json_output(&resp.content, &schema) {
+                        Ok(content) => resp.content = content,
+                        Err(e) => {
+                            return error_result(job, &format!("structured_output_invalid: {e}"))
+                        }
+                    }
+                }
+                if must_buffer && !resp.content.is_empty() {
+                    on_delta(&resp.content, false);
+                }
                 let cost = cand
                     .adapter
                     .estimate_cost(&resp.usage)
@@ -255,6 +300,58 @@ impl Gateway {
     }
 }
 
+fn error_result(job: &Job, reason: &str) -> JobResult {
+    JobResult {
+        job_id: job.job_id.clone(),
+        lease_id: job.lease_id.clone(),
+        status: JobStatus::Error,
+        reason: Some(reason.to_string()),
+        output: None,
+        usage: None,
+    }
+}
+
+fn strict_json_schema(
+    format: Option<&serde_json::Value>,
+) -> Result<Option<serde_json::Value>, String> {
+    let Some(format) = format else {
+        return Ok(None);
+    };
+    if format.get("type").and_then(|v| v.as_str()) != Some("json_schema") {
+        return Err("unsupported_response_format".into());
+    }
+    let definition = format
+        .get("json_schema")
+        .and_then(|v| v.as_object())
+        .ok_or("response_format.json_schema is required")?;
+    if definition.get("strict").and_then(|v| v.as_bool()) != Some(true) {
+        return Err("only strict JSON schemas are supported".into());
+    }
+    definition
+        .get("schema")
+        .cloned()
+        .map(Some)
+        .ok_or_else(|| "response_format.json_schema.schema is required".into())
+}
+
+fn validate_json_output(content: &str, schema: &serde_json::Value) -> Result<String, String> {
+    let trimmed = content.trim();
+    let json_text = if trimmed.starts_with("```") && trimmed.ends_with("```") {
+        let inner = trimmed
+            .strip_prefix("```json")
+            .or_else(|| trimmed.strip_prefix("```"))
+            .ok_or("invalid JSON fence")?;
+        inner.strip_suffix("```").unwrap_or(inner).trim()
+    } else {
+        trimmed
+    };
+    let instance: serde_json::Value = serde_json::from_str(json_text).map_err(|e| e.to_string())?;
+    let validator =
+        jsonschema::validator_for(schema).map_err(|e| format!("invalid schema: {e}"))?;
+    validator.validate(&instance).map_err(|e| e.to_string())?;
+    serde_json::to_string(&instance).map_err(|e| e.to_string())
+}
+
 fn parse_chat(model: &str, payload: &serde_json::Value) -> crate::error::Result<ChatRequest> {
     let messages = serde_json::from_value(payload.get("messages").cloned().unwrap_or_default())?;
     Ok(ChatRequest {
@@ -270,6 +367,10 @@ fn parse_chat(model: &str, payload: &serde_json::Value) -> crate::error::Result<
             .map(|v| v as f32),
         tools: payload.get("tools").filter(|v| !v.is_null()).cloned(),
         tool_choice: payload.get("tool_choice").filter(|v| !v.is_null()).cloned(),
+        response_format: payload
+            .get("response_format")
+            .filter(|v| !v.is_null())
+            .cloned(),
     })
 }
 

@@ -80,7 +80,7 @@ async fn gateway_with(policy: RoutingPolicy) -> Gateway {
         external: true,
         reply: "remote-out",
     }));
-    let mut g = Gateway::new(
+    let g = Gateway::new(
         reg,
         policy,
         LimitGuard::new(Limits::default()),
@@ -118,7 +118,7 @@ async fn local_only_never_hits_external_even_if_only_external_present() {
         external: true,
         reply: "remote-out",
     }));
-    let mut g = Gateway::new(
+    let g = Gateway::new(
         reg,
         RoutingPolicy {
             preference: Preference::PreferExternal,
@@ -152,7 +152,7 @@ async fn private_routes_external_only_when_permitted() {
         external: true,
         reply: "remote-out",
     }));
-    let mut g = Gateway::new(
+    let g = Gateway::new(
         reg,
         policy,
         LimitGuard::new(Limits::default()),
@@ -195,6 +195,36 @@ async fn requested_model_is_honored_over_default_ordering() {
     let usage = r.usage.unwrap();
     assert_eq!(usage.provider, "openai");
     assert_eq!(usage.model, "openai-model");
+}
+
+#[tokio::test]
+async fn unavailable_requested_model_is_rejected_without_substitution() {
+    let g = gateway_with(RoutingPolicy::default()).await;
+    let mut j = job(PrivacyLevel::Public, false);
+    j.payload["model"] = json!("missing-model");
+    let r = g.execute(&j).await;
+    assert_eq!(r.status, JobStatus::Rejected);
+    assert_eq!(
+        r.reason.as_deref(),
+        Some("model_unavailable: missing-model")
+    );
+}
+
+#[tokio::test]
+async fn invalid_strict_json_is_an_error_not_a_best_effort_reply() {
+    let g = gateway_with(RoutingPolicy::default()).await;
+    let mut j = job(PrivacyLevel::Public, false);
+    j.payload["response_format"] = json!({
+        "type": "json_schema",
+        "json_schema": {
+            "name": "answer",
+            "strict": true,
+            "schema": {"type": "object", "required": ["answer"]}
+        }
+    });
+    let r = g.execute(&j).await;
+    assert_eq!(r.status, JobStatus::Error);
+    assert!(r.reason.unwrap().starts_with("structured_output_invalid:"));
 }
 
 #[tokio::test]

@@ -188,6 +188,7 @@ mod tests {
                 temperature: None,
                 tools: None,
                 tool_choice: None,
+                response_format: None,
             })
             .await
             .unwrap();

@@ -149,18 +149,19 @@ fn build_responses_body(req: &ChatRequest) -> Value {
     let mut instructions = String::new();
     let mut input = Vec::new();
     for m in &req.messages {
+        let text = m.content.text();
         match m.role.as_str() {
             "system" => {
                 if !instructions.is_empty() {
                     instructions.push('\n');
                 }
-                instructions.push_str(&m.content);
+                instructions.push_str(&text);
             }
             "assistant" | "model" => {
                 if !m.content.is_empty() || m.tool_calls.is_none() {
                     input.push(json!({
                         "type": "message", "role": "assistant",
-                        "content": [{ "type": "output_text", "text": m.content }]
+                        "content": [{ "type": "output_text", "text": text }]
                     }));
                 }
                 for c in m.tool_calls.as_deref().unwrap_or_default() {
@@ -175,11 +176,11 @@ fn build_responses_body(req: &ChatRequest) -> Value {
             "tool" => input.push(json!({
                 "type": "function_call_output",
                 "call_id": m.tool_call_id.clone().unwrap_or_default(),
-                "output": m.content,
+                "output": text,
             })),
             _ => input.push(json!({
                 "type": "message", "role": "user",
-                "content": [{ "type": "input_text", "text": m.content }]
+                "content": [{ "type": "input_text", "text": text }]
             })),
         }
     }
@@ -429,6 +430,7 @@ mod tests {
                 temperature: None,
                 tools: None,
                 tool_choice: None,
+                response_format: None,
             })
             .await
             .unwrap();

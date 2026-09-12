@@ -52,11 +52,10 @@ defmodule Coordinator.RouterTest do
     assert {:ok, %{worker_id: "gpt-box"}} = Router.route(j, [qwen, gpt])
   end
 
-  test "requested model falls back to any capable worker when none serve it" do
+  test "requested model rejects substitution when none serve it" do
     qwen = worker("qwen-box", models: [model(false)])
     j = %{job(:public, true) | model: "nonexistent-model"}
-    # No worker serves it -> best-effort route to a capable worker rather than failing.
-    assert {:ok, %{worker_id: "qwen-box"}} = Router.route(j, [qwen])
+    assert {:error, :no_eligible_worker} = Router.route(j, [qwen])
   end
 
   test "local_only excludes external-only workers" do

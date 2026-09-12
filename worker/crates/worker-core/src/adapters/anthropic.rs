@@ -52,7 +52,7 @@ impl AnthropicAdapter {
         let mut msgs: Vec<serde_json::Value> = Vec::new();
         for m in &req.messages {
             match m.role.as_str() {
-                "system" => system = Some(m.content.clone()),
+                "system" => system = Some(m.content.text()),
                 "assistant" if m.tool_calls.is_some() => {
                     let mut blocks = Vec::new();
                     if !m.content.is_empty() {

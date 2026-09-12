@@ -66,6 +66,7 @@ defmodule Coordinator.ApiRouterTest do
     spec = Jason.decode!(conn.resp_body)
     assert spec["openapi"] =~ "3.0"
     assert spec["paths"]["/v1/chat/completions"]["post"]
+    assert spec["paths"]["/v1/responses"]["post"]
     assert spec["paths"]["/v1/models"]["get"]
     assert spec["components"]["securitySchemes"]["bearerAuth"]["scheme"] == "bearer"
     assert [%{"url" => url}] = spec["servers"]
@@ -102,6 +103,40 @@ defmodule Coordinator.ApiRouterTest do
     conn = post("/v1/chat/completions", %{"model" => "x"})
     assert conn.status == 400
     assert Jason.decode!(conn.resp_body)["error"]["message"] =~ "messages"
+  end
+
+  test "Responses API translates input and maps a response object" do
+    nonce = "apiresponses-#{System.unique_integer([:positive])}"
+
+    task =
+      Task.async(fn ->
+        post("/v1/responses", %{
+          "model" => "test-model",
+          "input" => nonce,
+          "max_output_tokens" => 32,
+          "timeout_ms" => 5000
+        })
+      end)
+
+    job_id = wait_for(fn -> find_job_id(nonce) end)
+
+    Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {
+      :job_result,
+      %{
+        "job_id" => job_id,
+        "status" => "ok",
+        "output" => %{"content" => "response ok"},
+        "usage" => %{"model" => "test-model", "input_tokens" => 4, "output_tokens" => 2}
+      }
+    })
+
+    conn = Task.await(task, 6000)
+    assert conn.status == 200
+    body = Jason.decode!(conn.resp_body)
+    assert body["object"] == "response"
+    assert body["id"] == "resp-" <> job_id
+    assert get_in(body, ["output", Access.at(0), "content", Access.at(0), "text"]) == "response ok"
+    assert body["usage"]["total_tokens"] == 6
   end
 
   test "no worker -> 504 within the per-request timeout" do
@@ -545,6 +580,7 @@ defmodule Coordinator.ApiRouterTest do
       body = Jason.decode!(conn.resp_body)
       assert body["object"] == "list"
       ids = Enum.map(body["data"], & &1["id"])
+      assert ids == Enum.map(body["models"], & &1["id"])
       assert "llama3" in ids
       # Models not serving the routing capability ("chat") are excluded.
       refute "embed-x" in ids

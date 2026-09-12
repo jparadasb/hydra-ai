@@ -20,7 +20,7 @@ defmodule Coordinator.ApiRouter do
   use Plug.Router
   require Logger
 
-  # Slow local backends (e.g. a Tesla M40 chewing a large agent system prompt) routinely
+  # Slow local backends chewing a large agent system prompt routinely
   # need >60s for a single completion. Streaming requests heartbeat past edge-proxy idle
   # windows; non-streaming callers behind Cloudflare still hit its ~100s TTFB limit and
   # should send `x-hydra-timeout-ms` / stream instead.
@@ -57,10 +57,24 @@ defmodule Coordinator.ApiRouter do
     end
   end
 
+  # Codex speaks the OpenAI Responses API. Keep the worker/job protocol in its existing
+  # chat-shaped form and translate at this boundary so older OpenAI clients remain compatible.
+  post "/v1/responses" do
+    case authorize(conn) do
+      :ok -> response_completion(conn)
+      {:error, code, msg} -> error(conn, code, msg, "invalid_request_error")
+    end
+  end
+
   get "/v1/models" do
     case authorize(conn) do
-      :ok -> json(conn, 200, %{"object" => "list", "data" => list_models()})
-      {:error, code, msg} -> error(conn, code, msg, "invalid_request_error")
+      :ok ->
+        models = list_models()
+        # `data` is the OpenAI shape; `models` is accepted by Codex's provider model loader.
+        json(conn, 200, %{"object" => "list", "data" => models, "models" => models})
+
+      {:error, code, msg} ->
+        error(conn, code, msg, "invalid_request_error")
     end
   end
 
@@ -126,6 +140,7 @@ defmodule Coordinator.ApiRouter do
     end
 
     with {:ok, messages} <- fetch_messages(params),
+         :ok <- requested_model_available(params),
          timeout = resolve_timeout(conn, params),
          payload = build_payload(params, messages),
          {:ok, record} <- submit(payload, job_id) do
@@ -142,9 +157,374 @@ defmodule Coordinator.ApiRouter do
       {:error, :no_messages} ->
         error(conn, 400, "`messages` must be a non-empty array", "invalid_request_error")
 
+      {:error, {:model_unavailable, model}} ->
+        error(conn, 404, "model '#{model}' is not available", "invalid_request_error")
+
       {:error, {:submit, reason}} ->
         error(conn, 500, "could not enqueue job: #{inspect(reason)}", "api_error")
     end
+  end
+
+  defp response_completion(conn) do
+    params = conn.body_params
+    Phoenix.PubSub.subscribe(Coordinator.PubSub, "job_results")
+    stream? = params["stream"] in [true, "true"]
+    job_id = Coordinator.Jobs.gen_id()
+    if stream?, do: Phoenix.PubSub.subscribe(Coordinator.PubSub, "job_chunks:" <> job_id)
+
+    with {:ok, messages} <- fetch_response_messages(params),
+         :ok <- requested_model_available(params),
+         timeout = resolve_timeout(conn, params),
+         payload = build_response_payload(params, messages),
+         {:ok, record} <- submit(payload, job_id) do
+      if stream? do
+        response_stream(conn, record.id, params, timeout)
+      else
+        case await_result(record.id, timeout) do
+          {:ok, %{"status" => "ok"} = result} ->
+            json(conn, 200, openai_response(record.id, params, result))
+
+          {:ok, %{"status" => "rejected", "reason" => reason}} ->
+            error(conn, 422, "job rejected: #{reason}", "invalid_request_error")
+
+          {:ok, %{"reason" => reason}} ->
+            {status, type} = classify_worker_error(reason)
+            error(conn, status, "worker error: #{reason}", type)
+
+          {:ok, _} ->
+            error(conn, 502, "worker returned no usable output", "api_error")
+
+          {:error, :timeout} ->
+            error(conn, 504, "no worker completed the job in time", "timeout")
+        end
+      end
+    else
+      {:error, :no_input} ->
+        error(conn, 400, "`input` must be a non-empty string or array", "invalid_request_error")
+
+      {:error, {:model_unavailable, model}} ->
+        error(conn, 404, "model '#{model}' is not available", "invalid_request_error")
+
+      {:error, {:submit, reason}} ->
+        error(conn, 500, "could not enqueue job: #{inspect(reason)}", "api_error")
+    end
+  end
+
+  defp fetch_response_messages(%{"input" => input} = params) do
+    messages = response_input_messages(input)
+
+    messages =
+      if is_binary(params["instructions"]) and params["instructions"] != "",
+        do: [%{"role" => "system", "content" => params["instructions"]} | messages],
+        else: messages
+
+    if messages == [], do: {:error, :no_input}, else: {:ok, messages}
+  end
+
+  defp fetch_response_messages(_), do: {:error, :no_input}
+
+  defp response_input_messages(input) when is_binary(input) and input != "" do
+    [%{"role" => "user", "content" => input}]
+  end
+
+  defp response_input_messages(input) when is_list(input) do
+    Enum.reduce(input, [], fn
+      %{"type" => "function_call", "call_id" => call_id, "name" => name} = item, acc ->
+        call = %{
+          "id" => call_id,
+          "type" => "function",
+          "function" => %{"name" => name, "arguments" => item["arguments"] || "{}"}
+        }
+
+        case List.pop_at(acc, -1) do
+          {%{"role" => "assistant", "tool_calls" => calls} = assistant, rest} ->
+            rest ++ [Map.put(assistant, "tool_calls", calls ++ [call])]
+
+          _ ->
+            acc ++ [%{"role" => "assistant", "content" => "", "tool_calls" => [call]}]
+        end
+
+      %{"type" => "message", "role" => role} = item, acc when is_binary(role) ->
+        acc ++ [%{"role" => role, "content" => normalize_response_content(item["content"])}]
+
+      %{"role" => role} = item, acc when is_binary(role) ->
+        acc ++ [%{"role" => role, "content" => normalize_response_content(item["content"])}]
+
+      %{"type" => "function_call_output", "call_id" => call_id, "output" => output}, acc ->
+        acc ++ [%{"role" => "tool", "tool_call_id" => call_id, "content" => output}]
+
+      _, acc ->
+        acc
+    end)
+  end
+
+  defp response_input_messages(_), do: []
+
+  defp normalize_response_content(content) when is_binary(content), do: content
+
+  defp normalize_response_content(content) when is_list(content) do
+    Enum.map(content, fn
+      %{"type" => "input_text", "text" => text} ->
+        %{"type" => "text", "text" => text}
+
+      %{"type" => "input_image", "image_url" => url} ->
+        %{"type" => "image_url", "image_url" => %{"url" => url}}
+
+      item ->
+        item
+    end)
+  end
+
+  defp normalize_response_content(content), do: content || ""
+
+  defp build_response_payload(params, messages) do
+    build_payload(
+      params
+      |> Map.update("tools", nil, &normalize_response_tools/1)
+      |> Map.update("tool_choice", nil, &normalize_response_tool_choice/1)
+      |> Map.put("max_tokens", params["max_output_tokens"] || params["max_tokens"])
+      |> Map.put("response_format", normalize_response_format(params["text"])),
+      messages
+    )
+  end
+
+  defp normalize_response_format(%{"format" => %{"type" => "json_schema"} = format}) do
+    %{
+      "type" => "json_schema",
+      "json_schema" => %{
+        "name" => format["name"] || "response",
+        "strict" => format["strict"] == true,
+        "schema" => format["schema"]
+      }
+    }
+  end
+
+  defp normalize_response_format(_), do: nil
+
+  defp normalize_response_tools(nil), do: nil
+
+  defp normalize_response_tools(tools) when is_list(tools) do
+    Enum.map(tools, fn
+      %{"type" => "function", "name" => name} = tool ->
+        %{
+          "type" => "function",
+          "function" => %{
+            "name" => name,
+            "description" => tool["description"],
+            "parameters" => tool["parameters"] || %{}
+          }
+        }
+
+      tool ->
+        tool
+    end)
+  end
+
+  defp normalize_response_tools(tools), do: tools
+
+  defp normalize_response_tool_choice(%{"type" => "function", "name" => name}),
+    do: %{"type" => "function", "function" => %{"name" => name}}
+
+  defp normalize_response_tool_choice(choice), do: choice
+
+  defp response_stream(conn, job_id, params, timeout) do
+    sequence = :atomics.new(1, signed: false)
+    msg_id = "msg-" <> job_id
+    stub = openai_response(job_id, params, %{"output" => %{}, "usage" => %{}})
+    pending = Map.put(stub, "status", "in_progress")
+    item = response_message(msg_id, "in_progress", "")
+
+    conn = conn |> put_resp_content_type("text/event-stream") |> send_chunked(200)
+    conn = response_event(conn, %{"type" => "response.created", "response" => pending}, sequence)
+
+    conn =
+      response_event(conn, %{"type" => "response.in_progress", "response" => pending}, sequence)
+
+    conn =
+      response_event(
+        conn,
+        %{"type" => "response.output_item.added", "output_index" => 0, "item" => item},
+        sequence
+      )
+
+    conn =
+      response_event(
+        conn,
+        %{
+          "type" => "response.content_part.added",
+          "item_id" => msg_id,
+          "output_index" => 0,
+          "content_index" => 0,
+          "part" => hd(item["content"])
+        },
+        sequence
+      )
+
+    emit = fn conn, delta, reasoning? ->
+      if reasoning? do
+        {:ok, conn}
+      else
+        event = %{
+          "type" => "response.output_text.delta",
+          "item_id" => msg_id,
+          "output_index" => 0,
+          "content_index" => 0,
+          "delta" => delta
+        }
+
+        {:ok, response_event(conn, event, sequence)}
+      end
+    end
+
+    case await_with_heartbeat(conn, job_id, timeout, emit) do
+      {:ok, conn, %{"status" => "ok"} = result, streamed?} ->
+        body = openai_response(job_id, params, result)
+        content = get_in(result, ["output", "content"]) || ""
+
+        conn =
+          if streamed?,
+            do: conn,
+            else:
+              response_event(
+                conn,
+                %{
+                  "type" => "response.output_text.delta",
+                  "item_id" => msg_id,
+                  "output_index" => 0,
+                  "content_index" => 0,
+                  "delta" => content
+                },
+                sequence
+              )
+
+        part = %{"type" => "output_text", "text" => content, "annotations" => []}
+
+        conn =
+          response_event(
+            conn,
+            %{
+              "type" => "response.output_text.done",
+              "item_id" => msg_id,
+              "output_index" => 0,
+              "content_index" => 0,
+              "text" => content
+            },
+            sequence
+          )
+
+        conn =
+          response_event(
+            conn,
+            %{
+              "type" => "response.content_part.done",
+              "item_id" => msg_id,
+              "output_index" => 0,
+              "content_index" => 0,
+              "part" => part
+            },
+            sequence
+          )
+
+        conn =
+          response_event(
+            conn,
+            %{
+              "type" => "response.output_item.done",
+              "output_index" => 0,
+              "item" => response_message(msg_id, "completed", content)
+            },
+            sequence
+          )
+
+        response_event(conn, %{"type" => "response.completed", "response" => body}, sequence)
+
+      {:ok, conn, %{"reason" => reason}, _} ->
+        response_error(conn, "worker error: #{reason}", sequence)
+
+      {:ok, conn, _, _} ->
+        response_error(conn, "worker returned no usable output", sequence)
+
+      {:timeout, conn} ->
+        response_error(conn, "no worker completed the job in time", sequence)
+    end
+  end
+
+  defp response_message(id, status, text),
+    do: %{
+      "id" => id,
+      "type" => "message",
+      "status" => status,
+      "role" => "assistant",
+      "content" => [%{"type" => "output_text", "text" => text, "annotations" => []}]
+    }
+
+  defp response_event(conn, event, sequence) do
+    event = Map.put(event, "sequence_number", :atomics.add_get(sequence, 1, 1) - 1)
+
+    case chunk(conn, "event: #{event["type"]}\ndata: #{Jason.encode!(event)}\n\n") do
+      {:ok, conn} -> conn
+      {:error, _} -> conn
+    end
+  end
+
+  defp response_error(conn, message, sequence),
+    do:
+      response_event(
+        conn,
+        %{"type" => "error", "code" => "api_error", "message" => message, "param" => nil},
+        sequence
+      )
+
+  defp openai_response(job_id, params, result) do
+    content = get_in(result, ["output", "content"]) || ""
+    tool_calls = get_in(result, ["output", "tool_calls"]) || []
+    usage = result["usage"] || %{}
+    input = usage["input_tokens"] || 0
+    output_tokens = usage["output_tokens"] || 0
+    model = usage["model"] || params["model"] || "hydra"
+    msg_id = "msg-" <> job_id
+
+    output =
+      case tool_calls do
+        [] ->
+          [
+            %{
+              "id" => msg_id,
+              "type" => "message",
+              "status" => "completed",
+              "role" => "assistant",
+              "content" => [%{"type" => "output_text", "text" => content, "annotations" => []}]
+            }
+          ]
+
+        calls ->
+          Enum.map(calls, fn call ->
+            function = call["function"] || %{}
+
+            %{
+              "id" => call["id"] || "fc-" <> job_id,
+              "type" => "function_call",
+              "status" => "completed",
+              "call_id" => call["id"] || "fc-" <> job_id,
+              "name" => function["name"],
+              "arguments" => function["arguments"] || "{}"
+            }
+          end)
+      end
+
+    %{
+      "id" => "resp-" <> job_id,
+      "object" => "response",
+      "created_at" => System.system_time(:second),
+      "model" => model,
+      "status" => "completed",
+      "output" => output,
+      "usage" => %{
+        "input_tokens" => input,
+        "output_tokens" => output_tokens,
+        "total_tokens" => input + output_tokens
+      }
+    }
   end
 
   # Non-streaming: block until the job result, then map it to one JSON body (or an HTTP error).
@@ -180,11 +560,22 @@ defmodule Coordinator.ApiRouter do
       "temperature" => params["temperature"],
       "model" => params["model"],
       "tools" => params["tools"],
-      "tool_choice" => params["tool_choice"]
+      "tool_choice" => params["tool_choice"],
+      "response_format" => params["response_format"]
     }
     |> Enum.reject(fn {_k, v} -> is_nil(v) end)
     |> Map.new()
   end
+
+  defp requested_model_available(%{"model" => model}) when is_binary(model) and model != "" do
+    models = list_models()
+
+    if models == [] or Enum.any?(models, &(&1["id"] == model)),
+      do: :ok,
+      else: {:error, {:model_unavailable, model}}
+  end
+
+  defp requested_model_available(_), do: :ok
 
   # Privacy defaults to public + external allowed so any eligible worker (local or provider) can
   # take it. A future revision can map an `x-hydra-privacy` header here.
@@ -518,7 +909,9 @@ defmodule Coordinator.ApiRouter do
 
   defp auth_required? do
     master = Application.get_env(:coordinator, :api_token)
-    (is_binary(master) and master != "") or Application.get_env(:coordinator, :require_api_token, false)
+
+    (is_binary(master) and master != "") or
+      Application.get_env(:coordinator, :require_api_token, false)
   end
 
   defp resolve_timeout(conn, params) do
@@ -534,7 +927,10 @@ defmodule Coordinator.ApiRouter do
   end
 
   defp parse_int(n) when is_integer(n), do: n
-  defp parse_int(n) when is_binary(n), do: with({i, _} <- Integer.parse(n), do: i, else: (_ -> nil))
+
+  defp parse_int(n) when is_binary(n),
+    do: with({i, _} <- Integer.parse(n), do: i, else: (_ -> nil))
+
   defp parse_int(_), do: nil
 
   # Public base URL as the client reached us (honoring the ingress/Cloudflare forwarded proto),
