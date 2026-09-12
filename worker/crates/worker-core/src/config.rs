@@ -50,7 +50,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_requests_per_hour: Some(100),
+            max_requests_per_hour: Some(1_000),
             max_parallel_provider_requests: Some(2),
         }
     }
@@ -99,7 +99,7 @@ pub struct WorkerConfig {
     /// Coordinator base URL, e.g. `ws://127.0.0.1:4000`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coordinator_url: Option<String>,
-    /// Overall timeout for HTTP requests to local runtimes and external providers.
+    /// Maximum idle time between response bytes from local runtimes and external providers.
     #[serde(default = "default_request_timeout_secs")]
     pub request_timeout_secs: u64,
 }

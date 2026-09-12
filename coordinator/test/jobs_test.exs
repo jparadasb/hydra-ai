@@ -8,6 +8,7 @@ defmodule Coordinator.JobsTest do
 
   alias Coordinator.{Jobs, LeaseWorker}
   alias Coordinator.Jobs.JobRecord
+  import Ecto.Query
   import Coordinator.WorkerTestHelper
 
   setup do
@@ -59,6 +60,14 @@ defmodule Coordinator.JobsTest do
     assert leased.status == "leased"
     assert leased.worker_id == "w1"
     assert leased.lease_id != nil
+    assert leased.lease_expires_at == leased.expires_at
+  end
+
+  test "a stale pending snapshot cannot lease a cancelled job" do
+    {:ok, rec} = enqueue()
+    assert {:ok, %{status: "cancelled"}} = Jobs.cancel(rec.id)
+    assert {:error, :not_pending} = Jobs.mark_leased(rec, "w-race", Jobs.gen_lease_id())
+    assert Jobs.get(rec.id).status == "cancelled"
   end
 
   test "lease worker snoozes when no eligible worker is connected" do
@@ -68,6 +77,7 @@ defmodule Coordinator.JobsTest do
   end
 
   test "lease worker fails an expired job instead of snoozing or dispatching it" do
+    Phoenix.PubSub.subscribe(Coordinator.PubSub, "job_results")
     register_local_worker("w-expired")
 
     {:ok, rec} =
@@ -85,6 +95,11 @@ defmodule Coordinator.JobsTest do
     assert failed.status == "failed"
     assert failed.worker_id == nil
     assert failed.result["reason"] == "deadline_expired"
+
+    assert_receive {:job_result,
+                    %{"job_id" => job_id, "status" => "error", "reason" => "deadline_expired"}}
+
+    assert job_id == rec.id
   end
 
   test "expired lease sweeper requeues an abandoned job" do
@@ -115,6 +130,17 @@ defmodule Coordinator.JobsTest do
 
     {:ok, _} = Jobs.complete(rec.id, %{"status" => "ok", "output" => %{"content" => "x"}})
     assert Jobs.get(rec.id).status == "done"
+  end
+
+  test "terminal updates refresh updated_at for throughput accounting" do
+    {:ok, rec} = enqueue()
+    old = DateTime.add(DateTime.utc_now(), -2, :hour)
+
+    from(j in JobRecord, where: j.id == ^rec.id)
+    |> Coordinator.Repo.update_all(set: [updated_at: old])
+
+    {:ok, _} = Jobs.complete(rec.id, %{"status" => "ok", "output" => %{}})
+    assert DateTime.compare(Jobs.get(rec.id).updated_at, old) == :gt
   end
 
   test "a non-OK result re-queues the job, then fails after max attempts" do

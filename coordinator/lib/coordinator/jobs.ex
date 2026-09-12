@@ -65,15 +65,20 @@ defmodule Coordinator.Jobs do
   end
 
   def mark_leased(%JobRecord{} = r, worker_id, lease_id) do
-    r
-    |> JobRecord.changeset(%{
-      "status" => "leased",
-      "worker_id" => worker_id,
-      "lease_id" => lease_id,
-      "lease_expires_at" => deadline(lease_timeout_ms()),
-      "attempts" => r.attempts + 1
-    })
-    |> Repo.update()
+    {count, _} =
+      from(j in JobRecord, where: j.id == ^r.id and j.status == "pending")
+      |> Repo.update_all(
+        set: [
+          status: "leased",
+          worker_id: worker_id,
+          lease_id: lease_id,
+          lease_expires_at: lease_deadline(r),
+          attempts: r.attempts + 1,
+          updated_at: now()
+        ]
+      )
+
+    if count == 1, do: {:ok, get(r.id)}, else: {:error, :not_pending}
   end
 
   def expired?(%JobRecord{} = record) do
@@ -88,10 +93,20 @@ defmodule Coordinator.Jobs do
     {count, _} =
       from(j in JobRecord, where: j.id == ^record.id and j.status == "pending")
       |> Repo.update_all(
-        set: [status: "failed", result: %{"status" => "error", "reason" => "deadline_expired"}]
+        set: [
+          status: "failed",
+          result: %{"status" => "error", "reason" => "deadline_expired"},
+          updated_at: now()
+        ]
       )
 
-    if count == 1, do: {:ok, get(record.id)}, else: {:error, :not_pending}
+    if count == 1 do
+      result = %{"job_id" => record.id, "status" => "error", "reason" => "deadline_expired"}
+      broadcast_result(result)
+      {:ok, get(record.id)}
+    else
+      {:error, :not_pending}
+    end
   end
 
   @doc "Reclaim every expired lease, failing jobs that exhausted their execution attempts."
@@ -115,18 +130,25 @@ defmodule Coordinator.Jobs do
   end
 
   defp reclaim_lease(%JobRecord{attempts: attempts} = record) when attempts >= @max_attempts do
-    from(j in JobRecord,
-      where: j.id == ^record.id and j.status == "leased" and j.lease_id == ^record.lease_id
-    )
-    |> Repo.update_all(
-      set: [
-        status: "failed",
-        worker_id: nil,
-        lease_id: nil,
-        lease_expires_at: nil,
-        result: %{"status" => "error", "reason" => "lease_expired"}
-      ]
-    )
+    {count, _} =
+      from(j in JobRecord,
+        where: j.id == ^record.id and j.status == "leased" and j.lease_id == ^record.lease_id
+      )
+      |> Repo.update_all(
+        set: [
+          status: "failed",
+          worker_id: nil,
+          lease_id: nil,
+          lease_expires_at: nil,
+          result: %{"status" => "error", "reason" => "lease_expired"},
+          updated_at: now()
+        ]
+      )
+
+    if count == 1 do
+      Coordinator.WorkerChannel.cancel(record.worker_id, record.id)
+      broadcast_result(%{"job_id" => record.id, "status" => "error", "reason" => "lease_expired"})
+    end
 
     :ok
   end
@@ -137,10 +159,20 @@ defmodule Coordinator.Jobs do
         where: j.id == ^record.id and j.status == "leased" and j.lease_id == ^record.lease_id
       )
       |> Repo.update_all(
-        set: [status: "pending", worker_id: nil, lease_id: nil, lease_expires_at: nil]
+        set: [
+          status: "pending",
+          worker_id: nil,
+          lease_id: nil,
+          lease_expires_at: nil,
+          updated_at: now()
+        ]
       )
 
-    if count == 1, do: enqueue_lease(record.id)
+    if count == 1 do
+      Coordinator.WorkerChannel.cancel(record.worker_id, record.id)
+      enqueue_lease(record.id)
+    end
+
     :ok
   end
 
@@ -192,7 +224,7 @@ defmodule Coordinator.Jobs do
     from(j in JobRecord,
       where: j.id == ^record.id and j.status in ["pending", "leased"]
     )
-    |> Repo.update_all(set: [status: status, result: result])
+    |> Repo.update_all(set: [status: status, result: result, updated_at: now()])
 
     {:ok, get(record.id)}
   end
@@ -204,7 +236,13 @@ defmodule Coordinator.Jobs do
         where: j.id == ^record.id and j.status in ["pending", "leased"]
       )
       |> Repo.update_all(
-        set: [status: "pending", worker_id: nil, lease_id: nil, lease_expires_at: nil]
+        set: [
+          status: "pending",
+          worker_id: nil,
+          lease_id: nil,
+          lease_expires_at: nil,
+          updated_at: now()
+        ]
       )
 
     if count == 1 do
@@ -221,6 +259,13 @@ defmodule Coordinator.Jobs do
 
   defp lease_timeout_ms,
     do: Application.get_env(:coordinator, :lease_timeout_ms, @default_lease_timeout_ms)
+
+  defp lease_deadline(%JobRecord{expires_at: %DateTime{} = expires_at}), do: expires_at
+  defp lease_deadline(_record), do: deadline(lease_timeout_ms())
+
+  defp broadcast_result(result) do
+    Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {:job_result, result})
+  end
 
   defp deadline(milliseconds), do: DateTime.add(now(), milliseconds, :millisecond)
   defp now, do: DateTime.utc_now()

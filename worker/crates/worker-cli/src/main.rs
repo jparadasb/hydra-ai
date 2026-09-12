@@ -172,7 +172,7 @@ async fn cmd_update(check: bool, channel: String, url: Option<String>, restart: 
         repo: self_update::DEFAULT_REPO.to_string(),
     };
 
-    let client = worker_core::http::default_client().expect("build HTTP client");
+    let client = worker_core::http::download_client().expect("build HTTP client");
     match self_update::run_update(&client, &exe, &opts).await {
         Ok(UpdateOutcome::UpToDate { sha256 }) => {
             println!("Already up to date ({}).", short(&sha256));
