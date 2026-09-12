@@ -289,9 +289,11 @@ mod networked {
 
         // Without an explicit config, tungstenite allows a 64 MiB message. A leased job is
         // messages, not media; cap what the coordinator can make this process buffer.
-        let mut ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
-        ws_config.max_message_size = Some(MAX_WS_MESSAGE_BYTES);
-        ws_config.max_frame_size = Some(MAX_WS_MESSAGE_BYTES);
+        let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+            max_message_size: Some(MAX_WS_MESSAGE_BYTES),
+            max_frame_size: Some(MAX_WS_MESSAGE_BYTES),
+            ..Default::default()
+        };
 
         let (ws, _resp) = tokio::time::timeout(
             crate::http::CONNECT_TIMEOUT,
