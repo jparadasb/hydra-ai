@@ -113,6 +113,35 @@ defmodule Coordinator.WorkerChannelTest do
     wait_inflight("w-race", 0)
   end
 
+  test "re-lease tracks both generations until each one finishes" do
+    reg = Map.put(registration("w-generations"), "supports_cancel_ack", true)
+    {:ok, _reply, socket} = join_worker("w-generations", reg)
+    wait_present("w-generations")
+
+    WorkerChannel.lease("w-generations", %{"job_id" => "j-gen", "lease_id" => "lease-1"})
+    assert_push("job", _)
+    WorkerChannel.lease("w-generations", %{"job_id" => "j-gen", "lease_id" => "lease-2"})
+    assert_push("job", _)
+    wait_inflight("w-generations", 2)
+
+    WorkerChannel.cancel("w-generations", "j-gen", "lease-1")
+    assert_push("cancel", _)
+    ack = push(socket, "cancelled", %{"job_id" => "j-gen", "lease_id" => "lease-1"})
+    assert_reply(ack, :ok)
+    wait_inflight("w-generations", 1)
+
+    result =
+      push(socket, "result", %{
+        "job_id" => "j-gen",
+        "lease_id" => "lease-2",
+        "status" => "ok",
+        "output" => %{}
+      })
+
+    assert_reply(result, :ok)
+    wait_inflight("w-generations", 0)
+  end
+
   test "malformed cancellation acknowledgement is rejected without closing channel" do
     {:ok, _reply, socket} = join_worker("w-malformed", registration("w-malformed"))
     ref = push(socket, "cancelled", %{})

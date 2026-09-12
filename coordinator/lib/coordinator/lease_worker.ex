@@ -45,7 +45,12 @@ defmodule Coordinator.LeaseWorker do
       {:ok, worker} ->
         lease_id = Jobs.gen_lease_id()
 
-        case Jobs.mark_leased(record, worker.worker_id, lease_id) do
+        case Jobs.mark_leased(
+               record,
+               worker.worker_id,
+               lease_id,
+               worker.supports_lease_heartbeat
+             ) do
           {:ok, leased} -> WorkerChannel.lease(worker.worker_id, Jobs.to_lease_payload(leased))
           {:error, :not_pending} -> :ok
         end

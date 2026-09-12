@@ -71,6 +71,9 @@ pub struct WorkerRegistration {
     /// Enables lease-generation-aware cancellation acknowledgements.
     #[serde(default)]
     pub supports_cancel_ack: bool,
+    /// Enables renewable short leases for queued and running work.
+    #[serde(default)]
+    pub supports_lease_heartbeat: bool,
 }
 
 impl WorkerRegistration {
@@ -109,6 +112,7 @@ impl WorkerRegistration {
             trust_level: "untrusted".to_string(),
             version: Some(crate::self_update::build_version()),
             supports_cancel_ack: true,
+            supports_lease_heartbeat: true,
         }
     }
 }

@@ -64,7 +64,7 @@ defmodule Coordinator.Jobs do
     }
   end
 
-  def mark_leased(%JobRecord{} = r, worker_id, lease_id) do
+  def mark_leased(%JobRecord{} = r, worker_id, lease_id, renewable? \\ false) do
     {count, _} =
       from(j in JobRecord, where: j.id == ^r.id and j.status == "pending")
       |> Repo.update_all(
@@ -72,7 +72,7 @@ defmodule Coordinator.Jobs do
           status: "leased",
           worker_id: worker_id,
           lease_id: lease_id,
-          lease_expires_at: lease_deadline(r),
+          lease_expires_at: lease_deadline(r, renewable?),
           updated_at: now()
         ],
         inc: [attempts: 1]
@@ -140,7 +140,9 @@ defmodule Coordinator.Jobs do
               j.id == ^job_id and j.status == "leased" and j.worker_id == ^worker_id and
                 j.lease_id == ^lease_id
           )
-          |> Repo.update_all(set: [lease_expires_at: lease_deadline(record), updated_at: now()])
+          |> Repo.update_all(
+            set: [lease_expires_at: lease_deadline(record, true), updated_at: now()]
+          )
 
         if count == 1, do: :ok, else: {:error, :stale_lease}
 
@@ -174,8 +176,6 @@ defmodule Coordinator.Jobs do
   end
 
   defp reclaim_lease(%JobRecord{} = record) do
-    Coordinator.WorkerChannel.cancel(record.worker_id, record.id, record.lease_id)
-
     result =
       Repo.transaction(fn ->
         {count, _} =
@@ -193,6 +193,8 @@ defmodule Coordinator.Jobs do
           )
 
         if count == 1 do
+          Coordinator.WorkerChannel.cancel(record.worker_id, record.id, record.lease_id)
+
           case enqueue_lease(record.id) do
             {:ok, _job} -> :reclaimed
             {:error, reason} -> Repo.rollback(reason)
@@ -295,7 +297,7 @@ defmodule Coordinator.Jobs do
   defp lease_timeout_ms,
     do: Application.get_env(:coordinator, :lease_timeout_ms, @default_lease_timeout_ms)
 
-  defp lease_deadline(%JobRecord{} = record) do
+  defp lease_deadline(%JobRecord{} = record, true) do
     lease_expires_at = deadline(lease_timeout_ms())
 
     case Map.get(record, :expires_at) do
@@ -308,6 +310,8 @@ defmodule Coordinator.Jobs do
         lease_expires_at
     end
   end
+
+  defp lease_deadline(%JobRecord{} = record, false), do: Map.get(record, :expires_at)
 
   defp broadcast_result(result) do
     Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {:job_result, result})

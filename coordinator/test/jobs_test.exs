@@ -20,6 +20,7 @@ defmodule Coordinator.JobsTest do
   defp register_local_worker(id) do
     track(%{
       "worker_id" => id,
+      "supports_lease_heartbeat" => true,
       "execution_mode" => "local_model",
       "models" => [
         %{
@@ -62,7 +63,27 @@ defmodule Coordinator.JobsTest do
     assert leased.worker_id == "w1"
     assert leased.lease_id != nil
     assert DateTime.compare(leased.lease_expires_at, leased.expires_at) == :lt
-    assert DateTime.diff(leased.lease_expires_at, before_lease, :second) in 60..61
+    assert DateTime.compare(leased.lease_expires_at, before_lease) == :gt
+  end
+
+  test "legacy worker lease lasts until caller deadline" do
+    track(%{
+      "worker_id" => "w-legacy",
+      "execution_mode" => "local_model",
+      "models" => [
+        %{
+          "name" => "qwen",
+          "capabilities" => ["text.extract_json"],
+          "uses_external_provider" => false
+        }
+      ],
+      "privacy" => %{"accepted_job_levels" => ["public"]}
+    })
+
+    {:ok, rec} = enqueue()
+    assert :ok = perform_job(LeaseWorker, %{job_id: rec.id})
+    leased = Jobs.get(rec.id)
+    assert leased.lease_expires_at == leased.expires_at
   end
 
   test "a stale pending snapshot cannot lease a cancelled job" do

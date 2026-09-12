@@ -188,7 +188,7 @@ mod networked {
         heartbeat: tokio::task::JoinHandle<()>,
     }
 
-    async fn cancel_job(
+    fn cancel_job(
         jobs: &mut HashMap<String, RunningJob>,
         job_id: &str,
         lease_id: Option<&str>,
@@ -201,7 +201,6 @@ mod networked {
             let running = jobs.remove(job_id).expect("running job disappeared");
             running.heartbeat.abort();
             running.handle.abort();
-            let _ = running.handle.await;
             true
         } else {
             false
@@ -486,17 +485,17 @@ mod networked {
                 if let Some(job_id) = pm.payload.get("job_id").and_then(Value::as_str) {
                     let lease_id = pm.payload.get("lease_id").and_then(Value::as_str);
 
-                    if cancel_job(&mut jobs, job_id, lease_id).await {
-                        if let Some(lease_id) = lease_id {
-                            let cancelled = PhoenixMsg::new(
-                                Some("1".into()),
-                                Some(next_ref()),
-                                &topic,
-                                "cancelled",
-                                serde_json::json!({"job_id": job_id, "lease_id": lease_id}),
-                            );
-                            tx.send(cancelled.encode()).ok();
-                        }
+                    cancel_job(&mut jobs, job_id, lease_id);
+
+                    if let Some(lease_id) = lease_id {
+                        let cancelled = PhoenixMsg::new(
+                            Some("1".into()),
+                            Some(next_ref()),
+                            &topic,
+                            "cancelled",
+                            serde_json::json!({"job_id": job_id, "lease_id": lease_id}),
+                        );
+                        tx.send(cancelled.encode()).ok();
                     }
                 }
             }
@@ -531,10 +530,10 @@ mod networked {
                 },
             );
 
-            assert!(!cancel_job(&mut jobs, "job-1", Some("stale-lease")).await);
-            assert!(cancel_job(&mut jobs, "job-1", Some("lease-1")).await);
+            assert!(!cancel_job(&mut jobs, "job-1", Some("stale-lease")));
+            assert!(cancel_job(&mut jobs, "job-1", Some("lease-1")));
             assert!(jobs.is_empty());
-            assert!(!cancel_job(&mut jobs, "job-1", Some("lease-1")).await);
+            assert!(!cancel_job(&mut jobs, "job-1", Some("lease-1")));
         }
     }
 }

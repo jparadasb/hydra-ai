@@ -22,6 +22,7 @@ defmodule Coordinator.Worker do
           trust_level: String.t(),
           max_requests_per_hour: non_neg_integer() | nil,
           supports_cancel_ack: boolean(),
+          supports_lease_heartbeat: boolean(),
           # live scheduling signals
           inflight: non_neg_integer(),
           avg_latency_ms: float(),
@@ -36,6 +37,7 @@ defmodule Coordinator.Worker do
             trust_level: "untrusted",
             max_requests_per_hour: nil,
             supports_cancel_ack: false,
+            supports_lease_heartbeat: false,
             inflight: 0,
             avg_latency_ms: 0.0,
             available: true
@@ -55,7 +57,8 @@ defmodule Coordinator.Worker do
         |> Enum.map(&Coordinator.Job.parse_privacy/1),
       trust_level: reg["trust_level"] || "untrusted",
       max_requests_per_hour: get_in(reg, ["limits", "max_requests_per_hour"]),
-      supports_cancel_ack: reg["supports_cancel_ack"] == true
+      supports_cancel_ack: reg["supports_cancel_ack"] == true,
+      supports_lease_heartbeat: reg["supports_lease_heartbeat"] == true
     }
   end
 

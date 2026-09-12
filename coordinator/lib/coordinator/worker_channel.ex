@@ -12,6 +12,7 @@ defmodule Coordinator.WorkerChannel do
   the worker replies with a `"result"` message.
   """
   use Phoenix.Channel
+  require Logger
 
   alias Coordinator.{Jobs, WorkerRegistry, WorkerSession}
 
@@ -39,7 +40,7 @@ defmodule Coordinator.WorkerChannel do
              socket
              |> assign(:worker_id, worker.worker_id)
              |> assign(:worker, worker)
-             |> assign(:active_leases, %{})}
+             |> assign(:active_leases, MapSet.new())}
 
           {:error, reason} ->
             {:error, %{reason: to_string(reason)}}
@@ -72,7 +73,10 @@ defmodule Coordinator.WorkerChannel do
     push(socket, "job", payload)
     worker = %{socket.assigns.worker | inflight: socket.assigns.worker.inflight + 1}
     WorkerRegistry.update(self(), worker)
-    active_leases = Map.put(socket.assigns.active_leases, payload["job_id"], payload["lease_id"])
+
+    active_leases =
+      MapSet.put(socket.assigns.active_leases, {payload["job_id"], payload["lease_id"]})
+
     {:noreply, socket |> assign(:worker, worker) |> assign(:active_leases, active_leases)}
   end
 
@@ -82,7 +86,7 @@ defmodule Coordinator.WorkerChannel do
     if socket.assigns.worker.supports_cancel_ack do
       {:noreply, socket}
     else
-      {:noreply, finish_job(socket, payload["job_id"])}
+      {:noreply, finish_lease(socket, payload["job_id"], payload["lease_id"])}
     end
   end
 
@@ -151,10 +155,10 @@ defmodule Coordinator.WorkerChannel do
   def handle_in("result", payload, socket) do
     case WorkerSession.handle_result(payload) do
       {:ok, _clean} ->
-        {:reply, :ok, finish_job(socket, payload["job_id"])}
+        {:reply, :ok, finish_result(socket, payload)}
 
       {:error, reason} ->
-        {:reply, {:error, %{reason: to_string(reason)}}, finish_job(socket, payload["job_id"])}
+        {:reply, {:error, %{reason: to_string(reason)}}, finish_result(socket, payload)}
     end
   end
 
@@ -174,8 +178,12 @@ defmodule Coordinator.WorkerChannel do
   @impl true
   def terminate(_reason, socket) do
     if worker_id = socket.assigns[:worker_id] do
-      if not WorkerRegistry.other_connection?(worker_id, self()),
-        do: Jobs.reclaim_worker_leases(worker_id)
+      if not WorkerRegistry.other_connection?(worker_id, self()) do
+        case Jobs.reclaim_worker_leases(worker_id) do
+          :ok -> :ok
+          {:error, reason} -> Logger.error("worker lease reclaim failed: #{inspect(reason)}")
+        end
+      end
     end
 
     :ok
@@ -201,21 +209,34 @@ defmodule Coordinator.WorkerChannel do
   end
 
   defp finish_job(socket, job_id) do
-    if Map.has_key?(socket.assigns.active_leases, job_id) do
+    socket.assigns.active_leases
+    |> Enum.filter(fn {id, _lease_id} -> id == job_id end)
+    |> Enum.reduce(socket, fn {_id, lease_id}, current ->
+      finish_lease(current, job_id, lease_id)
+    end)
+  end
+
+  defp finish_result(socket, %{"job_id" => job_id, "lease_id" => lease_id})
+       when is_binary(job_id) and is_binary(lease_id),
+       do: finish_lease(socket, job_id, lease_id)
+
+  defp finish_result(socket, %{"job_id" => job_id}) when is_binary(job_id),
+    do: finish_job(socket, job_id)
+
+  defp finish_result(socket, _payload), do: socket
+
+  defp finish_lease(socket, job_id, lease_id) do
+    lease = {job_id, lease_id}
+
+    if MapSet.member?(socket.assigns.active_leases, lease) do
       worker = %{socket.assigns.worker | inflight: max(socket.assigns.worker.inflight - 1, 0)}
       WorkerRegistry.update(self(), worker)
 
       socket
       |> assign(:worker, worker)
-      |> assign(:active_leases, Map.delete(socket.assigns.active_leases, job_id))
+      |> assign(:active_leases, MapSet.delete(socket.assigns.active_leases, lease))
     else
       socket
     end
-  end
-
-  defp finish_lease(socket, job_id, lease_id) do
-    if socket.assigns.active_leases[job_id] == lease_id,
-      do: finish_job(socket, job_id),
-      else: socket
   end
 end
