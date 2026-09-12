@@ -68,6 +68,69 @@ impl ProviderAdapter for FakeAdapter {
     }
 }
 
+/// An adapter whose model probe stalls, so the catalog sweep's shape (serial vs concurrent)
+/// is observable in wall-clock time.
+struct StallAdapter {
+    name: String,
+    delay: std::time::Duration,
+}
+
+#[async_trait]
+impl ProviderAdapter for StallAdapter {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn uses_external_provider(&self) -> bool {
+        false
+    }
+    async fn list_models(&self) -> worker_core::Result<Vec<ModelInfo>> {
+        tokio::time::sleep(self.delay).await;
+        Ok(vec![ModelInfo {
+            name: format!("{}-model", self.name),
+            capabilities: vec!["text.extract_json".into()],
+            context_length: Some(8000),
+            modalities: vec!["text".into()],
+            uses_external_provider: false,
+        }])
+    }
+    async fn validate_credentials(&self) -> worker_core::Result<bool> {
+        Ok(true)
+    }
+    async fn run_chat_completion(&self, _req: ChatRequest) -> worker_core::Result<ChatResponse> {
+        unimplemented!("stall adapter never runs a job")
+    }
+}
+
+#[tokio::test]
+async fn catalog_probes_run_concurrently_across_adapters() {
+    let delay = std::time::Duration::from_millis(300);
+    let mut reg = AdapterRegistry::new();
+    for i in 0..4 {
+        reg.register(Arc::new(StallAdapter {
+            name: format!("stalled-{i}"),
+            delay,
+        }));
+    }
+
+    let g = Gateway::new(
+        reg,
+        RoutingPolicy::default(),
+        LimitGuard::new(Limits::default()),
+        Arc::new(MemoryUsageStore::default()),
+    );
+
+    let started = std::time::Instant::now();
+    g.refresh_catalog().await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(g.model_catalog().len(), 4);
+    // Serial probing would take 4 × 300ms; concurrent probing takes ~300ms.
+    assert!(
+        elapsed < delay * 3,
+        "catalog sweep took {elapsed:?}, expected roughly one probe delay ({delay:?})"
+    );
+}
+
 async fn gateway_with(policy: RoutingPolicy) -> Gateway {
     let mut reg = AdapterRegistry::new();
     reg.register(Arc::new(FakeAdapter {

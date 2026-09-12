@@ -65,6 +65,8 @@ defmodule Coordinator.WorkerSession do
   @doc """
   Handle a normalized job result from a worker. Broadcasts the (sanitized, secret-free)
   result on the `"job_results"` PubSub topic so schedulers/tests can observe completions.
+  A result carrying a superseded `lease_id` is rejected (`{:error, :stale_lease}`) and never
+  broadcast — the job has been re-leased and a live generation owns its outcome.
 
   The worker's inflight count is maintained by its channel process (which sees the job go out
   and the result come back), not here — so there is no reservation to release.
@@ -73,9 +75,17 @@ defmodule Coordinator.WorkerSession do
     case SecretGuard.verify(payload) do
       :ok ->
         clean = SecretGuard.sanitize(payload)
-        persist_result(clean)
-        Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {:job_result, clean})
-        {:ok, clean}
+
+        case persist_result(clean) do
+          # The result belongs to a lease generation that was already reclaimed; another
+          # worker owns the job now, so this output must not reach the waiting caller.
+          {:error, :stale_lease} ->
+            {:error, :stale_lease}
+
+          _ ->
+            Phoenix.PubSub.broadcast(Coordinator.PubSub, "job_results", {:job_result, clean})
+            {:ok, clean}
+        end
 
       {:error, _} = err ->
         err
