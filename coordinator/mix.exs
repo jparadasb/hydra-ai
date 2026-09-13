@@ -6,6 +6,9 @@ defmodule Coordinator.MixProject do
       app: :coordinator,
       version: "0.1.0",
       elixir: "~> 1.19",
+      # `test/support` holds test-only modules (the mock provider the e2e points a real worker
+      # at). Compiled in :test only so nothing ships in a release.
+      elixirc_paths: elixirc_paths(Mix.env()),
       # Declared so the licence is discoverable from the package metadata, not only from the
       # LICENSE file at the repo root.
       description: "hydra-ai coordinator: leases jobs to worker nodes and routes them.",
@@ -18,6 +21,9 @@ defmodule Coordinator.MixProject do
       deps: deps()
     ]
   end
+
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_), do: ["lib"]
 
   defp aliases do
     [
