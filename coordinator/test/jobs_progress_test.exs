@@ -98,7 +98,7 @@ defmodule Coordinator.JobsProgressTest do
 
     test "a job that is no longer leased stops accepting progress" do
       job = leased_job()
-      {:ok, _} = Jobs.cancel(job.id)
+      {:ok, :cancelled, _} = Jobs.cancel(job.id)
 
       assert {:error, :stale_progress} =
                Jobs.record_progress(job.id, frame(%{"output_tokens" => 5}))

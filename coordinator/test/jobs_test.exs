@@ -88,7 +88,7 @@ defmodule Coordinator.JobsTest do
 
   test "a stale pending snapshot cannot lease a cancelled job" do
     {:ok, rec} = enqueue()
-    assert {:ok, %{status: "cancelled"}} = Jobs.cancel(rec.id)
+    assert {:ok, :cancelled, %{status: "cancelled"}} = Jobs.cancel(rec.id)
     assert {:error, :not_pending} = Jobs.mark_leased(rec, "w-race", Jobs.gen_lease_id())
     assert Jobs.get(rec.id).status == "cancelled"
   end
@@ -300,7 +300,7 @@ defmodule Coordinator.JobsTest do
     {:ok, rec} = enqueue()
     perform_job(LeaseWorker, %{job_id: rec.id})
 
-    assert {:ok, %{status: "cancelled"}} = Jobs.cancel(rec.id)
+    assert {:ok, :cancelled, %{status: "cancelled"}} = Jobs.cancel(rec.id)
 
     assert {:ok, %{status: "cancelled"}} =
              Jobs.complete(rec.id, %{"status" => "ok", "output" => %{"content" => "late"}})

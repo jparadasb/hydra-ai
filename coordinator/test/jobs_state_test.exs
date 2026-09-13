@@ -101,7 +101,7 @@ defmodule Coordinator.JobsStateTest do
       assert is_nil(ok.failure_reason)
 
       cancelled = enqueue()
-      {:ok, cancelled} = Jobs.cancel(cancelled.id)
+      {:ok, :cancelled, cancelled} = Jobs.cancel(cancelled.id)
       assert_consistent(cancelled)
       assert {cancelled.status, cancelled.state} == {"cancelled", "cancelled"}
     end

@@ -905,17 +905,11 @@ defmodule Coordinator.ApiRouter do
     end
   end
 
-  # Persist cancellation before notifying the worker. A late result then cannot resurrect or
-  # requeue the abandoned job. Pending jobs have no worker to notify and stay terminal.
+  # The caller gave up — a deadline passed, or they hung up mid-stream. `Coordinator.Jobs.cancel/1`
+  # persists that and signals the worker; nothing here depends on which of the two happened.
   defp cancel_job(job_id) do
-    case Coordinator.Jobs.cancel(job_id) do
-      {:ok, %{status: "cancelled", worker_id: worker_id, lease_id: lease_id}}
-      when is_binary(worker_id) and is_binary(lease_id) ->
-        Coordinator.WorkerChannel.cancel(worker_id, job_id, lease_id)
-
-      _ ->
-        :ok
-    end
+    Coordinator.Jobs.cancel(job_id)
+    :ok
   end
 
   # ---- admission: identity, then rate ---------------------------------------------------------

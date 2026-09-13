@@ -449,7 +449,12 @@ defmodule Coordinator.Jobs do
       nil ->
         {:error, :unknown_job}
 
+      # The worker finished, or died trying, after the job was already cancelled. Its output is
+      # not the job's answer — the caller asked for it to stop, and a later reader must not be
+      # handed a completion for a cancelled job. But what it measured is real and is the last
+      # word on how far the job actually got, so the counts are kept and the result is not.
       %{status: "cancelled"} = record ->
+        {:ok, record} = record_final_usage(record, result)
         {:ok, record}
 
       record ->
@@ -460,6 +465,26 @@ defmodule Coordinator.Jobs do
         else
           apply_result(record, result)
         end
+    end
+  end
+
+  # Fold a worker's reported usage onto a job whose outcome is already decided. Never touches
+  # `status`, `state` or `result`.
+  defp record_final_usage(record, result) do
+    usage = result["usage"] || %{}
+
+    set =
+      []
+      |> put_present(:input_tokens, usage["input_tokens"])
+      |> put_present(:output_tokens, usage["output_tokens"])
+      |> put_present(:actual_model, usage["model"])
+      |> put_present(:provider, usage["provider"])
+
+    if set == [] do
+      {:ok, record}
+    else
+      from(j in JobRecord, where: j.id == ^record.id) |> Repo.update_all(set: set)
+      {:ok, get(record.id)}
     end
   end
 
@@ -484,17 +509,49 @@ defmodule Coordinator.Jobs do
     end
   end
 
-  @doc "Cancel a pending or leased job. Completed terminal states remain unchanged."
+  @doc """
+  Cancel a pending or leased job, and tell its worker to stop.
+
+  Returns which of the two things happened, because a caller needs to know: `:cancelled` means
+  this call stopped it, `:already_terminal` means it had finished, failed or been cancelled
+  before the request arrived. Both are successes — cancelling twice is not an error — but an
+  agent that asked to stop a job wants to hear that it stopped something rather than nothing.
+
+  Signalling the worker happens here rather than at the call site. It used to live in the HTTP
+  router, which meant every new caller had to remember to do it; `reclaim_lease/1` already
+  cancels from inside this module, so this is the consistent home for it.
+
+  The order matters and is the same as before: persist first, then notify. A late result from a
+  worker that had already started responding cannot then resurrect or requeue the job, because
+  `complete/2` sees a cancelled row.
+
+  Partial metrics survive. Only `result` is overwritten, so the token counts, the model that
+  actually ran and the timings stay on the row — which is the whole point of cancelling a job
+  you have been watching.
+  """
   def cancel(job_id) do
     case get(job_id) do
       nil ->
         {:error, :unknown_job}
 
       %{status: status} = record when status in ["pending", "leased"] ->
-        update_status(record, "cancelled", %{"status" => "cancelled"}, "cancelled")
+        {:ok, cancelled} =
+          update_status(
+            record,
+            "cancelled",
+            %{"status" => "cancelled", "reason" => "cancelled_by_client"},
+            "cancelled"
+          )
+
+        # A pending job has no worker to tell. A leased one does, and it is holding a slot.
+        if is_binary(record.worker_id) and is_binary(record.lease_id) do
+          Coordinator.WorkerChannel.cancel(record.worker_id, record.id, record.lease_id)
+        end
+
+        {:ok, :cancelled, cancelled}
 
       record ->
-        {:ok, record}
+        {:ok, :already_terminal, record}
     end
   end
 
