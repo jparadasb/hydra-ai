@@ -7,16 +7,20 @@
 #                         OpenAI-compatible CLI (aider, llm, codex, curl, ...)
 #
 # Usage:
-#   scripts/setup-opencode.sh [--url https://hydra.lambdatauri.dev] [--key hydra_sk_...]
+#   scripts/setup-opencode.sh --url https://coordinator.example.com [--key hydra_sk_...]
 #                             [--target opencode|env] [--model MODEL_ID] [--embed-key]
 #                             [--no-autosync]
 #   scripts/setup-opencode.sh sync
+#   scripts/setup-opencode.sh uninstall      # remove the sync timer / cron entry + key file
+#
+# --url is required (or set HYDRA_URL). There is no default: a script anyone might run should
+# not point at somebody's personal deployment.
 #
 # The gateway key is minted in the coordinator admin console (/admin -> API keys).
-# By default the key is NOT written into the opencode config; the config references
-# {env:HYDRA_API_KEY}, an export line is appended to your shell rc, and a 0600 copy is
-# kept at ~/.config/opencode/.hydra_key for the sync timer. Use --embed-key to store it
-# in the config file instead.
+# The key is written to ~/.config/opencode/.hydra_key with mode 0600, and that is the only
+# place it is stored: the opencode config references {env:HYDRA_API_KEY}, and the line
+# appended to your shell rc *reads the key file* rather than containing the key. Use
+# --embed-key to store it in the opencode config file instead.
 #
 # Model auto-sync: setup installs a systemd user timer (cron fallback) that runs
 # `setup-opencode.sh sync` every 15 minutes, refreshing provider.hydra.models from the
@@ -24,13 +28,16 @@
 # Opt out with --no-autosync. `sync` can also be run by hand.
 set -euo pipefail
 
-URL="https://hydra.lambdatauri.dev"
+# No default: this used to be a personal deployment baked into a script anyone might run.
+# Pass --url, or set HYDRA_URL.
+URL="${HYDRA_URL:-}"
 KEY="${HYDRA_API_KEY:-}"
 TARGET="opencode"
 MODEL=""
 EMBED_KEY=false
 AUTOSYNC=true
 DO_SYNC=false
+DO_UNINSTALL=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -41,6 +48,7 @@ while [[ $# -gt 0 ]]; do
     --model)       MODEL="$2"; shift 2 ;;
     --embed-key)   EMBED_KEY=true; shift ;;
     --no-autosync) AUTOSYNC=false; shift ;;
+    uninstall)     DO_UNINSTALL=true; shift ;;
     -h|--help)     grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 1 ;;
   esac
@@ -49,6 +57,42 @@ done
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
 CONFIG="$CONFIG_DIR/opencode.json"
 KEY_FILE="$CONFIG_DIR/.hydra_key"
+
+if [[ -z "$URL" && $DO_SYNC == false ]]; then
+  echo "error: --url is required (or set HYDRA_URL), e.g. --url https://coordinator.example.com" >&2
+  echo "       run with --help for usage" >&2
+  exit 1
+fi
+
+# --- uninstall: undo everything setup installs ---------------------------------------
+# Setup writes a systemd user timer or a crontab line and a key file. None of that had a way
+# back out, so anyone who ran this script once kept a 15-minute timer forever.
+if $DO_UNINSTALL; then
+  if command -v systemctl > /dev/null && systemctl --user is-system-running &> /dev/null; then
+    systemctl --user disable --now hydra-model-sync.timer 2>/dev/null || true
+    rm -f "$HOME/.config/systemd/user/hydra-model-sync.timer" \
+          "$HOME/.config/systemd/user/hydra-model-sync.service"
+    systemctl --user daemon-reload 2>/dev/null || true
+    echo "removed systemd user timer hydra-model-sync.timer"
+  fi
+
+  if command -v crontab > /dev/null; then
+    SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+    if crontab -l 2>/dev/null | grep -qF "$SCRIPT_PATH sync"; then
+      crontab -l 2>/dev/null | grep -vF "$SCRIPT_PATH sync" | crontab -
+      echo "removed cron entry"
+    fi
+  fi
+
+  if [[ -f "$KEY_FILE" ]]; then
+    rm -f "$KEY_FILE"
+    echo "removed $KEY_FILE"
+  fi
+
+  echo "note: the opencode config at $CONFIG and any HYDRA_API_KEY line in your shell rc"
+  echo "      are left alone — remove them by hand if you want them gone."
+  exit 0
+fi
 
 # --- sync: refresh provider.hydra.models from the live /v1/models --------------------
 if $DO_SYNC; then
@@ -181,18 +225,22 @@ with open(path, "w") as f:
 print(f"wrote {path}")
 PY
 
+  # Key file first, mode 0600, and it is what the rc line reads. Appending the plaintext key
+  # straight into ~/.zshrc gave it that file's mode — typically 0644, i.e. world-readable.
+  (umask 077; printf '%s' "$KEY" > "$KEY_FILE")
+  chmod 600 "$KEY_FILE"
+
   if ! $EMBED_KEY; then
     RC="${ZDOTDIR:-$HOME}/.zshrc"; [[ -f "$RC" ]] || RC="$HOME/.bashrc"
     if ! grep -q "HYDRA_API_KEY" "$RC" 2>/dev/null; then
-      printf '\nexport HYDRA_API_KEY="%s"\n' "$KEY" >> "$RC"
+      printf '\n# hydra-ai: read the gateway key from a 0600 file rather than storing it here.\n' >> "$RC"
+      printf 'export HYDRA_API_KEY="$(cat %s 2>/dev/null)"\n' "$KEY_FILE" >> "$RC"
       echo "appended HYDRA_API_KEY export to $RC (open a new shell or: source $RC)"
+      echo "the key itself lives in $KEY_FILE (mode 0600), not in $RC"
     else
       echo "HYDRA_API_KEY already referenced in $RC — left untouched"
     fi
   fi
-
-  # key copy for the sync timer (cron/systemd don't see shell rc exports)
-  (umask 077; printf '%s' "$KEY" > "$KEY_FILE")
 
   if $AUTOSYNC; then
     SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"

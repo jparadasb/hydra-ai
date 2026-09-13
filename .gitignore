@@ -32,3 +32,9 @@ erl_crash.dump
 
 # Nightly pg_dump output from the compose stack's pg-backup service. Real data — never commit.
 /backups/
+
+# Per-user coding-agent state. `.claude/settings.local.json` was untracked only because nobody
+# had run `git add` on it yet. `.serena/project.yml` stays tracked on purpose — it is shared
+# project config (which languages to index), and `.serena/.gitignore` already excludes the
+# cache and the per-user local override.
+.claude/

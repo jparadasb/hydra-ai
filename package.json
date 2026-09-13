@@ -5,10 +5,12 @@
   "license": "Apache-2.0",
   "scripts": {
     "build:site": "tailwindcss -i coordinator/assets/styles.css -o coordinator/priv/site/tailwind.css --minify",
+    "build:logo": "sharp-cli --input logo.png --output coordinator/priv/site/ resize 256 256",
     "watch:site": "tailwindcss -i coordinator/assets/styles.css -o coordinator/priv/site/tailwind.css --watch"
   },
   "devDependencies": {
     "@tailwindcss/cli": "^4.1.0",
-    "tailwindcss": "^4.1.0"
+    "tailwindcss": "^4.1.0",
+    "sharp-cli": "^6.1.0"
   }
 }
