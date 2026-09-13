@@ -175,7 +175,7 @@ jobs:
       # bundles the `desktop` job attaches via tauri-action).
       - name: Attach CLI to release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: worker/dist/*
 
@@ -408,7 +408,7 @@ jobs:
           git push -f origin refs/tags/edge
 
       - name: Publish/replace the edge prerelease
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: edge
           name: hydra-worker (edge build)
