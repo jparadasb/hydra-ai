@@ -26,12 +26,12 @@ jobs:
       run:
         working-directory: coordinator
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: erlef/setup-beam@v1
         with:
           otp-version: '28'
           elixir-version: '1.19'
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             coordinator/deps
@@ -49,7 +49,7 @@ jobs:
   site-css:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
@@ -75,7 +75,7 @@ jobs:
     outputs:
       sha: ${{ steps.meta.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Short SHA
         id: meta
@@ -112,7 +112,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout fleet repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: jparadasb/lambdatauri-cluster-fleet
           token: ${{ secrets.FLEET_GITHUB_TOKEN }}
