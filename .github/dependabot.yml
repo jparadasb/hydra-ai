@@ -1,0 +1,52 @@
+version: 2
+
+# Nothing watched dependencies before this: no Dependabot, no Renovate, no audit tooling, and
+# 330 transitive Rust packages nobody would ever hear about a CVE in. The lockfiles drifted
+# months stale for the same reason.
+#
+# Grouped and weekly on purpose. Per-dependency PRs on a tree this size is noise that gets
+# ignored, and an ignored bot is the same as no bot.
+updates:
+  # The Cargo workspace: worker-core, worker-cli, worker-tauri.
+  - package-ecosystem: cargo
+    directory: /worker
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      rust-minor-and-patch:
+        update-types: [minor, patch]
+
+  # The desktop crate keeps its own lockfile, because it is excluded from the workspace.
+  # Without a separate entry it would never be updated at all.
+  - package-ecosystem: cargo
+    directory: /worker/crates/worker-app
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      desktop-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: mix
+    directory: /coordinator
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      elixir-minor-and-patch:
+        update-types: [minor, patch]
+
+  # Tailwind, for the landing page CSS.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+
+  # Pinned action versions go stale the same way library versions do, and a stale action is
+  # how a supply-chain fix gets missed.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

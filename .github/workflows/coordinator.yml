@@ -42,6 +42,30 @@ jobs:
       - run: mix format --check-formatted
       - run: mix test
 
+  # ---- landing page CSS ---------------------------------------------------------------------
+  # `coordinator/priv/site/tailwind.css` is generated but committed, and `npm run build:site`
+  # never ran in CI — so editing `coordinator/assets/styles.css` and forgetting to rebuild
+  # silently shipped stale CSS. Rebuild and fail if the committed file disagrees.
+  site-css:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build:site
+      - name: Fail if the committed CSS is stale
+        run: |
+          if ! git diff --quiet -- coordinator/priv/site/tailwind.css; then
+            echo "::error::coordinator/priv/site/tailwind.css is out of date."
+            echo "Run 'npm run build:site' and commit the result."
+            git --no-pager diff --stat -- coordinator/priv/site/tailwind.css
+            exit 1
+          fi
+          echo "Committed CSS matches a fresh build."
+
   build-push:
     needs: test
     if: github.event_name != 'pull_request'

@@ -113,7 +113,7 @@ a `.sha256` next to it.
 CLI (headless / systemd hosts) — no rebuild, no scp:
 
 ```sh
-hydra-worker --version                 # 0.1.0 (abc1234) — commit it was built from
+hydra-worker --version                 # 1.1.4 (abc1234) — commit it was built from
 hydra-worker update --check            # exit 0 = current, 10 = update available
 hydra-worker update --restart          # swap the binary in place, then restart hydra-worker.service
 ```
@@ -127,9 +127,25 @@ host whose installed binary predates the `update` subcommand is a one-time manua
 
 Desktop app: checks for updates on unlock and via **Check for updates** in the sidebar. Updates
 ship only on tagged `v*` releases (the app compares versions), are signed with the updater key,
-and install + relaunch from the in-app banner. Cutting a desktop update = bump the version in
-`worker/Cargo.toml` and `worker/crates/worker-app/tauri.conf.json`, then push a `v*` tag. CI
-signing requires the repo secrets `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+and install + relaunch from the in-app banner. CI signing requires the repo secrets
+`TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+
+**Cutting a release** — bump the version in *three* places and keep them equal:
+
+| file | why it is separate |
+|---|---|
+| `worker/Cargo.toml` | `[workspace.package]`; worker-core / worker-cli / worker-tauri inherit it |
+| `worker/crates/worker-app/Cargo.toml` | excluded from the workspace, so it cannot inherit |
+| `worker/crates/worker-app/tauri.conf.json` | Tauri reads its own JSON |
+
+`./scripts/check-versions.sh` asserts they agree and CI runs it on every push. This used to be
+documented as two files, and the third sat at `0.1.0` through four releases as a result.
+
+The updater signing key is a single point of failure — losing it bricks in-app updates for
+every installed desktop app. Backup and rotation: [`docs/updater-key-rotation.md`](docs/updater-key-rotation.md).
+
+Then push a `v*` tag. The release build stamps the tag's version into all three (and into both
+lockfiles, so the build can stay `--locked`).
 
 ### Where the coordinator URL comes from
 

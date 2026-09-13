@@ -1,13 +1,18 @@
 [package]
 name = "worker-app"
-version = "0.1.0"
+# Must equal `worker/Cargo.toml`'s `[workspace.package] version` and the `version` in
+# `tauri.conf.json`. Workspace inheritance cannot reach here (this crate is excluded from the
+# workspace, below), so CI checks the three agree — this one sat at 0.1.0 through four
+# releases because nothing did.
+version = "1.1.4"
 edition = "2021"
 license = "Apache-2.0"
 
 # NOTE: excluded from the workspace (see worker/Cargo.toml). The `tauri` runtime links
 # webkit2gtk/gtk; install the system deps (see worker/crates/worker-app/SETUP.md) then run
 # `cargo tauri dev` from this directory. The app logic it wraps lives in `worker-tauri`,
-# which IS in the workspace and is unit-tested without the GUI runtime.
+# which IS in the workspace and is unit-tested without the GUI runtime. CI builds this crate
+# on every PR so skew between the two cannot ship unnoticed.
 
 [[bin]]
 name = "hydra-worker-app"
