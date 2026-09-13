@@ -4,7 +4,7 @@ name = "worker-app"
 # `tauri.conf.json`. Workspace inheritance cannot reach here (this crate is excluded from the
 # workspace, below), so CI checks the three agree — this one sat at 0.1.0 through four
 # releases because nothing did.
-version = "1.1.4"
+version = "1.2.0"
 edition = "2021"
 license = "Apache-2.0"
 

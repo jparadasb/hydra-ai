@@ -8,8 +8,25 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
-Started at 1.1.4. Everything below landed after that tag and is unreleased on the worker side;
-the coordinator changes are live once merged.
+Nothing yet.
+
+## 1.2.0 — 2026-09-13
+
+Everything below landed after 1.1.4. The coordinator ships continuously from `main`, so its
+changes were live before this tag; the worker binaries and desktop bundles are this release.
+
+**Upgrading.** No action for workers — `hydra-worker update --restart`, or the desktop app's
+update banner. Two things to know if you run a coordinator:
+
+- `DB_ADAPTER` is now **required** in production and must match the adapter the release was
+  built against. The published image sets it, so a compose or Kubernetes deployment using that
+  image is unaffected; a hand-built release is not.
+- A cluster topology (`HYDRA_CLUSTER_SERVICE`) on SQLite is now refused at startup rather than
+  silently giving every replica its own database. More than one replica needs Postgres.
+
+`.env.example` now enables worker device auth and the gateway-key requirement by default. That
+changes nothing for an existing `.env`; it changes what a new deployment gets by following the
+quickstart.
 
 ### Security
 
@@ -58,7 +75,9 @@ the coordinator changes are live once merged.
 
 ### Removed
 
-- The OS keychain vault backend. It was documented as available and constructed by nothing.
+- The OS keychain vault backend. It was documented as available and constructed by nothing:
+  the selector had no callers, the feature was off by default, and no shipped binary contained
+  it. Every install has always used the encrypted file vault, which is what the docs now say.
 
 ## 1.1.4 and earlier
 

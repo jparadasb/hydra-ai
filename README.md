@@ -119,7 +119,7 @@ a `.sha256` next to it.
 CLI (headless / systemd hosts) — no rebuild, no scp:
 
 ```sh
-hydra-worker --version                 # 1.1.4 (abc1234) — commit it was built from
+hydra-worker --version                 # 1.2.0 (abc1234) — commit it was built from
 hydra-worker update --check            # exit 0 = current, 10 = update available
 hydra-worker update --restart          # swap the binary in place, then restart hydra-worker.service
 ```
