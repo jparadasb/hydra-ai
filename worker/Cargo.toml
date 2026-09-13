@@ -32,7 +32,7 @@ rand = "0.8"
 sha2 = "0.11"
 base64 = "0.22"
 ed25519-dalek = "3"
-sysinfo = "0.32"
+sysinfo = "0.39"
 directories = "6"
 webbrowser = "1"
 clap = { version = "4", features = ["derive"] }
