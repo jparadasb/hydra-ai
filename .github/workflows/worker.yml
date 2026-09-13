@@ -30,7 +30,7 @@ jobs:
       run:
         working-directory: worker
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -48,7 +48,7 @@ jobs:
   versions:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: ./scripts/check-versions.sh
 
   # ---- desktop crate builds -----------------------------------------------------------------
@@ -58,7 +58,7 @@ jobs:
   desktop-check:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install Linux desktop dependencies
@@ -98,7 +98,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # On a v* tag, stamp the tag's version into the crate metadata so the built binary
       # reports it (CARGO_PKG_VERSION -> `hydra-worker --version`). Otherwise the workspace
@@ -194,7 +194,7 @@ jobs:
     permissions:
       contents: write   # tauri-action uploads the desktop bundles to the tag's GitHub Release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Mirror the CLI job: on a v* tag, stamp the version into the desktop crate + Tauri config
       # so the bundle filenames and app version match the release tag instead of shipping 0.1.0.
@@ -335,7 +335,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
