@@ -53,7 +53,15 @@ defmodule Coordinator.Jobs do
         record
       else
         {:error, reason} ->
-          Logger.error("job #{id} could not be enqueued: #{inspect(reason)}")
+          # A repeated idempotent submission lands here and is not a failure: `submit/1` turns
+          # it into the existing job. Logging it as an error would make a working retry look
+          # like an incident.
+          if match?(%Ecto.Changeset{}, reason) and idempotency_conflict?(reason) do
+            Logger.debug("job #{id} already submitted under this idempotency key")
+          else
+            Logger.error("job #{id} could not be enqueued: #{inspect(reason)}")
+          end
+
           Repo.rollback(reason)
       end
     end)
@@ -64,7 +72,103 @@ defmodule Coordinator.Jobs do
     %{job_id: job_id} |> Coordinator.LeaseWorker.new(opts) |> Oban.insert()
   end
 
+  @doc """
+  Submit a job on behalf of a caller, returning the existing one if they have submitted it
+  before.
+
+  Wraps `enqueue/1` rather than changing it: an agent that retries after a dropped connection
+  must not buy a second run of an expensive job, but nothing else needs that ceremony and the
+  existing callers keep their two-element return.
+
+  Idempotency is scoped to `owner_scope`, so two callers can use the same key without colliding.
+  A repeat returns the first job whatever state it is in — queued, running, or long finished —
+  and the payloads are not compared: a key reused with different content returns the first job,
+  which is what the tool description tells callers.
+  """
+  def submit(attrs) do
+    attrs = Map.new(attrs, fn {k, v} -> {to_string(k), v} end)
+
+    case enqueue(attrs) do
+      {:ok, record} ->
+        {:ok, :created, record}
+
+      {:error, %Ecto.Changeset{} = changeset} ->
+        # Postgres aborts a transaction on a failed statement, so the losing writer cannot read
+        # inside it — `enqueue/1` has already rolled back by the time we get here. Harmless on
+        # SQLite; written for the adapter that cares.
+        if idempotency_conflict?(changeset) do
+          existing(attrs)
+        else
+          {:error, changeset}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp idempotency_conflict?(%Ecto.Changeset{errors: errors}) do
+    Enum.any?(errors, fn
+      {:owner_scope, {_, opts}} -> opts[:constraint] == :unique
+      {:idempotency_key, {_, opts}} -> opts[:constraint] == :unique
+      _ -> false
+    end)
+  end
+
+  defp existing(attrs, retries \\ 1) do
+    scope = attrs["owner_scope"]
+    key = attrs["idempotency_key"]
+
+    case Repo.get_by(JobRecord, owner_scope: scope, idempotency_key: key) do
+      %JobRecord{} = record ->
+        {:ok, :existing, record}
+
+      nil when retries > 0 ->
+        # The winner's transaction has not committed yet. Rare, and only between two racing
+        # submissions of the same key.
+        Process.sleep(25)
+        existing(attrs, retries - 1)
+
+      nil ->
+        {:error, :idempotency_conflict}
+    end
+  end
+
   def get(id), do: Repo.get(JobRecord, id)
+
+  @doc """
+  Fetch a job only if this caller owns it.
+
+  A job id used to be known only to whoever submitted it, so `get/1` needed no check. MCP hands
+  ids to agents, which makes an id a thing that can be guessed, shared or logged — so every
+  caller-facing read goes through here.
+
+  A job owned by someone else returns `nil`, exactly like one that does not exist. Telling the
+  two apart would let a caller probe which ids are real.
+  """
+  def get_for_caller(id, owner_scope) when is_binary(id) and is_binary(owner_scope) do
+    case get(id) do
+      %JobRecord{owner_scope: ^owner_scope} = record -> record
+      _ -> nil
+    end
+  end
+
+  def get_for_caller(_, _), do: nil
+
+  @doc """
+  How many jobs this caller has in flight.
+
+  A blocking HTTP request was its own backpressure: a caller could only have as many jobs as it
+  was willing to hold connections open for. Submitting asynchronously removes that, so the
+  ceiling has to be explicit.
+  """
+  def open_job_count(owner_scope) when is_binary(owner_scope) do
+    from(j in JobRecord,
+      where: j.owner_scope == ^owner_scope and j.status in ["pending", "leased"],
+      select: count(j.id)
+    )
+    |> Repo.one()
+  end
 
   @doc "Build the routing-domain `Coordinator.Job` from a persisted record."
   def to_domain(%JobRecord{} = r) do

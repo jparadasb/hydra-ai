@@ -596,7 +596,12 @@ defmodule Coordinator.ApiRouter do
            payload: payload,
            # Attribution travels with the job: the usage row written when it completes reads
            # the key from here, not from the worker's (untrusted) result.
-           api_token_id: caller.token_id
+           api_token_id: caller.token_id,
+           # Every job carries an owner, including the ones submitted here. The OpenAI door has
+           # no way to ask for a job by id, so it never reads this back — but a job submitted
+           # here and a job submitted over MCP have to be the same kind of row.
+           owner_scope: Coordinator.ApiAuth.caller_scope(caller),
+           source: "openai"
          }) do
       {:ok, record} -> {:ok, record}
       {:error, reason} -> {:error, {:submit, reason}}
