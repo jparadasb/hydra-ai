@@ -400,6 +400,57 @@ defmodule Coordinator.ApiRouterTest do
     assert chunk["object"] == "chat.completion.chunk"
   end
 
+  test "stream:true reports a worker error as a content delta and finish_reason error" do
+    # Once the SSE headers are flushed there is no HTTP status left to say "this failed", so a
+    # failure after that point has to be delivered *inside* the stream. A client that only reads
+    # `conn.status` would call this a success, which is why the shape is asserted here rather
+    # than left to the reader of `stream_error/5`.
+    nonce = "apistreamerr-#{System.unique_integer([:positive])}"
+
+    task =
+      Task.async(fn ->
+        post("/v1/chat/completions", %{
+          "messages" => [%{"role" => "user", "content" => nonce}],
+          "model" => "llama3",
+          "stream" => true,
+          "timeout_ms" => 5000
+        })
+      end)
+
+    job_id = wait_for(fn -> find_job_id(nonce) end)
+
+    Phoenix.PubSub.broadcast(Coordinator.PubSub, Coordinator.Jobs.result_topic(job_id), {
+      :job_result,
+      %{"job_id" => job_id, "status" => "error", "reason" => "provider_error: upstream exploded"}
+    })
+
+    conn = Task.await(task, 6000)
+
+    # The status was already sent as 200 when the stream opened; the error rides the body.
+    assert conn.status == 200
+
+    body = conn.resp_body
+    assert body =~ "worker error: provider_error: upstream exploded"
+    assert body =~ ~s("finish_reason":"error")
+    assert body =~ "data: [DONE]"
+
+    frames =
+      body
+      |> String.split("\n\n", trim: true)
+      |> Enum.reject(&(&1 == "data: [DONE]"))
+      |> Enum.reject(&String.starts_with?(&1, ":"))
+      |> Enum.map(fn "data: " <> json -> Jason.decode!(json) end)
+
+    assert Enum.any?(frames, fn f ->
+             content = get_in(f, ["choices", Access.at(0), "delta", "content"])
+             is_binary(content) and content =~ "upstream exploded"
+           end)
+
+    assert Enum.any?(frames, fn f ->
+             get_in(f, ["choices", Access.at(0), "finish_reason"]) == "error"
+           end)
+  end
+
   test "stream:true emits SSE heartbeats while a slow job runs, then the result" do
     # Beats Cloudflare's ~100s idle 524: bytes keep flowing while the worker is busy. Use a tiny
     # heartbeat interval so a short test delay produces pings.

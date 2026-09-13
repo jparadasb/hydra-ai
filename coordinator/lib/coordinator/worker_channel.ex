@@ -186,6 +186,19 @@ defmodule Coordinator.WorkerChannel do
     {:reply, :ok, assign(socket, :worker, worker)}
   end
 
+  # A worker newer than this coordinator may send an event this node has never heard of. Without
+  # this clause that raises `FunctionClauseError`, which kills the channel and drops every job
+  # the worker is running — a rollout hazard rather than a protocol one, since the fleet updates
+  # independently of the coordinator. Refuse the message, keep the connection.
+  def handle_in(event, _payload, socket) do
+    Logger.debug("unknown worker event",
+      event: event,
+      worker_id: socket.assigns[:worker_id]
+    )
+
+    {:reply, {:error, %{reason: "unknown_event"}}, socket}
+  end
+
   defp now_ms, do: System.monotonic_time(:millisecond)
 
   @impl true

@@ -35,6 +35,22 @@ defmodule Coordinator.WorkerChannelTest do
     }
   end
 
+  test "an event this coordinator does not know is refused without killing the channel" do
+    # The fleet updates independently of the coordinator, so a worker can be newer than the node
+    # it connects to. Before there was a catch-all clause this raised FunctionClauseError, which
+    # took the channel down and dropped every job that worker was running.
+    {:ok, _reply, socket} = join_worker("w-unknown", registration("w-unknown"))
+    wait_present("w-unknown")
+
+    ref = push(socket, "job_progress", %{"job_id" => "job-x", "output_tokens" => 12})
+    assert_reply(ref, :error, %{reason: "unknown_event"})
+
+    # Still alive, and still serving the events it does know.
+    assert Process.alive?(socket.channel_pid)
+    ref = push(socket, "signals", %{"available" => false})
+    assert_reply(ref, :ok)
+  end
+
   test "latency is measured from lease to result, not taken from the worker" do
     {:ok, _reply, socket} = join_worker("w-latency", registration("w-latency"))
     wait_present("w-latency")
