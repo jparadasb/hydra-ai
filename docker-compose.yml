@@ -7,6 +7,14 @@
 # Cloudflare Zero Trust dashboard; in that dashboard route your hostname to the service
 # http://coordinator:4000. No inbound ports need to be opened on the host.
 
+# Log rotation, applied to every service. The json-file driver keeps everything forever by
+# default, so a long-running stack fills the disk with logs of its own health checks.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -22,6 +30,51 @@ services:
       timeout: 5s
       retries: 10
     restart: unless-stopped
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1.0"
+
+  # Nightly `pg_dump`, kept for two weeks. `docker compose down -v` was unrecoverable data
+  # loss and nothing in the repo said otherwise. Restore is in docs/runbook.md — a backup
+  # whose restore has never been run is a guess, not a backup.
+  pg-backup:
+    image: postgres:16-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+    volumes:
+      - ./backups:/backups
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "pg-backup: nightly dumps to /backups, keeping $${BACKUP_RETENTION_DAYS} days"
+        while true; do
+          stamp=$$(date -u +%Y%m%dT%H%M%SZ)
+          out="/backups/hydra-$${stamp}.sql.gz"
+          # Write to a .part file and rename, so a dump interrupted mid-write is never
+          # mistaken for a complete one.
+          if pg_dump -h postgres -U hydra -d hydra | gzip > "$${out}.part"; then
+            mv "$${out}.part" "$${out}"
+            echo "pg-backup: wrote $${out}"
+          else
+            echo "pg-backup: dump FAILED at $${stamp}" >&2
+            rm -f "$${out}.part"
+          fi
+          find /backups -name 'hydra-*.sql.gz' -mtime "+$${BACKUP_RETENTION_DAYS}" -delete
+          sleep 86400
+        done
+    restart: unless-stopped
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          memory: 256m
 
   coordinator:
     build:
@@ -50,6 +103,18 @@ services:
       HYDRA_ADMIN_GITHUB_USERS: ${HYDRA_ADMIN_GITHUB_USERS:-}
       # Set "false" to open /admin without login (do NOT on a public tunnel).
       HYDRA_ADMIN_AUTH: ${HYDRA_ADMIN_AUTH:-}
+      # Public hostname behind the tunnel. This also constrains LiveView origin checking; left
+      # unset it stays at the `config.exs` default of "localhost", which is why the /admin
+      # LiveView fails through the tunnel.
+      PHX_HOST: ${PHX_HOST:-}
+      DATABASE_SSL: ${DATABASE_SSL:-false}
+      # Front-door ceilings (Coordinator.RateLimiter). 0 disables either.
+      HYDRA_RATE_LIMIT_PER_MINUTE: ${HYDRA_RATE_LIMIT_PER_MINUTE:-}
+      HYDRA_MAX_CONCURRENT_PER_KEY: ${HYDRA_MAX_CONCURRENT_PER_KEY:-}
+      HYDRA_MAX_BODY_BYTES: ${HYDRA_MAX_BODY_BYTES:-}
+      # Prompt/completion retention (Coordinator.JobRetention).
+      HYDRA_JOB_REDACT_AFTER_HOURS: ${HYDRA_JOB_REDACT_AFTER_HOURS:-}
+      HYDRA_JOB_RETENTION_DAYS: ${HYDRA_JOB_RETENTION_DAYS:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -59,15 +124,38 @@ services:
     ports:
       - "127.0.0.1:4000:4000"
     restart: unless-stopped
+    logging: *logging
+    # Compose kept a wedged coordinator marked "running" because nothing polled the endpoint
+    # that already existed.
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:4000/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: "2.0"
 
   cloudflared:
-    image: cloudflare/cloudflared:latest
+    # Pinned: `latest` means the tunnel can change under the deployment without anyone
+    # choosing to upgrade it.
+    image: cloudflare/cloudflared:2025.8.1
     command: tunnel --no-autoupdate run
     environment:
       TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN in .env}
     depends_on:
-      - coordinator
+      coordinator:
+        condition: service_healthy
     restart: unless-stopped
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.5"
 
 volumes:
   pgdata:
