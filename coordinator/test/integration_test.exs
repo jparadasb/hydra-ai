@@ -223,6 +223,36 @@ defmodule Coordinator.IntegrationTest do
     assert result["output"]["content"] =~ MockProvider.reply()
   end
 
+  test "a running job reports its progress to the coordinator, and it survives the job" do
+    # The headline of issue #85: an agent that submitted this job and walked away has to be able
+    # to come back and learn what it is doing. That means the counts are on the row, not just on
+    # the wire — so this asserts the persisted record, not only the broadcast.
+    {:ok, record} = chat_job(%{"stream" => true})
+
+    Phoenix.PubSub.subscribe(Coordinator.PubSub, Jobs.progress_topic(record.id))
+    Phoenix.PubSub.subscribe(Coordinator.PubSub, Jobs.result_topic(record.id))
+
+    assert :ok = drain_lease(record.id)
+
+    assert_receive {:job_progress, progress}, 30_000
+    assert progress["job_id"] == record.id
+    # A real lease generation, which is what lets the coordinator refuse a superseded one.
+    assert is_binary(progress["lease_id"])
+
+    assert_receive {:job_result, _result}, 30_000
+
+    stored = Jobs.get(record.id)
+    assert stored.status == "done"
+    # Written while the job ran, by the worker, and still here after it finished.
+    assert %DateTime{} = stored.last_progress_at
+    assert %DateTime{} = stored.leased_at
+    assert is_integer(stored.progress_seq)
+
+    view = Jobs.progress_view(stored)
+    assert view.worker_id != nil
+    assert view.state == "completed"
+  end
+
   # Run the queued lease job for `job_id`. Oban is in manual testing mode, so nothing drains
   # the queue on its own.
   defp drain_lease(job_id, tries \\ 50)

@@ -129,6 +129,39 @@ defmodule Coordinator.WorkerSession do
 
   def handle_chunk(_), do: {:error, :invalid_chunk}
 
+  @doc """
+  Handle one progress report from a running job.
+
+  Redacted rather than verified, for the same reason usage and chunks are: a hard reject would
+  strand the caller's view of a job that is otherwise running fine, and the fields here are
+  counts and identifiers rather than anything a prompt flows into.
+
+  Persisted — unlike `handle_chunk/1` — because the point of it is to survive the caller going
+  away and the coordinator restarting. Broadcast as well, so a long-poll waiting on the job
+  wakes up rather than sitting until its next timeout.
+  """
+  def handle_progress(%{"job_id" => job_id} = payload) when is_binary(job_id) do
+    {clean, _redactions} = SecretGuard.redact(payload)
+
+    case Jobs.record_progress(job_id, clean) do
+      :ok ->
+        Phoenix.PubSub.broadcast(
+          Coordinator.PubSub,
+          Jobs.progress_topic(job_id),
+          {:job_progress, clean}
+        )
+
+        {:ok, clean}
+
+      {:error, reason} ->
+        # Not worth a log line each: a re-leased job's old generation can emit a burst of these
+        # before its task is aborted.
+        {:error, reason}
+    end
+  end
+
+  def handle_progress(_), do: {:error, :invalid_progress}
+
   # Record the result against the durable job, if it is one we are tracking.
   defp persist_result(%{"job_id" => job_id} = result) when is_binary(job_id) do
     Jobs.complete(job_id, result)

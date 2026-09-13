@@ -166,6 +166,14 @@ defmodule Coordinator.WorkerChannel do
     {:noreply, socket}
   end
 
+  # Progress reports. No reply, for the same reason `result_chunk` gets none: an ack per frame
+  # doubles the message rate to confirm something the next frame already implies. Unlike a
+  # chunk, this one is persisted — it is what a disconnected caller comes back to read.
+  def handle_in("job_progress", payload, socket) do
+    WorkerSession.handle_progress(payload)
+    {:noreply, socket}
+  end
+
   def handle_in("result", payload, socket) do
     case WorkerSession.handle_result(payload) do
       {:ok, _clean} ->

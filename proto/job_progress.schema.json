@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hydra-ai/proto/job_progress.schema.json",
+  "title": "JobProgress",
+  "description": "Worker -> coordinator. Where a running job has got to, reported while it runs. Throttled and best-effort: a dropped frame costs visibility, never correctness, and the final job_result.schema.json remains the authoritative account of what the job produced.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["job_id", "lease_id", "seq"],
+  "properties": {
+    "job_id": { "type": "string", "minLength": 1 },
+    "lease_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Required, unlike job_result_chunk: a job re-leased after a failed attempt has a live generation elsewhere, and a superseded generation's progress must not overwrite it."
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic per (job_id, lease_id), starting at 0. A frame older than the one already recorded is a replay or a reorder and is dropped."
+    },
+    "phase": {
+      "enum": ["loading_model", "prefill", "generating", "finalizing"],
+      "description": "Coarse execution phase. Maps onto the coordinator's internal job state; MCP sees all of these as 'working'."
+    },
+    "input_tokens": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Omitted when the backend reported nothing, so 'not measured' stays distinguishable from 'measured zero'."
+    },
+    "output_tokens": { "type": "integer", "minimum": 0 },
+    "model": { "type": "string", "description": "The model the worker's gateway actually selected, which need not be the one requested." },
+    "provider": { "type": "string" }
+  }
+}

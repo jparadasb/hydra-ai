@@ -14,6 +14,7 @@ validates inbound payloads against them.
 | `lease_heartbeat.schema.json` | worker → coordinator | renew one active lease generation |
 | `job_result.schema.json`    | worker → coordinator | normalized result |
 | `job_result_chunk.schema.json` | worker → coordinator | streamed content fragment of a running job (best-effort; the final `job_result` stays authoritative) |
+| `job_progress.schema.json` | worker → coordinator | how far a running job has got: phase, token counts, actual model (throttled, best-effort) |
 
 ## Hard invariant
 

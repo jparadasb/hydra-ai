@@ -35,6 +35,33 @@ defmodule Coordinator.WorkerChannelTest do
     }
   end
 
+  test "a progress report is persisted against the job it belongs to" do
+    {:ok, _reply, socket} = join_worker("w-progress", registration("w-progress"))
+    wait_present("w-progress")
+
+    {:ok, job} =
+      Jobs.enqueue(%{capability: "chat", privacy: "public", payload: %{"messages" => []}})
+
+    {:ok, _leased} = Jobs.mark_leased(job, "w-progress", "lease-p1")
+
+    Phoenix.PubSub.subscribe(Coordinator.PubSub, Jobs.progress_topic(job.id))
+
+    push(socket, "job_progress", %{
+      "job_id" => job.id,
+      "lease_id" => "lease-p1",
+      "seq" => 0,
+      "phase" => "generating",
+      "output_tokens" => 21
+    })
+
+    # Unacknowledged by design, so wait on the effect rather than on a reply.
+    assert_receive {:job_progress, %{"output_tokens" => 21}}, 1000
+
+    record = Jobs.get(job.id)
+    assert record.output_tokens == 21
+    assert record.state == "generating"
+  end
+
   test "an event this coordinator does not know is refused without killing the channel" do
     # The fleet updates independently of the coordinator, so a worker can be newer than the node
     # it connects to. Before there was a catch-all clause this raised FunctionClauseError, which
@@ -42,7 +69,7 @@ defmodule Coordinator.WorkerChannelTest do
     {:ok, _reply, socket} = join_worker("w-unknown", registration("w-unknown"))
     wait_present("w-unknown")
 
-    ref = push(socket, "job_progress", %{"job_id" => "job-x", "output_tokens" => 12})
+    ref = push(socket, "telemetry_from_the_future", %{"anything" => true})
     assert_reply(ref, :error, %{reason: "unknown_event"})
 
     # Still alive, and still serving the events it does know.

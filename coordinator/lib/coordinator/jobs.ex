@@ -323,6 +323,124 @@ defmodule Coordinator.Jobs do
   defp merge_reclaim_result({:error, _} = error, _next), do: error
 
   @doc """
+  Record how far a running job has got.
+
+  One statement, and deliberately narrow. Three guards decide whether it writes at all:
+
+    * `status == "leased"` — a job that finished, was cancelled or was requeued is no longer
+      accepting progress;
+    * `lease_id` matches — a superseded generation must not overwrite the live one's counts;
+    * `seq` advances — a replayed or reordered frame is dropped rather than rewinding the count.
+
+  A frame that fails any of them affects zero rows and is silently ignored, which is what makes
+  the message safe to fire and forget from the worker.
+
+  **It does not touch `updated_at`.** `Coordinator.JobRetention` and `Coordinator.Stats` both
+  read that column as "when the job finished"; bumping it here would push a long job's redaction
+  window out for as long as it keeps talking, and skew the throughput chart. It does not renew
+  the lease either — `renew_lease/3` is the explicit heartbeat, and conflating the two would
+  make "the worker is alive" and "the worker is making progress" indistinguishable.
+  """
+  def record_progress(job_id, %{} = progress) when is_binary(job_id) do
+    lease_id = progress["lease_id"]
+    seq = progress["seq"]
+
+    if is_binary(lease_id) and is_integer(seq) and seq >= 0 do
+      now = now()
+
+      {count, _} =
+        from(j in JobRecord,
+          where:
+            j.id == ^job_id and j.status == "leased" and j.lease_id == ^lease_id and
+              (is_nil(j.progress_seq) or j.progress_seq < ^seq)
+        )
+        |> Repo.update_all(set: progress_set(progress, seq, now))
+
+      if count == 1, do: :ok, else: {:error, :stale_progress}
+    else
+      {:error, :invalid_progress}
+    end
+  end
+
+  # `started_at` is written on the first frame of a lease generation only. The `is_nil(seq)`
+  # guard in the query above makes that exactly once per generation without needing a COALESCE
+  # fragment that would have to be written twice for the two adapters.
+  defp progress_set(progress, seq, now) do
+    base = [progress_seq: seq, last_progress_at: now]
+
+    base = if seq == 0, do: Keyword.put(base, :started_at, now), else: base
+
+    base
+    |> put_state(progress["phase"])
+    |> put_present(:input_tokens, progress["input_tokens"])
+    |> put_present(:output_tokens, progress["output_tokens"])
+    |> put_present(:actual_model, progress["model"])
+    |> put_present(:provider, progress["provider"])
+  end
+
+  defp put_state(set, phase) when phase in ~w(loading_model prefill generating finalizing),
+    do: Keyword.put(set, :state, phase)
+
+  defp put_state(set, _), do: set
+
+  # A field the backend did not report must not overwrite one it reported earlier: absent means
+  # "no measurement", which is not the same as zero.
+  defp put_present(set, _key, nil), do: set
+  defp put_present(set, key, value), do: Keyword.put(set, key, value)
+
+  @doc """
+  What a caller polling this job should be told: timings and throughput, computed rather than
+  stored.
+
+  Tokens-per-second is derived here on purpose. Storing it would mean a column that goes stale
+  the moment the worker pauses, and it would break the standing rule that a worker may say what
+  it produced but not how fast it is — throughput is the coordinator's measurement.
+  """
+  def progress_view(%JobRecord{} = r) do
+    elapsed_ms = span_ms(r.started_at, r.last_progress_at || r.finished_at)
+
+    %{
+      state: r.state,
+      status: r.status,
+      worker_id: r.worker_id,
+      requested_model: r.payload["model"],
+      actual_model: r.actual_model,
+      provider: r.provider,
+      attempts: r.attempts,
+      failure_reason: r.failure_reason,
+      input_tokens: r.input_tokens,
+      output_tokens: r.output_tokens,
+      queue_seconds: seconds(span_ms(r.inserted_at, r.leased_at || r.finished_at)),
+      elapsed_seconds: seconds(elapsed_ms),
+      tokens_per_second: throughput(r.output_tokens, elapsed_ms),
+      last_progress_at: r.last_progress_at
+    }
+  end
+
+  def progress_view(nil), do: nil
+
+  defp span_ms(%DateTime{} = from, %DateTime{} = to),
+    do: max(DateTime.diff(to, from, :millisecond), 0)
+
+  defp span_ms(_, _), do: nil
+
+  defp seconds(nil), do: nil
+  defp seconds(ms), do: Float.round(ms / 1000, 1)
+
+  # Needs both a count and a span to mean anything. A job that has reported once has no span
+  # yet, and dividing by it would report an infinite rate on its first frame.
+  defp throughput(tokens, ms) when is_integer(tokens) and is_integer(ms) and ms > 0 do
+    Float.round(tokens * 1000 / ms, 2)
+  end
+
+  defp throughput(_, _), do: nil
+
+  @doc """
+  PubSub topic carrying one job's progress. Per-job, like results and chunks.
+  """
+  def progress_topic(job_id) when is_binary(job_id), do: "job_progress:" <> job_id
+
+  @doc """
   Record a worker's result. `ok` → done. Otherwise re-queue for another attempt until
   `@max_attempts`, then mark failed.
   """
