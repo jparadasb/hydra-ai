@@ -1,7 +1,12 @@
 /* Tailwind v4 entry for the landing page served by the coordinator.
    Build: npm run build:site  (-> coordinator/priv/site/tailwind.css, committed for the image). */
 
-@import "tailwindcss";
+/* `source(none)` disables Tailwind v4's automatic source detection, which walks up from this
+   file and scans the repository. That made the generated CSS depend on unrelated files — a
+   README edit changed the bytes — so the committed copy drifted for reasons nothing could
+   explain, and the CI staleness check fired on changes that had nothing to do with the page.
+   The one file that actually carries utility classes is listed explicitly below. */
+@import "tailwindcss" source(none);
 
 /* Scan the served HTML for utility classes (Plug.Static serves priv/site). */
 @source "../priv/site/index.html";

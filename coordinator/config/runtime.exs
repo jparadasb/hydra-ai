@@ -101,7 +101,7 @@ case System.get_env("HYDRA_ADMIN_GITHUB_USERS") do
 end
 
 # Public base URL of the coordinator, used to build the OAuth callback URL. Set this behind a
-# tunnel/proxy (e.g. https://hydrai.lambdatauri.dev) so the redirect_uri matches the GitHub app.
+# tunnel/proxy (e.g. https://coordinator.example.com) so the redirect_uri matches the GitHub app.
 case System.get_env("HYDRA_ADMIN_BASE_URL") do
   url when url in [nil, ""] -> :ok
   url -> config :coordinator, :admin_base_url, url

@@ -322,7 +322,7 @@ Over either ceiling the gateway answers `429` with a `retry-after` header; an ov
 
 1. Register a GitHub **OAuth app** with Authorization callback URL
    `<HYDRA_ADMIN_BASE_URL>/auth/github/callback` (e.g.
-   `https://hydrai.lambdatauri.dev/auth/github/callback`).
+   `https://coordinator.example.com/auth/github/callback`).
 2. Set `HYDRA_GITHUB_CLIENT_ID`, `HYDRA_GITHUB_CLIENT_SECRET`, `HYDRA_ADMIN_BASE_URL`, and
    `HYDRA_ADMIN_GITHUB_USERS` (comma-separated allowlist of GitHub logins). An empty allowlist
    admits nobody (fail closed).
