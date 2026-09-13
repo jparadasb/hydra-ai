@@ -224,8 +224,21 @@ pub async fn build_and_run(params: RunParams, status: Arc<RunStatus>) -> Result<
         let outcome = connect_and_run(client, Arc::clone(&gateway), Arc::clone(&status)).await;
         let uptime = started.elapsed();
 
-        if let Err(e) = outcome {
-            status.note_error(e.to_string());
+        match outcome {
+            // `note_error` puts it on the status struct the desktop UI reads. A headless
+            // worker has no UI, so without this a failing connect printed nothing at all: the
+            // process looked alive and idle while never reaching the coordinator.
+            Err(e) => {
+                tracing::warn!(
+                    error = %crate::vault::redact(&e.to_string()),
+                    "coordinator connection failed"
+                );
+                status.note_error(e.to_string());
+            }
+            Ok(()) => tracing::info!(
+                uptime_secs = uptime.as_secs(),
+                "coordinator connection closed"
+            ),
         }
 
         // Reset only after a connection that lasted. `Ok(())` also covers a socket that came

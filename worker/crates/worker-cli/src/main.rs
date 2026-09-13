@@ -481,3 +481,154 @@ async fn cmd_run() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::{CommandFactory, Parser};
+
+    // The CLI was 460 lines with no tests at all. Argument parsing is the part a user meets
+    // first and the part most likely to change silently under a clap upgrade.
+
+    #[test]
+    fn the_command_definition_is_internally_consistent() {
+        // Catches duplicate flags, bad value_parsers and conflicting short options — all of
+        // which are runtime panics on first use rather than compile errors.
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn provider_add_takes_a_name_and_an_optional_base_url() {
+        let cli = Cli::parse_from(["hydra-worker", "provider", "add", "openai"]);
+        let Command::Provider {
+            action: ProviderAction::Add { name, base_url },
+        } = cli.command
+        else {
+            panic!("expected provider add")
+        };
+        assert_eq!(name, "openai");
+        assert_eq!(base_url, None);
+
+        let cli = Cli::parse_from([
+            "hydra-worker",
+            "provider",
+            "add",
+            "custom",
+            "--base-url",
+            "https://example.test/v1",
+        ]);
+        let Command::Provider {
+            action: ProviderAction::Add { name, base_url },
+        } = cli.command
+        else {
+            panic!("expected provider add")
+        };
+        assert_eq!(name, "custom");
+        assert_eq!(base_url.as_deref(), Some("https://example.test/v1"));
+    }
+
+    #[test]
+    fn a_token_is_never_accepted_on_the_command_line() {
+        // Tokens come from a no-echo prompt or HYDRA_PROVIDER_TOKEN, never argv, where they
+        // would land in shell history and every process list on the machine.
+        let rendered = format!("{:?}", Cli::command());
+        assert!(!rendered.contains("--token"), "a --token flag exists");
+
+        assert!(Cli::try_parse_from([
+            "hydra-worker",
+            "provider",
+            "add",
+            "openai",
+            "--token",
+            "sk-x"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn provider_login_only_accepts_the_providers_that_support_it() {
+        for name in ["gemini", "google", "openai"] {
+            assert!(
+                Cli::try_parse_from(["hydra-worker", "provider", "login", name]).is_ok(),
+                "{name} should be accepted"
+            );
+        }
+
+        // Anthropic has no browser sign-in; accepting it here would fail later and more
+        // confusingly.
+        assert!(Cli::try_parse_from(["hydra-worker", "provider", "login", "anthropic"]).is_err());
+    }
+
+    #[test]
+    fn update_defaults_to_the_edge_channel_and_installs_unless_checking() {
+        let cli = Cli::parse_from(["hydra-worker", "update"]);
+        let Command::Update {
+            check,
+            channel,
+            url,
+            restart,
+        } = cli.command
+        else {
+            panic!("expected update")
+        };
+
+        assert_eq!(channel, "edge");
+        assert!(!check);
+        assert!(!restart);
+        assert_eq!(url, None);
+    }
+
+    #[test]
+    fn update_flags_parse() {
+        let cli = Cli::parse_from([
+            "hydra-worker",
+            "update",
+            "--check",
+            "--channel",
+            "v1.2.3",
+            "--restart",
+        ]);
+
+        let Command::Update {
+            check,
+            channel,
+            restart,
+            ..
+        } = cli.command
+        else {
+            panic!("expected update")
+        };
+
+        assert!(check);
+        assert!(restart);
+        assert_eq!(channel, "v1.2.3");
+    }
+
+    #[test]
+    fn init_rejects_a_mode_that_is_not_one_of_the_three() {
+        assert!(Cli::try_parse_from(["hydra-worker", "init", "--mode", "both"]).is_ok());
+        assert!(Cli::try_parse_from(["hydra-worker", "init", "--mode", "sideways"]).is_err());
+    }
+
+    #[test]
+    fn an_unknown_subcommand_is_refused_rather_than_ignored() {
+        assert!(Cli::try_parse_from(["hydra-worker", "summon"]).is_err());
+        // No subcommand at all is also an error: `hydra-worker` alone should print help.
+        assert!(Cli::try_parse_from(["hydra-worker"]).is_err());
+    }
+
+    #[test]
+    fn usage_takes_an_optional_period() {
+        let cli = Cli::parse_from(["hydra-worker", "usage", "--period", "2026-09"]);
+        let Command::Usage { period } = cli.command else {
+            panic!("expected usage")
+        };
+        assert_eq!(period.as_deref(), Some("2026-09"));
+
+        let cli = Cli::parse_from(["hydra-worker", "usage"]);
+        let Command::Usage { period } = cli.command else {
+            panic!("expected usage")
+        };
+        assert_eq!(period, None);
+    }
+}

@@ -9,15 +9,36 @@ config :coordinator, Coordinator.Endpoint,
 
 # Plain pool (not the SQL sandbox): channel/worker processes touch the repo cross-process,
 # so a shared connection is simpler. DB-touching tests run async: false and clean up.
-config :coordinator, Coordinator.Repo,
-  database:
-    System.get_env("COORDINATOR_TEST_DATABASE") || Path.expand("../coordinator_test.db", __DIR__),
-  pool_size: 1,
-  journal_mode: :wal,
-  busy_timeout: 5000
+#
+# The suite runs against whichever adapter the build was compiled for. It is SQLite by default
+# (no server needed) and Postgres in CI's `test-postgres` job — production runs Postgres, and
+# until that job existed the adapter serving users was compile-verified and nothing more.
+if System.get_env("DB_ADAPTER") in ["postgres", "postgresql"] do
+  config :coordinator, Coordinator.Repo,
+    url:
+      System.get_env("COORDINATOR_TEST_DATABASE_URL") ||
+        "ecto://postgres:postgres@localhost:5432/coordinator_test",
+    pool_size: 5
 
-# Oban runs inline-manually in tests; assert via Oban.Testing / perform_job.
-config :coordinator, Oban, testing: :manual
+  # Postgres has LISTEN/NOTIFY, so Oban uses its own notifier and the Basic engine here too —
+  # otherwise the test run would exercise a combination no deployment uses.
+  config :coordinator, Oban,
+    engine: Oban.Engines.Basic,
+    notifier: Oban.Notifiers.Postgres,
+    repo: Coordinator.Repo,
+    testing: :manual
+else
+  config :coordinator, Coordinator.Repo,
+    database:
+      System.get_env("COORDINATOR_TEST_DATABASE") ||
+        Path.expand("../coordinator_test.db", __DIR__),
+    pool_size: 1,
+    journal_mode: :wal,
+    busy_timeout: 5000
+
+  # Oban runs inline-manually in tests; assert via Oban.Testing / perform_job.
+  config :coordinator, Oban, testing: :manual
+end
 
 config :logger, level: :warning
 
