@@ -1,82 +1,80 @@
 # hydra-ai — build status
 
-Worker node execution modes (local model + user-provided API provider), per the addendum.
-Greenfield → first vertical slice, with the **provider-tokens-stay-on-the-worker** rule
-enforced and tested on both sides.
+**Snapshot: 2026-09-12.** A status file goes stale the moment it is written; this one had drifted
+two and a half months and claimed test counts that were off by half. Treat it as a map of what
+exists, not as an inventory — the README is the reference for how to use any of it, and
+`git log` is the authority on what changed.
 
-## Tests: 62 passing (36 Rust + 26 Elixir), incl. a live end-to-end
+## Tests
 
 ```sh
-cd worker && cargo test --workspace     # 36
-cd coordinator && mix test              # 26 (one drives the real worker binary over a socket)
+cd worker       && cargo test --workspace     # 126
+cd coordinator  && mix test                   # 205
 ```
 
 The Elixir suite starts a live endpoint and the actual `hydra-worker` binary, which connects
 over a WebSocket, registers, is leased a job, runs it through the gateway, and returns a
-secret-free result the coordinator observes (`test/integration_test.exs`).
+secret-free result the coordinator observes (`test/integration_test.exs`). That test needs
+`cargo` on `PATH`.
 
-## Done
+## Worker (Rust)
 
-**worker-core (Rust)**
-- Execution modes + routing policy + limits + privacy prefs (`config.rs`)
-- `ProviderAdapter` trait + `AdapterRegistry` (`adapter.rs`)
-- Adapters: OpenAI-compatible (OpenAI/OpenRouter/Groq/Mistral/Together/Fireworks/custom),
-  Anthropic, Gemini (external); Ollama + llama.cpp + vLLM + LM Studio (local, `uses_external=false`) —
-  request/response mapping tested via mock HTTP; OpenAI-compat HTTP path shared external/local
-- Token vault: `Secret` (non-`Serialize`, redacted Debug), encrypted-file store
-  (ChaCha20-Poly1305 + Argon2id, `0600`), OS-keychain backend behind `os-keychain` feature,
-  `fingerprint`/`redact` (`vault.rs`)
-- Privacy enforcement matrix (`privacy.rs`); usage tracking (`usage.rs`); spend/rate limit
-  guard (`limits.rs`); hardware detect + benchmark (`runtime.rs`)
-- **Gateway** (`gateway.rs`): job → privacy check → limit reserve → adapter → usage record →
-  result; secret-free result asserted in tests
-- Registration payload builder (`registration.rs`) — secret-free by construction + test
+**Adapters** — OpenAI-compatible (OpenAI / OpenRouter / Groq / Mistral / Together / Fireworks /
+custom), Anthropic, Gemini (API key and Google sign-in / Code Assist), ChatGPT backend
+(OAuth); Ollama, llama.cpp, vLLM, LM Studio locally. All six external paths stream. Every
+provider call retries 429/503 with bounded backoff honouring `Retry-After`.
 
-**worker-cli** — `init` / `provider add|test|rm|rotate` / `usage` / `run`. Verified live:
-vault file is `0600` and encrypted (token absent from disk, config, and registration).
+**Token vault** — `Secret` is non-`Serialize` with a redacted `Debug`; an encrypted file store
+(ChaCha20-Poly1305 + Argon2id, `0600`) on every platform. There is no keychain backend: one
+existed, was unreachable, and was removed.
 
-**worker-tauri** — UI command layer (`commands.rs`, `dto.rs`, `support.rs`); returns
-fingerprints only, tested that the raw token never crosses the boundary.
+**Gateway** — job → accepted-privacy-level check → backend selection → limit reserve → adapter
+→ usage record → result. Routing preference is a hard constraint, not an ordering. Usage that
+a provider did not report is absent rather than reported as zero.
 
-**Desktop app** — `worker/crates/worker-app` (Tauri 2, excluded from the workspace because it
-links system WebView libs) + `worker/ui/` frontend (4 screens: mode / providers / privacy /
-usage, with a vault-unlock gate). Thin `#[tauri::command]` shell over `worker-tauri`. Build
-with `cargo tauri dev` after the system deps in `worker/crates/worker-app/SETUP.md`.
+**Runtime** — bounded retry, bounded buffers, locks that survive a panic, a bounded outbound
+channel, and a reconnect backoff that resets only after a connection that stayed up.
+`tracing` with `HYDRA_LOG` / `HYDRA_LOG_FORMAT`.
 
-**Transport (worker ↔ coordinator)**
-- worker-core `coordinator_client`: Phoenix v2 wire framing (unit-tested) + networked client
-  (feature `transport`) that joins `worker:<id>`, sends registration, receives `"job"` leases,
-  runs `Gateway::execute`, replies with `"result"`, heartbeats
-- coordinator `Endpoint` + `WorkerSocket` + `WorkerChannel` (wraps `WorkerSession`; SecretGuard
-  on join + every inbound message); `lease/2` broadcasts a job to a worker topic
-- `hydra-worker run` wires config + vault → adapters → gateway → live connection
+**Interfaces** — `worker-cli` (`init`, `provider`, `usage`, `run`, `update`) and a Tauri
+desktop app (`worker-app`, excluded from the Cargo workspace because it links system WebView
+libraries; CI builds it separately).
 
-**coordinator (Elixir)**
-- `SecretGuard` (strips/rejects secret-shaped payloads), `Job`, `Worker`, `Router`
-  (privacy table + scheduling score), `WorkerRegistry` (GenServer + process monitoring),
-  `WorkerSession` (channel-boundary logic). All tested.
+## Coordinator (Elixir)
 
-**proto** — JSON schemas for registration / usage / job / job_result (no secret fields).
+**Front door** — OpenAI-compatible `/v1/chat/completions` (streaming SSE and blocking),
+Codex-compatible `/v1/responses`, `/v1/models`, `/health`, `/metrics`, and public
+`/openapi.json` + `/docs`. Callers present a gateway key; requests carry a privacy level
+(`x-hydra-privacy`) that travels with the job.
 
-**Durability (Elixir)**
-- `Coordinator.Repo` (Ecto + SQLite — no DB server needed), `jobs` table + migration
-- `Coordinator.Jobs` lifecycle: enqueue → lease → done | (re-queue ×5) → failed
-- `Coordinator.LeaseWorker` (Oban Lite engine): routes pending jobs via the Router, snoozes
-  until an eligible worker connects; worker results persist via `WorkerSession`
-- `Coordinator.submit_job/1` public entrypoint
+**Limits and identity** — every request is attributed to the key that made it; per-key request
+rate, in-flight concurrency, and request body size are all bounded.
 
-**Database backend (SQLite ↔ Postgres)**
-- `DB_ADAPTER` env selects the backend: unset/`sqlite3` (Lite engine, dev/test/single-node;
-  required explicitly in prod, and refused alongside clustering)
-  or `postgres` (Basic engine, Postgres LISTEN/NOTIFY, production/multi-node)
-- Repo adapter is compile-time (`Coordinator.Repo`); connection + Oban engine/notifier set at
-  runtime (`config/runtime.exs`). Migration + Oban tables are adapter-agnostic
-- `Coordinator.Release.migrate/0` for release deploys. Verified both adapters compile + select
-  correctly; SQLite path runs the full test suite
+**Durability** — `jobs` lifecycle (enqueue → lease → done | requeue ×5 → failed) on Ecto +
+Oban, with generation-tagged leases, transactional enqueue, and exponential retry backoff.
+Prompts and completions are redacted after a window and the rows deleted after a longer one.
 
-## Remaining
+**Routing** — privacy table plus a scheduling score over channel-measured latency, in-flight
+count, a decaying failure score, and an admin-granted trust level. Nothing a worker says about
+itself feeds the score.
 
-1. **Desktop app**: build/verify on a machine with the WebView system deps (this dev box
-   lacks webkit2gtk); generate bundle icons. Code + frontend are complete and wired.
-2. **Postgres live run**: exercise against a real Postgres server (none on this dev box). The
-   adapter selection, runtime config, and migrations are in place and compile-verified.
+**Admin** — `/admin` (GitHub OAuth): issue and revoke gateway keys, grant each worker its
+privacy levels and trust, revoke device keys, dashboards.
+
+**Storage** — SQLite (single node) or Postgres (required for more than one replica).
+`DB_ADAPTER` is compile-time for the adapter and must be set explicitly in production.
+
+**proto** — JSON schemas for registration / usage / job / job_result. No secret fields, and
+the worker refuses a job carrying a field it does not know.
+
+## Known gaps
+
+Tracked as issues rather than listed here, so they cannot go stale:
+
+- **Postgres has never been exercised against a real server.** The adapter, runtime config and
+  migrations are in place and the SQLite path runs the whole suite; the Postgres path is
+  compile-verified only. See #29.
+- **No OS code signing** for the desktop app — Gatekeeper and SmartScreen warn on first run.
+  Needs an Apple developer account and a Windows certificate. See `docs/updater-key-rotation.md`.
+- **The updater signing key has no second key and no rotation performed** — the procedure is
+  written down, but it has not been exercised.

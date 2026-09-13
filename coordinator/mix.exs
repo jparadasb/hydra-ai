@@ -6,6 +6,13 @@ defmodule Coordinator.MixProject do
       app: :coordinator,
       version: "0.1.0",
       elixir: "~> 1.19",
+      # Declared so the licence is discoverable from the package metadata, not only from the
+      # LICENSE file at the repo root.
+      description: "hydra-ai coordinator: leases jobs to worker nodes and routes them.",
+      package: [
+        licenses: ["Apache-2.0"],
+        links: %{"GitHub" => "https://github.com/jparadasb/hydra-ai"}
+      ],
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       deps: deps()
