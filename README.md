@@ -57,13 +57,19 @@ proto/         shared wire schemas (no secret fields; serde + Ecto validate agai
 
 | privacy     | eligible workers |
 |-------------|------------------|
-| public      | local-model and external-provider workers |
-| private     | external only if the job permits it; otherwise local / org / internal |
-| sensitive   | not external-provider by default (must have a local model) |
-| local_only  | must not use an external provider |
+| public      | local-model workers, and external-provider workers whose operator opted in |
+| private     | external only if the job permits it and the worker's policy allows it |
+| sensitive   | external only if the job permits it *and* the operator explicitly opted in |
+| local_only  | never an external provider; not configurable |
 
-Enforced on the coordinator (`Coordinator.Router`) **and** re-checked on the worker
-(`worker-core::privacy`) — defense in depth.
+"Eligible" is the coordinator's half. The worker then re-checks both axes before dispatching:
+whether it accepts jobs at that level at all (`accepted_job_levels`, admin-granted) and whether
+this backend may serve them (`worker-core::privacy`). Defense in depth means the coordinator's
+routing decision is not the last word — an operator's own machine enforces their policy.
+
+Note the first row: a worker's **default** policy allows an external provider for `private`
+jobs only, so a `public` job does not reach a paid key unless its operator added `public` to
+`external_provider_allowed_privacy_levels`. That is what makes the compliance claim above true.
 
 **Which levels a worker may accept is set by the admin, not the worker.** Every worker starts
 public-only; an admin raises it per worker in `/admin/workers`. Whatever a worker declares for
@@ -356,7 +362,8 @@ Restoring a backup, rolling back, rotating secrets, draining a worker and the re
 The coordinator image (`coordinator/Dockerfile`) builds an Elixir release compiled against
 **Postgres** (`DB_ADAPTER=postgres`), runs migrations on start (`Coordinator.Release.migrate/0`),
 then serves the worker WebSocket on `:4000`. See `coordinator/README.md` for the
-SQLite ↔ Postgres backend switch and `STATUS.md` for the overall build state.
+SQLite ↔ Postgres backend switch, `STATUS.md` for a snapshot of what exists, and
+[`docs/runbook.md`](docs/runbook.md) for what to do when it breaks.
 
 ```
 docker compose logs -f coordinator     # watch migrations + boot
@@ -380,3 +387,13 @@ refuses to start with a cluster topology configured on SQLite.
 compiled into the release (`Coordinator.Repo` picks its Ecto adapter at build time), so the
 value at boot must match the value the image was built with; a mismatch is a named startup
 error rather than a downstream failure. Postgres also needs `DATABASE_URL`.
+
+## Project
+
+| | |
+|---|---|
+| Contributing | [CONTRIBUTING.md](CONTRIBUTING.md) — how to run what CI runs |
+| Vulnerabilities | [SECURITY.md](SECURITY.md) — report privately, not as an issue |
+| Operations | [docs/runbook.md](docs/runbook.md), [deploy/README.md](deploy/README.md) |
+| Releases | [CHANGELOG.md](CHANGELOG.md) |
+| Licence | Apache-2.0 ([LICENSE](LICENSE)) |
