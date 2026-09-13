@@ -50,6 +50,14 @@ case Integer.parse(System.get_env("HYDRA_MAX_BODY_BYTES") || "") do
   _ -> :ok
 end
 
+# Ceiling on one worker result. A result is persisted verbatim and copied to every subscriber,
+# and results may carry artifacts, so this is the other half of HYDRA_MAX_BODY_BYTES: that one
+# bounds what a caller can send in, this one bounds what a worker can send back.
+case Integer.parse(System.get_env("HYDRA_MAX_RESULT_BYTES") || "") do
+  {n, _} when n > 0 -> config :coordinator, :max_result_bytes, n
+  _ -> :ok
+end
+
 # Enforce a gateway key even when no env master (HYDRA_API_TOKEN) is set — so admin-issued keys
 # from the /admin console alone can gate the front-door. Recommended on a public tunnel.
 config :coordinator, :require_api_token, System.get_env("HYDRA_REQUIRE_API_TOKEN") == "true"

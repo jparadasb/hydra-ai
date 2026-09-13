@@ -38,6 +38,46 @@ defmodule Coordinator.WorkerSessionTest do
   end
 
   describe "admin-controlled trust" do
+    test "an oversized result is refused rather than persisted, and the job still gets an outcome" do
+      # A result is stored verbatim in `jobs.result` and copied to every PubSub subscriber, so an
+      # unbounded one is the coordinator spending memory a worker chose. Dropping it silently
+      # would be worse than refusing it: the caller would wait out the full deadline for a job
+      # that had already finished.
+      prev = Application.get_env(:coordinator, :max_result_bytes)
+      Application.put_env(:coordinator, :max_result_bytes, 500)
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:coordinator, :max_result_bytes)
+          value -> Application.put_env(:coordinator, :max_result_bytes, value)
+        end
+      end)
+
+      {:ok, job} =
+        Coordinator.Jobs.enqueue(%{
+          capability: "chat",
+          privacy: "public",
+          payload: %{"messages" => []}
+        })
+
+      {:ok, leased} = Coordinator.Jobs.mark_leased(job, "w-big", "lease-big")
+
+      Phoenix.PubSub.subscribe(Coordinator.PubSub, Coordinator.Jobs.result_topic(job.id))
+
+      assert {:error, :result_too_large} =
+               Coordinator.WorkerSession.handle_result(%{
+                 "job_id" => leased.id,
+                 "lease_id" => "lease-big",
+                 "status" => "ok",
+                 "output" => %{"content" => String.duplicate("x", 2_000)}
+               })
+
+      assert_receive {:job_result, %{"reason" => "result_too_large"}}, 1000
+
+      stored = Coordinator.Jobs.get(job.id)
+      refute Jason.encode!(stored.result) =~ "xxxx"
+    end
+
     test "a worker that registers as trusted is stored untrusted unless an admin granted it" do
       # `trusted` is worth a -20 routing bonus, so a worker that could name its own trust
       # level won essentially every routing decision against honest workers.

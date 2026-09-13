@@ -22,6 +22,8 @@ defmodule Coordinator.WorkerSession do
   diagnose.
   """
 
+  require Logger
+
   alias Coordinator.{Jobs, SecretGuard, Usage, Worker}
 
   @doc """
@@ -86,6 +88,47 @@ defmodule Coordinator.WorkerSession do
   and the result come back), not here — so there is no reservation to release.
   """
   def handle_result(payload) do
+    case oversize(payload) do
+      {:error, bytes} ->
+        # Refused rather than stored. The result is persisted verbatim and copied to every
+        # subscriber, so an unbounded one is the coordinator spending memory a worker chose.
+        # The job still gets an outcome — silently dropping it would strand the caller.
+        Logger.warning("worker result refused: too large",
+          job_id: payload["job_id"],
+          bytes: bytes
+        )
+
+        refusal =
+          payload
+          |> Map.take(["job_id", "lease_id"])
+          |> Map.merge(%{"status" => "error", "reason" => "result_too_large"})
+
+        persist_result(refusal)
+
+        Phoenix.PubSub.broadcast(
+          Coordinator.PubSub,
+          Jobs.result_topic(refusal["job_id"]),
+          {:job_result, refusal}
+        )
+
+        {:error, :result_too_large}
+
+      :ok ->
+        do_handle_result(payload)
+    end
+  end
+
+  # Measured on the encoded payload, which is what actually costs memory downstream.
+  defp oversize(payload) do
+    limit = Application.get_env(:coordinator, :max_result_bytes, 1_000_000)
+
+    case Jason.encode(payload) do
+      {:ok, encoded} when byte_size(encoded) > limit -> {:error, byte_size(encoded)}
+      _ -> :ok
+    end
+  end
+
+  defp do_handle_result(payload) do
     {clean, _redactions} = SecretGuard.redact(payload)
 
     case persist_result(clean) do

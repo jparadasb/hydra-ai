@@ -10,8 +10,16 @@ defmodule Coordinator.Endpoint do
   # `connect_info: [:peer_data, :x_headers]` is what makes a worker's peer IP available to
   # `Coordinator.WorkerSocket` — without it the connection is anonymous and abuse from a
   # specific host cannot be investigated after the fact.
+  # `max_frame_size` bounds what a worker can push in one message. `HYDRA_MAX_BODY_BYTES` caps
+  # the inbound HTTP body and therefore a job's payload, but nothing capped the other direction —
+  # a result rides straight into `jobs.result` and is copied to every PubSub subscriber, and
+  # results are about to be allowed to carry artifacts. Generous enough for a long completion,
+  # finite enough that one worker cannot decide how much memory the coordinator spends.
   socket("/worker", Coordinator.WorkerSocket,
-    websocket: [connect_info: [:peer_data, :x_headers]],
+    websocket: [
+      connect_info: [:peer_data, :x_headers],
+      max_frame_size: 8_000_000
+    ],
     longpoll: false
   )
 
