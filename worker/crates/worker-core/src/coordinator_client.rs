@@ -289,11 +289,11 @@ mod networked {
 
         // Without an explicit config, tungstenite allows a 64 MiB message. A leased job is
         // messages, not media; cap what the coordinator can make this process buffer.
-        let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
-            max_message_size: Some(MAX_WS_MESSAGE_BYTES),
-            max_frame_size: Some(MAX_WS_MESSAGE_BYTES),
-            ..Default::default()
-        };
+        // `WebSocketConfig` is `#[non_exhaustive]`, so it is built through its setters rather
+        // than a struct literal.
+        let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(Some(MAX_WS_MESSAGE_BYTES))
+            .max_frame_size(Some(MAX_WS_MESSAGE_BYTES));
 
         let (ws, _resp) = tokio::time::timeout(
             crate::http::CONNECT_TIMEOUT,
@@ -325,7 +325,9 @@ mod networked {
         // Writer task.
         let writer = tokio::spawn(async move {
             while let Some(text) = rx.recv().await {
-                if sink.send(Message::Text(text)).await.is_err() {
+                // `Message::Text` carries `Utf8Bytes` now; converting from `String` reuses
+                // the allocation rather than copying.
+                if sink.send(Message::Text(text.into())).await.is_err() {
                     break;
                 }
             }
