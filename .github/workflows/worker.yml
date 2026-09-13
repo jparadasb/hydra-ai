@@ -41,6 +41,13 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+      # Coverage, with a floor. The number matters less than the direction: a floor stops
+      # coverage being quietly traded away. Measured at 67.7% lines when this was added; the
+      # floor sits a few points under so it fails on a real regression rather than on noise.
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Coverage
+        run: cargo llvm-cov --workspace --fail-under-lines 64 --summary-only
+
   # ---- version agreement --------------------------------------------------------------------
   # The desktop crate is excluded from the workspace, so it cannot inherit
   # `[workspace.package] version`, and Tauri reads its own JSON. Nothing compared the three and

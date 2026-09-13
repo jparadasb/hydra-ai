@@ -9,6 +9,7 @@ defmodule Coordinator.MixProject do
       # `test/support` holds test-only modules (the mock provider the e2e points a real worker
       # at). Compiled in :test only so nothing ships in a release.
       elixirc_paths: elixirc_paths(Mix.env()),
+      test_coverage: [tool: ExCoveralls],
       # Declared so the licence is discoverable from the package metadata, not only from the
       # LICENSE file at the repo root.
       description: "hydra-ai coordinator: leases jobs to worker nodes and routes them.",
@@ -20,6 +21,12 @@ defmodule Coordinator.MixProject do
       aliases: aliases(),
       deps: deps()
     ]
+  end
+
+  # `preferred_envs` here rather than `:preferred_cli_env` in project/0, which Mix 1.19
+  # deprecates.
+  def cli do
+    [preferred_envs: [coveralls: :test, "coveralls.html": :test, "coveralls.json": :test]]
   end
 
   defp elixirc_paths(:test), do: ["lib", "test/support"]
@@ -62,7 +69,9 @@ defmodule Coordinator.MixProject do
       # endpoint without pulling in a second HTTP server.
       {:telemetry_metrics, "~> 1.0"},
       {:telemetry_metrics_prometheus_core, "~> 1.1"},
-      {:telemetry_poller, "~> 1.0"}
+      {:telemetry_poller, "~> 1.0"},
+      # Coverage, with a floor (see `test.coverage` in project/0). Test-only.
+      {:excoveralls, "~> 0.18", only: :test}
     ]
   end
 end

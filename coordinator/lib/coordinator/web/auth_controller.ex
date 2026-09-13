@@ -67,6 +67,11 @@ defmodule Coordinator.Web.AuthController do
   def configured?, do: client_id() != nil and client_secret() != nil
 
   @doc "Is this GitHub login on the admin allowlist? Empty allowlist => nobody (fail closed)."
+  # Anything that is not a login string is not on the allowlist. Without this clause a
+  # surprising shape from GitHub raised `FunctionClauseError` inside the callback — a crash
+  # where the whole point of the function is to answer "no".
+  def allowed?(login) when not is_binary(login), do: false
+
   def allowed?(login) when is_binary(login) do
     login = String.downcase(login)
     login in Enum.map(admin_users(), &String.downcase/1)

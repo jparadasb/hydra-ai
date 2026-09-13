@@ -40,6 +40,63 @@ jobs:
           restore-keys: ${{ runner.os }}-mix-
       - run: mix deps.get
       - run: mix format --check-formatted
+
+      # `mix coveralls` runs the suite and enforces the floor in `coveralls.json`, so this
+      # replaces `mix test` rather than running alongside it.
+      - run: mix coveralls
+
+  # ---- the suite against Postgres -------------------------------------------------------------
+  # Production runs Postgres and the suite only ever ran against SQLite, so the adapter that
+  # actually serves users was compile-verified and nothing more. Same tests, real server.
+  #
+  # `DB_ADAPTER` is compile-time for the repo adapter, so it must be set for every step here —
+  # including `mix test`, which compiles.
+  test-postgres:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: coordinator
+    env:
+      DB_ADAPTER: postgres
+      COORDINATOR_TEST_DATABASE_URL: ecto://postgres:postgres@localhost:5432/coordinator_test
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: coordinator_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '28'
+          elixir-version: '1.19'
+      - uses: actions/cache@v4
+        with:
+          path: |
+            coordinator/deps
+            coordinator/_build
+          key: ${{ runner.os }}-mix-pg-${{ hashFiles('coordinator/mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-pg-
+      - run: mix deps.get
+
+      # The e2e drives the real worker binary, so it needs one.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: worker
+      - name: Build the worker binary
+        working-directory: worker
+        run: cargo build --locked -p worker-cli
+
       - run: mix test
 
   # ---- landing page CSS ---------------------------------------------------------------------

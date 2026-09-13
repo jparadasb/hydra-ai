@@ -1,0 +1,10 @@
+{
+  "_comment": "Coverage floor for the coordinator. Measured at 79.7% when added; the minimum sits a few points under so it fails on a real regression rather than on noise. `test/support` is excluded: it is the mock provider the e2e drives, not shipped code.",
+  "coverage_options": {
+    "minimum_coverage": 75,
+    "treat_no_relevant_lines_as_covered": true
+  },
+  "skip_files": [
+    "test/support/"
+  ]
+}
