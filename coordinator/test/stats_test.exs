@@ -101,15 +101,33 @@ defmodule Coordinator.StatsTest do
     assert List.last(Stats.throughput(6))["done"] >= 25
   end
 
-  test "the throughput aggregate uses the (status, updated_at) index" do
+  test "the throughput aggregate can be served by the (status, updated_at) index" do
     # The regression this guards: with only `index(:jobs, [:status])` the dashboard's poll
     # scanned in proportion to total job count rather than to recent activity.
     since = DateTime.add(DateTime.utc_now(), -6 * 3600, :second)
+    query = Stats.throughput_query(since)
 
-    plan = Ecto.Adapters.SQL.explain(Repo, :all, Stats.throughput_query(since))
+    case Repo.__adapter__() do
+      Ecto.Adapters.SQLite3 ->
+        plan = Ecto.Adapters.SQL.explain(Repo, :all, query)
+        assert plan =~ "jobs_status_updated_at_index"
+        refute plan =~ "SCAN jobs"
 
-    assert plan =~ "jobs_status_updated_at_index"
-    refute plan =~ "SCAN jobs"
+      _postgres ->
+        # Postgres costs the plan against live statistics, and on a table this small a
+        # sequential scan genuinely is cheaper — asserting otherwise would be asserting that
+        # the planner is wrong. What matters is that an index-based plan *exists* for this
+        # predicate, so ask for one by taking the cheap alternative away.
+        plan =
+          Repo.transaction(fn ->
+            Repo.query!("SET LOCAL enable_seqscan = off")
+            Ecto.Adapters.SQL.explain(Repo, :all, query)
+          end)
+          |> elem(1)
+
+        assert plan =~ "jobs_status_updated_at_index",
+               "no index-based plan available for the throughput query:\n#{plan}"
+    end
   end
 
   test "snapshot bundles all sections" do
