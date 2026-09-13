@@ -6,13 +6,22 @@ defmodule Coordinator.Jobs do
 
   States: `pending` → `leased` → `done` | `failed` | `cancelled`. A non-OK result re-queues the job (up to
   `@max_attempts`) so it can be retried on another worker.
+
+  Every row carries a second, finer `state` (see `Coordinator.Jobs.State`) describing where
+  inside its `status` the job actually is — what a delegating agent polls for. `status` stays
+  the five-value column that every compare-and-swap here guards on, because widening it would
+  turn each of those guards into an N-value list that has to stay in sync.
+
+  The discipline that keeps the pair honest: **every `set:` that writes `status` writes `state`
+  in the same list.** `update_all` bypasses changesets by design, so nothing validates it at
+  write time; `jobs_state_test.exs` walks every write path in this module and asserts the pair.
   """
 
   import Ecto.Query, warn: false
   require Logger
 
   alias Coordinator.{Job, Repo}
-  alias Coordinator.Jobs.JobRecord
+  alias Coordinator.Jobs.{JobRecord, State}
 
   @max_attempts 5
   @retry_backoff_base_seconds 2
@@ -97,6 +106,15 @@ defmodule Coordinator.Jobs do
       |> Repo.update_all(
         set: [
           status: "leased",
+          state: "leased",
+          # When the job actually went out. `updated_at` cannot answer this: `renew_lease/3`
+          # rewrites it every 20s, so the turnaround it used to measure was really "time since
+          # the last heartbeat".
+          leased_at: now(),
+          # A previous attempt's progress describes a generation that no longer owns this job.
+          progress_seq: nil,
+          started_at: nil,
+          last_progress_at: nil,
           worker_id: worker_id,
           lease_id: lease_id,
           lease_expires_at: lease_deadline(r, renewable?),
@@ -115,6 +133,24 @@ defmodule Coordinator.Jobs do
     end
   end
 
+  @doc """
+  Note that this job is being routed right now.
+
+  Observational only — it does not change `status`, so nothing about leasing depends on it. The
+  guard matters for a different reason: `Coordinator.LeaseWorker` snoozes every five seconds for
+  up to twenty attempts while no worker is eligible, so an unguarded write here would be its own
+  slow write storm. Conditioning on `state == "queued"` makes it one UPDATE per job.
+  """
+  def mark_routing(%JobRecord{} = record) do
+    {count, _} =
+      from(j in JobRecord,
+        where: j.id == ^record.id and j.status == "pending" and j.state == "queued"
+      )
+      |> Repo.update_all(set: [state: "routing"])
+
+    if count == 1, do: :ok, else: :noop
+  end
+
   def expired?(%JobRecord{} = record) do
     case Map.get(record, :expires_at) do
       nil -> false
@@ -129,7 +165,10 @@ defmodule Coordinator.Jobs do
       |> Repo.update_all(
         set: [
           status: "failed",
+          state: "expired",
           result: %{"status" => "error", "reason" => "deadline_expired"},
+          failure_reason: "deadline_expired",
+          finished_at: now(),
           updated_at: now()
         ]
       )
@@ -193,10 +232,13 @@ defmodule Coordinator.Jobs do
       |> Repo.update_all(
         set: [
           status: "failed",
+          state: "failed",
           worker_id: nil,
           lease_id: nil,
           lease_expires_at: nil,
           result: %{"status" => "error", "reason" => "lease_expired"},
+          failure_reason: "lease_expired",
+          finished_at: now(),
           updated_at: now()
         ]
       )
@@ -331,19 +373,31 @@ defmodule Coordinator.Jobs do
         {:error, :unknown_job}
 
       %{status: status} = record when status in ["pending", "leased"] ->
-        update_status(record, "cancelled", %{"status" => "cancelled"})
+        update_status(record, "cancelled", %{"status" => "cancelled"}, "cancelled")
 
       record ->
         {:ok, record}
     end
   end
 
-  defp update_status(record, status, result) do
+  defp update_status(record, status, result, state \\ nil) do
+    state = state || List.first(State.states_for(status))
+    finished = now()
+
     {count, _} =
       from(j in JobRecord,
         where: j.id == ^record.id and j.status in ["pending", "leased"]
       )
-      |> Repo.update_all(set: [status: status, result: result, updated_at: now()])
+      |> Repo.update_all(
+        set: [
+          status: status,
+          state: state,
+          result: result,
+          finished_at: finished,
+          failure_reason: failure_reason(status, result),
+          updated_at: finished
+        ]
+      )
 
     if count == 1 do
       Coordinator.Telemetry.emit([:hydra, :job, :completed], %{count: 1}, %{status: status})
@@ -355,18 +409,30 @@ defmodule Coordinator.Jobs do
         reason: result["reason"]
       )
 
-      # Lease to terminal result. `updated_at` was last written when the job was leased, so
-      # this is the worker's turnaround rather than the caller's total wait.
-      if record.status == "leased" and match?(%DateTime{}, record.updated_at) do
+      # Lease to terminal result — the worker's turnaround, not the caller's total wait. This
+      # used to measure from `updated_at`, which `renew_lease/3` rewrites every 20s, so on any
+      # job that outlived one heartbeat it was really reporting "time since the last heartbeat".
+      # `leased_at` is written once, when the job actually goes out.
+      if record.status == "leased" and match?(%DateTime{}, record.leased_at) do
         Coordinator.Telemetry.emit(
           [:hydra, :job, :duration],
-          %{millisecond: DateTime.diff(now(), record.updated_at, :millisecond)}
+          %{millisecond: DateTime.diff(finished, record.leased_at, :millisecond)}
         )
       end
     end
 
     {:ok, get(record.id)}
   end
+
+  # A short code for the row, so "why did this fail" is answerable without parsing the result
+  # map — and so it survives redaction, which drops everything caller-shaped.
+  defp failure_reason("done", _result), do: nil
+
+  defp failure_reason(_status, %{"reason" => reason}) when is_binary(reason) do
+    String.slice(reason, 0, 255)
+  end
+
+  defp failure_reason(_status, _result), do: nil
 
   @doc """
   Reset a job to pending and re-enqueue its lease assignment after a failed attempt.
@@ -382,9 +448,18 @@ defmodule Coordinator.Jobs do
       |> Repo.update_all(
         set: [
           status: "pending",
+          state: State.initial(),
           worker_id: nil,
           lease_id: nil,
           lease_expires_at: nil,
+          leased_at: nil,
+          # Per-attempt measurements describe the attempt that just failed, not the job. The
+          # prompt is the exception: it does not change between attempts, so `input_tokens`
+          # stays. `attempts` already records that an attempt happened.
+          progress_seq: nil,
+          started_at: nil,
+          last_progress_at: nil,
+          output_tokens: nil,
           updated_at: now()
         ],
         inc: [attempts: 1]

@@ -50,13 +50,48 @@ defmodule Coordinator.JobRetentionTest do
       from(j in JobRecord, where: j.id == ^record.id),
       set: [
         status: status,
+        # `update_all` bypasses the changeset, so the pair has to be set by hand here exactly
+        # as every write path in `Coordinator.Jobs` does — otherwise the fixture is a row that
+        # could not occur in production.
+        state: hd(Coordinator.Jobs.State.states_for(status)),
         result: %{"status" => "ok", "output" => %{"content" => @completion}},
+        finished_at: at,
         updated_at: at,
         inserted_at: at
       ]
     )
 
     Repo.get(JobRecord, record.id)
+  end
+
+  test "caller-supplied metadata is redacted with the prompt, not kept beside it" do
+    # Delegated jobs carry a correlation blob the caller chose the contents of, so it is
+    # caller content and expires on the same schedule as the prompt. Everything else added for
+    # those jobs — states, timestamps, token counts, short failure codes — is ours and stays.
+    Application.put_env(:coordinator, :job_redact_after_hours, 1)
+
+    job = aged_job("done", 3, %{metadata: %{"trace_id" => "abc", "note" => @prompt}})
+    assert job.metadata["note"] == @prompt
+
+    assert 1 = JobRetention.redact_expired()
+
+    redacted = Repo.get(JobRecord, job.id)
+    assert redacted.metadata["redacted"] == true
+    refute Jason.encode!(redacted.metadata) =~ @prompt
+    assert %DateTime{} = redacted.redacted_at
+
+    # Operational columns survive: this is what makes a redacted job still answerable.
+    assert redacted.status == "done"
+    assert redacted.state == "completed"
+  end
+
+  test "a job that carried no metadata is distinguishable from one whose metadata was dropped" do
+    Application.put_env(:coordinator, :job_redact_after_hours, 1)
+
+    job = aged_job("done", 3)
+    assert 1 = JobRetention.redact_expired()
+
+    assert is_nil(Repo.get(JobRecord, job.id).metadata)
   end
 
   test "a terminal job past the redaction window loses its prompt and completion" do

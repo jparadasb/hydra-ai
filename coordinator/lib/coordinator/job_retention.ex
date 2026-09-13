@@ -89,9 +89,12 @@ defmodule Coordinator.JobRetention do
         # Read the rows to summarize them, then write the summary back. One row at a time is
         # the honest cost of not keeping the text: each summary depends on that row's content.
         count =
-          from(j in JobRecord, where: j.id in ^ids, select: {j.id, j.payload, j.result})
+          from(j in JobRecord,
+            where: j.id in ^ids,
+            select: {j.id, j.payload, j.result, j.metadata}
+          )
           |> Repo.all()
-          |> Enum.reduce(0, fn {id, payload, result}, acc ->
+          |> Enum.reduce(0, fn {id, payload, result, metadata}, acc ->
             {n, _} =
               from(j in JobRecord, where: j.id == ^id and is_nil(j.redacted_at))
               # `updated_at` is deliberately left alone: it is when the job *finished*, which
@@ -101,6 +104,11 @@ defmodule Coordinator.JobRetention do
                 set: [
                   payload: summarize(payload),
                   result: summarize_result(result),
+                  # Caller-supplied correlation data. It is the only column outside the payload
+                  # and result that can carry caller content, so it is redacted with them —
+                  # everything else added for delegated jobs is states, timestamps, counts and
+                  # short codes.
+                  metadata: summarize_metadata(metadata),
                   redacted_at: now
                 ]
               )
@@ -142,6 +150,11 @@ defmodule Coordinator.JobRetention do
   end
 
   defp summarize(_), do: %{"redacted" => true}
+
+  # Nil stays nil: a job that carried no metadata is different from one whose metadata was
+  # dropped, and the difference is visible to anyone reading the row afterwards.
+  defp summarize_metadata(nil), do: nil
+  defp summarize_metadata(map), do: summarize(map)
 
   # The result's `status` and `reason` are operational metadata, not caller content, and the
   # dashboard reads them — keep those, drop the completion text.
