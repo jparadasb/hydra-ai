@@ -79,7 +79,7 @@ jobs:
         with:
           otp-version: '28'
           elixir-version: '1.19'
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             coordinator/deps
