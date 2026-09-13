@@ -332,14 +332,26 @@ Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-net
 exposes it publicly with **no inbound ports opened on the host**.
 
 ```sh
-cp .env.example .env        # set POSTGRES_PASSWORD, SECRET_KEY_BASE, TUNNEL_TOKEN
+cp .env.example .env        # set POSTGRES_PASSWORD, SECRET_KEY_BASE, TUNNEL_TOKEN, PHX_HOST
 docker compose up -d --build
 ```
 
+`.env.example` ships with worker device auth and the gateway-key requirement **on**. Following
+this quickstart used to produce a coordinator reachable through the public tunnel with neither
+— turn them off deliberately if you have a reason, rather than by default.
+
 - `SECRET_KEY_BASE`: `openssl rand -base64 48` (or `mix phx.gen.secret`).
+- `PHX_HOST`: the public hostname. It also constrains LiveView origin checking; unset, it stays
+  at `localhost` and the `/admin` LiveView fails through the tunnel.
 - `TUNNEL_TOKEN`: create a tunnel in the Cloudflare **Zero Trust → Networks → Tunnels**
   dashboard, copy its token, and route your public hostname to the service
   `http://coordinator:4000`.
+
+The stack also runs a nightly `pg_dump` sidecar into `./backups` (kept 14 days), health-checks
+the coordinator on `/health`, caps each service's memory and CPU, and rotates container logs.
+Restoring a backup, rolling back, rotating secrets, draining a worker and the rest are in
+**[`docs/runbook.md`](docs/runbook.md)**; the Kubernetes deployment is
+[`deploy/README.md`](deploy/README.md).
 
 The coordinator image (`coordinator/Dockerfile`) builds an Elixir release compiled against
 **Postgres** (`DB_ADAPTER=postgres`), runs migrations on start (`Coordinator.Release.migrate/0`),

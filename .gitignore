@@ -29,3 +29,6 @@ erl_crash.dump
 .hydra-usage.json
 /worker/hydra-worker-new
 /worker/hydra-worker-*
+
+# Nightly pg_dump output from the compose stack's pg-backup service. Real data — never commit.
+/backups/

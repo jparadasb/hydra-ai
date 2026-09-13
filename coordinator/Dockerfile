@@ -39,7 +39,7 @@ ENV LANG=C.UTF-8 \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       libstdc++6 openssl libncurses6 ca-certificates \
+       libstdc++6 openssl libncurses6 ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -51,4 +51,11 @@ RUN chmod +x /usr/local/bin/entrypoint.sh \
 USER hydra
 
 EXPOSE 4000
+
+# `GET /health` existed and nothing polled it, so an orchestrator kept a wedged coordinator
+# marked healthy. curl is added for this: the runtime image has no shell HTTP client, and a
+# healthcheck that cannot run is the same as none.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl --fail --silent --show-error http://127.0.0.1:${PORT:-4000}/health || exit 1
+
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
