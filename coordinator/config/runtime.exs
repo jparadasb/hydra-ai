@@ -58,6 +58,39 @@ case Integer.parse(System.get_env("HYDRA_MAX_RESULT_BYTES") || "") do
   _ -> :ok
 end
 
+# --- MCP endpoint -----------------------------------------------------------------------------
+
+# The agent-facing door. On by default: it is behind the same gateway key as /v1, and a
+# coordinator with no MCP clients simply never receives a request on it.
+config :coordinator,
+       :mcp_enabled,
+       System.get_env("HYDRA_MCP_ENABLED", "true") != "false"
+
+# Browser origins permitted to reach /mcp. Empty by default, which refuses every request that
+# carries an Origin at all — an agent client sends none, so this only matters if you deliberately
+# want a web page to drive the coordinator. Without it, DNS rebinding lets any page a user visits
+# talk to their local coordinator.
+case System.get_env("HYDRA_MCP_ALLOWED_ORIGINS") do
+  nil ->
+    :ok
+
+  "" ->
+    :ok
+
+  value ->
+    config :coordinator,
+           :mcp_allowed_origins,
+           value |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
+end
+
+# How many jobs one gateway key may have queued or running at once. A blocking HTTP request was
+# its own backpressure; asynchronous submission removes it, so without a ceiling one agent in a
+# retry loop fills the queue for everyone else.
+case Integer.parse(System.get_env("HYDRA_MCP_MAX_OPEN_JOBS_PER_KEY") || "") do
+  {n, _} when n > 0 -> config :coordinator, :mcp_max_open_jobs_per_key, n
+  _ -> :ok
+end
+
 # Enforce a gateway key even when no env master (HYDRA_API_TOKEN) is set — so admin-issued keys
 # from the /admin console alone can gate the front-door. Recommended on a public tunnel.
 config :coordinator, :require_api_token, System.get_env("HYDRA_REQUIRE_API_TOKEN") == "true"

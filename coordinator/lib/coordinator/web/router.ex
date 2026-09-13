@@ -80,6 +80,14 @@ defmodule Coordinator.Web.Router do
     oban_dashboard("/oban")
   end
 
+  # The MCP endpoint. No `pipe_through`: the :browser pipeline's CSRF protection would reject
+  # every POST, and an MCP client is not a browser — it authenticates with a gateway key, which
+  # `Coordinator.Mcp.Transport` checks itself via `Coordinator.ApiAuth`. Declared before the
+  # catch-all forward, which would otherwise swallow it into the OpenAI router's 404.
+  scope "/" do
+    forward("/mcp", Coordinator.Mcp.Transport)
+  end
+
   # Fallback: the public OpenAI-compatible API. Declared last so /admin and /auth win first.
   forward("/", Coordinator.ApiRouter)
 end

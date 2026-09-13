@@ -260,6 +260,73 @@ collection; set the bearer token and go. Authenticate with a gateway key (below)
 provider secret. An upstream provider error (e.g. a rate limit) is passed through with its real
 status (`429`, …), not masked as a generic `502`.
 
+## MCP: delegating work asynchronously
+
+The OpenAI API holds one HTTP request open for a job's whole life. On local hardware that runs
+for minutes, which is a poor fit for an agent: the connection is a liability, and the agent
+cannot do anything else while it waits.
+
+`POST /mcp` is the other shape. An agent submits a job, gets an id back immediately, goes away,
+and comes back for the answer. The job is durable — it survives the client disconnecting, the
+coordinator restarting, and a worker dropping mid-run — and it goes through exactly the same
+privacy routing, worker policy and retry machinery as everything else.
+
+```jsonc
+// hydra_submit_job returns without waiting
+{ "job_id": "job-Ux9...", "status": "working", "created": true, "poll_after_ms": 2000 }
+
+// hydra_get_job, later, from anywhere
+{
+  "status": "working",
+  "state": "generating",
+  "hydra": {
+    "worker": "m40-01",
+    "model": "qwen3-coder-30b",
+    "tokens": { "input": 8421, "generated": 3172 },
+    "performance": { "tokens_per_second": 7.8, "elapsed_seconds": 406 }
+  }
+}
+```
+
+Four tools: `hydra_submit_job`, `hydra_get_job`, `hydra_cancel_job`, `hydra_get_result`.
+
+**Connecting.** The endpoint speaks Streamable HTTP and authenticates with the same gateway key
+as `/v1` — no separate credential.
+
+```sh
+claude mcp add --transport http hydra https://hydra.example.com/mcp \
+  --header "Authorization: Bearer $HYDRA_API_TOKEN"
+```
+
+```toml
+# ~/.codex/config.toml
+[mcp_servers.hydra]
+url = "https://hydra.example.com/mcp"
+http_headers = { Authorization = "Bearer ${HYDRA_API_TOKEN}" }
+```
+
+**Things worth knowing before you point an agent at it:**
+
+- **Privacy defaults to `local_only` here**, unlike `/v1`, which defaults to `public`. Delegated
+  work tends to be repository content, and the agent sending it did not necessarily think about
+  where it would run. Widen it per job when you mean to.
+- **A model name is a hard constraint.** An unavailable model is refused rather than
+  substituted, and the error lists what is actually connected.
+- **Jobs are owned.** A job is visible only to the key that submitted it, and one belonging to
+  someone else reads exactly like one that never existed.
+- **`idempotency_key` makes a retry free.** A repeat returns the first job whatever state it is
+  in, so an agent reconnecting after a dropped request cannot accidentally buy a second run.
+- **There is a ceiling** on how many jobs one key may have open at once
+  (`HYDRA_MCP_MAX_OPEN_JOBS_PER_KEY`, default 32). A blocking request was its own backpressure;
+  this replaces it.
+- **There is no percent-complete**, because generation has no known endpoint. A rising
+  generated-token count is the signal that a job is working.
+
+Protocol revisions `2026-07-28` (current) and `2025-11-25` and earlier are both served, since
+clients are split across the revision that removed the `initialize` handshake.
+
+`/v1/chat/completions` is unaffected and stays supported.
+
 ## Observability
 
 | Surface | Where |

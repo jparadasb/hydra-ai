@@ -597,6 +597,10 @@ defmodule Coordinator.Jobs do
 
     cond do
       status == "ok" ->
+        # The worker's own counts are the authoritative ones — progress reports were a live
+        # approximation, and a job that never streamed has none at all. Fold them onto the row
+        # before it goes terminal, so a caller reading the finished job sees real usage.
+        {:ok, record} = record_final_usage(record, result)
         update_status(record, "done", result)
 
       record.attempts >= @max_attempts ->
