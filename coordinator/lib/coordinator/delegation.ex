@@ -38,6 +38,7 @@ defmodule Coordinator.Delegation do
     end)
 
     with :ok <- check_model(request),
+         :ok <- check_privacy_routable(request),
          :ok <- check_quota(caller),
          :ok <- check_open_jobs(caller) do
       Jobs.submit(%{
@@ -146,6 +147,41 @@ defmodule Coordinator.Delegation do
   end
 
   defp check_model(_), do: :ok
+
+  # A privacy level no connected worker is *permitted* to take is not a queueing problem, and
+  # letting it queue is how a caller ends up polling a job that was never going to be leased.
+  # `LeaseWorker` snoozes when routing finds nothing, so such a job sits in `routing` reporting
+  # "choosing a worker" until its deadline — technically true, and useless.
+  #
+  # Accepted levels are admin-granted and default to public-only, so this is the first thing a
+  # new deployment hits when an agent submits at this door's `local_only` default. Same class of
+  # problem as an unavailable model, so it gets the same treatment: refused at submission, with
+  # the levels that would work.
+  #
+  # An empty registry is permissive, for the same reason `Coordinator.Models.available?/1` is:
+  # a job submitted before its worker connects should wait, not fail.
+  defp check_privacy_routable(request) do
+    level = String.to_existing_atom(request.privacy.level)
+
+    case Coordinator.WorkerRegistry.list() do
+      [] ->
+        :ok
+
+      workers ->
+        if Enum.any?(workers, &(level in &1.accepted_job_levels)) do
+          :ok
+        else
+          accepted =
+            workers
+            |> Enum.flat_map(& &1.accepted_job_levels)
+            |> Enum.uniq()
+            |> Enum.map(&to_string/1)
+            |> Enum.sort()
+
+          {:error, {:privacy_unroutable, request.privacy.level, accepted}}
+        end
+    end
+  end
 
   # Refusing before the job queues is the only point at which refusing costs nothing. An agent
   # looping overnight will not notice a slow response, but it will notice being told to stop.

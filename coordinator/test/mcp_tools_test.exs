@@ -114,6 +114,50 @@ defmodule Coordinator.McpToolsTest do
       refute second["structuredContent"]["created"]
     end
 
+    test "a level no connected worker may take is refused instead of queueing forever" do
+      # Found against the live deployment: accepted levels are admin-granted and default to
+      # public-only, so this door's local_only default produced a job that sat in `routing`
+      # reporting "choosing a worker" until its deadline. Technically true, and useless — the
+      # agent has no way to learn it will never be leased.
+      pid =
+        Coordinator.WorkerTestHelper.track(%Coordinator.Worker{
+          worker_id: "w-public-only",
+          available: true,
+          execution_mode: :local_model,
+          accepted_job_levels: [:public],
+          models: [
+            %{
+              name: "m",
+              capabilities: ["chat"],
+              context_length: nil,
+              modalities: [],
+              uses_external_provider: false
+            }
+          ]
+        })
+
+      on_exit(fn -> Coordinator.WorkerTestHelper.stop(pid) end)
+
+      refused = submit(%{"privacy" => "local_only"})
+
+      assert refused["isError"]
+      text = hd(refused["content"])["text"]
+      # Says what is wrong, what would work, and where to change it.
+      assert text =~ "local_only"
+      assert text =~ "public"
+      assert text =~ "/admin"
+
+      # A level they do accept still goes through.
+      refute submit(%{"privacy" => "public"})["isError"]
+    end
+
+    test "a job submitted before any worker connects still queues" do
+      # The registry is empty here. Refusing would break the ordinary case of starting a job
+      # before its worker is up, which is why this check is permissive when nothing is connected.
+      assert [] = Coordinator.WorkerRegistry.list()
+      refute submit(%{"privacy" => "local_only"})["isError"]
+    end
+
     test "a caller cannot queue unbounded work" do
       Application.put_env(:coordinator, :mcp_max_open_jobs_per_key, 2)
 
