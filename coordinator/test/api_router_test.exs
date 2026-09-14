@@ -462,6 +462,40 @@ defmodule Coordinator.ApiRouterTest do
     end
   end
 
+  test "both streaming endpoints tell proxies not to buffer" do
+    # Without these an edge proxy may accumulate events and deliver them in one lump, which
+    # looks to the caller like a stream that hangs and then bursts. /v1/responses set only the
+    # content type, so Codex streaming was exposed to exactly that behind a proxy.
+    for {path, body} <- [
+          {"/v1/chat/completions",
+           %{
+             "model" => "llama3",
+             "messages" => [
+               %{"role" => "user", "content" => "hdr-#{System.unique_integer([:positive])}"}
+             ],
+             "stream" => true,
+             "timeout_ms" => 200
+           }},
+          {"/v1/responses",
+           %{
+             "model" => "llama3",
+             "input" => "hdr-#{System.unique_integer([:positive])}",
+             "stream" => true,
+             "timeout_ms" => 200
+           }}
+        ] do
+      conn = post(path, body)
+
+      assert get_resp_header(conn, "content-type") |> hd() =~ "text/event-stream",
+             "#{path} did not stream"
+
+      assert get_resp_header(conn, "cache-control") == ["no-cache"], "#{path} allowed caching"
+
+      assert get_resp_header(conn, "x-accel-buffering") == ["no"],
+             "#{path} did not disable proxy buffering"
+    end
+  end
+
   test "stream:true reports a worker error as a content delta and finish_reason error" do
     # Once the SSE headers are flushed there is no HTTP status left to say "this failed", so a
     # failure after that point has to be delivered *inside* the stream. A client that only reads
