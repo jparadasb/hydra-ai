@@ -10,6 +10,45 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## 1.3.1 — 2026-09-14
+
+Three fixes, all found by running 1.3.0 against real workers and a real model rather than by a
+test. Nothing about the interface changed.
+
+### Fixed
+
+- **A running job now reports the model producing it.** The progress frame had `model` and
+  `provider` fields and the worker filled neither — they were hardcoded empty — so a job
+  reported no model until it finished. Which model actually runs is the gateway's decision, not
+  the caller's: a job may name none, or name one this worker serves under a different backend.
+  So "what is producing this job" was unanswerable for exactly the long-running jobs where it
+  matters. The gateway now reports its choice the moment the backend is settled.
+
+- **Throughput is measured over the generating window, not the whole run.** It came from the
+  first progress frame, and the first frame is `loading_model`. Loading a 35B model on demand
+  takes most of a minute, so a job generating at 20 tok/s reported 0.06 tok/s on its first frame
+  and climbed for the rest of its life without ever reaching the truth. Not cosmetic: an agent
+  watching a healthy job appear to produce a token every sixteen seconds has every reason to
+  cancel it. `elapsed_seconds` still counts from the start, because "how long has this been
+  running" should include the load.
+
+- **`SecretGuard` no longer destroys the ids that route an answer to its question.** A model's
+  tool-call id is exactly what the opaque-secret heuristic is built to catch — long, dense,
+  base64url-ish, whitespace-free — so a context request came back keyed `[REDACTED]`. The cycle
+  appeared to work only because both sides of the conversation were redacted to the same literal
+  and still matched each other; with two concurrent requests both ids collapse and the answers
+  become unroutable. Correlation-identifier keys now skip the heuristic. Only the heuristic:
+  every explicit credential pattern still applies, and a key that is secret-shaped by name is
+  still refused whatever its value looks like.
+
+### Upgrade notes
+
+- The throughput and `SecretGuard` fixes are coordinator-side and ship with it. The model-in-
+  progress fix is worker-side and needs the workers on 1.3.1 — an older worker simply keeps
+  reporting no model mid-flight, as in 1.3.0.
+- The same ordering as 1.3.0 applies: coordinator before workers.
+- Adds one column (`jobs.first_token_at`) by migration; no manual step.
+
 ## 1.3.0 — 2026-09-14
 
 Hydra gains an agent-facing door. Until now it was an OpenAI-compatible gateway that held one
