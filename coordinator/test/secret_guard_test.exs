@@ -282,4 +282,53 @@ defmodule Coordinator.SecretGuardTest do
       assert clean["worker_id"] == "w1"
     end
   end
+
+  describe "correlation identifiers" do
+    test "a tool-call id survives redaction, because it is how an answer finds its question" do
+      # Found against a real model: a tool-call id is exactly what the opaque-secret heuristic
+      # is built to catch — long, dense, base64url-ish, whitespace-free. Redacting it left the
+      # job unable to match a tool response to the call it answers.
+      id = "chatcmplzB8kQ2vTn4XsW9pLdR7yFgHjK3mNbVcZaQwErTyUiOp"
+      assert SecretGuard.opaque_secret?(id), "this id should trip the heuristic"
+
+      {clean, count} =
+        SecretGuard.redact(%{
+          "tool_call_id" => id,
+          "requests" => [%{"tool_call_id" => id, "arguments" => %{"path" => "lib/a.ex"}}]
+        })
+
+      assert clean["tool_call_id"] == id
+      assert hd(clean["requests"])["tool_call_id"] == id
+      assert count == 0
+    end
+
+    test "two different calls stay distinguishable" do
+      # The damage is not that an id is unreadable; it is that every id becomes the *same*
+      # literal, so answers cannot be routed back to the right question.
+      a = "chatcmplzB8kQ2vTn4XsW9pLdR7yFgHjK3mNbVcZaQwErTyUiOp"
+      b = "chatcmplQw3rTy6UiOp0AsDfGhJkL2ZxCvBnM4qWeRtYuIoPa"
+
+      {clean, _} = SecretGuard.redact(%{"calls" => [%{"id" => a}, %{"id" => b}]})
+
+      [first, second] = clean["calls"]
+      refute first["id"] == second["id"]
+    end
+
+    test "an identifier that really does hold a credential is still redacted" do
+      # Only the entropy heuristic is skipped for these keys. An explicit credential pattern
+      # still applies, so the exemption cannot be used to smuggle one through.
+      {clean, count} = SecretGuard.redact(%{"id" => "sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFF"})
+
+      refute clean["id"] =~ "sk-ant"
+      # Counted more than once because the value matches both the `sk-ant-` and `sk-` patterns;
+      # what matters here is that the exemption did not let it through.
+      assert count >= 1
+    end
+
+    test "a genuinely secret-shaped key is still refused whatever it is called" do
+      {clean, count} = SecretGuard.redact(%{"api_key" => "anything at all"})
+      refute clean["api_key"] == "anything at all"
+      assert count == 1
+    end
+  end
 end
