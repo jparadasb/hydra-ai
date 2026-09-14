@@ -10,6 +10,100 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## 1.3.0 — 2026-09-14
+
+Hydra gains an agent-facing door. Until now it was an OpenAI-compatible gateway that held one
+HTTP request open for a job's entire life — fine for a chat client, a poor fit for an agent
+delegating work that runs for minutes on local hardware. `POST /mcp` inverts that: submit, get
+an id, disconnect, come back for the answer.
+
+The durable engine underneath is the one that was already there. Jobs were always persisted,
+scheduled through Oban, routed on privacy and admin-granted trust, and retried with backoff.
+What was missing was the door, and the observability that makes a long job legible while it is
+still running.
+
+### Added
+
+- **MCP endpoint** (`POST /mcp`), Streamable HTTP, serving protocol revisions `2026-07-28` and
+  `2025-11-25`-and-earlier — clients are split across the revision that removed the `initialize`
+  handshake. Authenticated with the same gateway key as `/v1`.
+- **Five tools**: `hydra_submit_job`, `hydra_get_job`, `hydra_cancel_job`, `hydra_get_result`,
+  `hydra_provide_input`.
+- **Native MCP tasks** (`io.modelcontextprotocol/tasks`) for clients that declare it — the same
+  job behind a different envelope, never a second implementation.
+- **Live progress**: workers report phase, token counts and the model actually in use while a
+  job runs, throttled to every 64 tokens or 2s. Persisted, so a caller that disconnected can
+  come back and read it. Throughput is computed coordinator-side; a worker still may not say how
+  fast it is.
+- **`input_required`**: a delegated model can pause, ask its caller for a file or a definition it
+  was not given, and resume under the same job id rather than guessing or being handed a whole
+  repository up front.
+- **Job retrieval over HTTP**: `GET /v1/jobs/:id` and `/v1/jobs/:id/result`, so a client whose
+  stream dropped can collect its own work. The response id was already `chatcmpl-<job_id>`, so
+  no new correlation is needed.
+- **`x-hydra-on-disconnect: detach`** leaves a job running when a streaming client hangs up
+  instead of cancelling it. Default stays `cancel`.
+- **Ceilings**: per-key monthly token quota, per-job `max_total_tokens`, per-key open-job limit,
+  and a result size cap on the worker link (nothing bounded a result before).
+- **`model_policy`**: `prefer` orders the choice and `require_local` filters it, for a delegating
+  agent that wants "whatever can do this locally" rather than a model name it cannot verify is
+  connected.
+- **Structured results**: `output.artifacts`, so a job can return a patch and a note alongside
+  its answer.
+- **Idempotency**: an optional key scoped to the submitting caller. A retried submission returns
+  the first job rather than buying a second expensive run.
+
+### Fixed
+
+Five latent bugs, none of which had tests:
+
+- A worker's result for an **already-cancelled job** was persisted and broadcast, because
+  `complete/2` returned early before the stale-lease check. Invisible over HTTP — the caller had
+  already given up — but `hydra_get_result` would have served it.
+- **`hydra.job.duration` measured from `updated_at`**, which the lease heartbeat rewrites every
+  20s, so on any job outliving one heartbeat it reported time since the last heartbeat rather
+  than the job's duration.
+- A **completed job never recorded the worker's authoritative token counts** on its row.
+- **`/v1/responses` streamed without `cache-control: no-cache` or `x-accel-buffering: no`**,
+  which `/v1/chat/completions` has always sent — so a reverse proxy could accumulate Codex's
+  events and deliver them in one lump.
+- A job whose **privacy level no connected worker is permitted to take** sat in `routing`
+  reporting "choosing a worker" until its deadline, instead of being refused at submission.
+
+### Changed
+
+- Jobs carry a second, finer `state` (`queued` → `routing` → `leased` → `generating` → …)
+  alongside `status`. `status` keeps its five values because every compare-and-swap in the job
+  lifecycle guards on it.
+- Every job now carries an owner. A job is visible only to the key that submitted it, and one
+  belonging to another key reads exactly like one that does not exist.
+- `Coordinator.Jobs.cancel/1` returns `{:ok, :cancelled | :already_terminal, record}` so a
+  caller can tell whether it stopped anything. Internal API; the crates are unpublished.
+- Front-door auth, SSE framing and model listing moved out of `api_router.ex` into their own
+  modules, so the MCP surface shares one door rather than growing a second copy of it.
+
+### Upgrade notes
+
+- **Update the coordinator before the workers.** A 1.3.0 worker emits `job_progress` (and, when
+  enabled, `input_request`) events that a pre-1.3.0 coordinator does not recognize — and an
+  unrecognized channel event used to raise, taking the channel down and dropping every job that
+  worker was running. 1.3.0 adds a catch-all that refuses the message and keeps the connection,
+  so the coordinator must be the one that has it. A deployment that ships the coordinator
+  continuously from `main` already does.
+- **An older worker keeps working.** Progress and context requests are negotiated by capability
+  flags in the registration, so a 1.2.x worker simply reports no progress, and routing will not
+  send it a job that may ask for context.
+- **Privacy levels are admin-granted and default to public-only.** The MCP door defaults
+  submissions to `local_only`, so a fresh deployment refuses them until you grant a worker that
+  level in `/admin`. The refusal says so and lists the levels your workers do accept.
+- **The MCP endpoint is on by default** and behind the same gateway key as `/v1`.
+  `HYDRA_MCP_ENABLED=false` turns it off. A browser `Origin` is refused unless listed in
+  `HYDRA_MCP_ALLOWED_ORIGINS`; agent clients send none and are unaffected.
+- **Native MCP tasks are advertised but handed out only to clients that declare the extension.**
+  Neither Claude Code nor Codex implements it at the time of writing, so the tools are the path
+  that runs. `HYDRA_MCP_TASKS_MODE=never` disables task handles without a redeploy.
+- New columns are added by migration; no manual step.
+
 ## 1.2.0 — 2026-09-13
 
 Everything below landed after 1.1.4. The coordinator ships continuously from `main`, so its
