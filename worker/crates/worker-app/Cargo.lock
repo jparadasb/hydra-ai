@@ -5884,7 +5884,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "worker-app"
-version = "1.3.1"
+version = "1.3.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -5899,7 +5899,7 @@ dependencies = [
 
 [[package]]
 name = "worker-core"
-version = "1.3.1"
+version = "1.3.2"
 dependencies = [
  "argon2",
  "async-trait",
@@ -5925,7 +5925,7 @@ dependencies = [
 
 [[package]]
 name = "worker-tauri"
-version = "1.3.1"
+version = "1.3.2"
 dependencies = [
  "directories",
  "reqwest 0.12.28",
