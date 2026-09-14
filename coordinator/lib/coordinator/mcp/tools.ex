@@ -134,9 +134,22 @@ defmodule Coordinator.Mcp.Tools do
   end
 
   def call(@result, args, ctx) do
-    with_job(args, ctx, fn job ->
-      result = TaskView.result(job)
+    with_job(args, ctx, fn job -> {:ok, result_payload(job)} end)
+  end
 
+  def call(name, _args, _ctx), do: {:error, {:unknown_tool, name}}
+
+  @doc """
+  A finished job as a tool result.
+
+  Public because the native tasks extension has to answer `tasks/get` with exactly this — the
+  two surfaces must agree about what a job produced, and the cheapest way to guarantee that is
+  for there to be one function.
+  """
+  def result_payload(job) do
+    result = TaskView.result(job)
+
+    {:ok, payload} =
       cond do
         not Coordinator.Jobs.State.terminal?(job.state) ->
           ok("Job #{job.id} is still running (#{job.state}). Poll again.", result)
@@ -154,10 +167,9 @@ defmodule Coordinator.Mcp.Tools do
         true ->
           ok(result["text"] || "Job #{job.id} completed with no text output.", result)
       end
-    end)
-  end
 
-  def call(name, _args, _ctx), do: {:error, {:unknown_tool, name}}
+    payload
+  end
 
   # ---- shared ---------------------------------------------------------------------------------
 

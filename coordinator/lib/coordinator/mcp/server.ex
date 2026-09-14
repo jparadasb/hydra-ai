@@ -12,7 +12,7 @@ defmodule Coordinator.Mcp.Server do
   """
   require Logger
 
-  alias Coordinator.Mcp.{Protocol, Tools}
+  alias Coordinator.Mcp.{Protocol, Tasks, Tools}
 
   @server_info %{"name" => "hydra", "title" => "Hydra", "version" => "1.2.0"}
 
@@ -97,7 +97,7 @@ defmodule Coordinator.Mcp.Server do
       true ->
         case Tools.call(name, args, ctx) do
           {:ok, result} ->
-            Protocol.result(id, result, ctx.era)
+            Protocol.result(id, task_or_result(name, result, ctx), ctx.era)
 
           {:error, {:unknown_tool, name}} ->
             Protocol.method_not_found(id, "tools/call #{name}")
@@ -111,9 +111,34 @@ defmodule Coordinator.Mcp.Server do
       Protocol.internal_error(id, "the tool failed")
   end
 
+  defp dispatch("tasks/" <> _ = method, params, id, ctx),
+    do: Tasks.handle(method, params, id, ctx)
+
   defp dispatch(method, _params, id, _ctx), do: Protocol.method_not_found(id, method)
 
-  # Only what is actually implemented. Advertising resources, prompts or the tasks extension
-  # before they exist means a client calling them and getting method-not-found.
-  defp capabilities, do: %{"tools" => %{"listChanged" => false}}
+  # A submission that succeeded becomes a task handle for a client that speaks the extension:
+  # the job it created already is one. Only submissions — the read tools answer immediately, and
+  # handing back a task for a read would mean a client polling a task to learn the result of a
+  # poll. A caller error stays an ordinary tool result, because no job exists to hand back.
+  defp task_or_result(name, result, ctx) do
+    with true <- ctx.tasks?,
+         true <- name == "hydra_submit_job",
+         false <- result["isError"] == true,
+         job_id when is_binary(job_id) <- result["structuredContent"]["job_id"],
+         %{} = job <- Coordinator.Delegation.get(job_id, ctx.caller) do
+      Tasks.create_result(job)
+    else
+      _ -> result
+    end
+  end
+
+  # Only what is actually implemented. Resources and prompts are not — advertising them means a
+  # client calling them and getting method-not-found. The tasks extension is, so it is offered;
+  # a client that does not declare it simply never receives a task handle.
+  defp capabilities do
+    %{
+      "tools" => %{"listChanged" => false},
+      "extensions" => Tasks.capability()
+    }
+  end
 end

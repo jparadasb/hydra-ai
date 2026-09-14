@@ -91,6 +91,16 @@ case Integer.parse(System.get_env("HYDRA_MCP_MAX_OPEN_JOBS_PER_KEY") || "") do
   _ -> :ok
 end
 
+# Whether to hand MCP clients native task handles. `auto` follows what the client declared;
+# `never` refuses to, which is the setting for a client whose SDK advertises the tasks extension
+# but whose agent loop does not actually poll — such a client would sit waiting for a tool result
+# that never comes. `always` forces them on, for testing.
+case System.get_env("HYDRA_MCP_TASKS_MODE") do
+  "never" -> config :coordinator, :mcp_tasks_mode, :never
+  "always" -> config :coordinator, :mcp_tasks_mode, :always
+  _ -> config :coordinator, :mcp_tasks_mode, :auto
+end
+
 # Enforce a gateway key even when no env master (HYDRA_API_TOKEN) is set — so admin-issued keys
 # from the /admin console alone can gate the front-door. Recommended on a public tunnel.
 config :coordinator, :require_api_token, System.get_env("HYDRA_REQUIRE_API_TOKEN") == "true"

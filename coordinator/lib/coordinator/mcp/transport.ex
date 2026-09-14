@@ -64,12 +64,15 @@ defmodule Coordinator.Mcp.Transport do
          {:ok, caller} <- authorize(conn),
          {:ok, version} <- negotiate(conn, body),
          :ok <- validate_headers(conn, body) do
+      capabilities = Protocol.client_capabilities(body)
+
       ctx = %{
         caller: caller,
         era: Protocol.era(version),
         version: version,
         client_info: Protocol.client_info(body),
-        client_capabilities: Protocol.client_capabilities(body)
+        client_capabilities: capabilities,
+        tasks?: Coordinator.Mcp.Tasks.enabled?(capabilities)
       }
 
       case Mcp.Server.handle(body, ctx) do
