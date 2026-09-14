@@ -369,7 +369,11 @@ defmodule Coordinator.ApiRouter do
     pending = Map.put(stub, "status", "in_progress")
     item = response_message(msg_id, "in_progress", "")
 
-    conn = conn |> put_resp_content_type("text/event-stream") |> send_chunked(200)
+    # Same opener the chat stream uses. This endpoint set the content type and nothing else, so
+    # it streamed without `cache-control: no-cache` or `x-accel-buffering: no` — a reverse proxy
+    # was free to accumulate its events and hand them over in one lump, which reads as a stream
+    # that hangs and then bursts. The chat endpoint has always sent both.
+    conn = Sse.open(conn)
     conn = response_event(conn, %{"type" => "response.created", "response" => pending}, sequence)
 
     conn =
