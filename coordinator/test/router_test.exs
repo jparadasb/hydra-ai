@@ -38,6 +38,72 @@ defmodule Coordinator.RouterTest do
     }
   end
 
+  describe "model_policy" do
+    test "a preference orders the choice without refusing when it cannot be met" do
+      # The point of the policy: an OpenAI client names a model and means it, but a delegating
+      # agent usually wants "whatever can do this". Naming a model it cannot verify is connected
+      # is how a submission gets refused for no good reason.
+      job = policy_job(%{"prefer" => ["qwen"]})
+
+      preferred = worker("w-preferred", [])
+      other = worker("w-other", models: [%{model(false) | name: "something-else"}])
+
+      assert {:ok, %{worker_id: "w-preferred"}} = Router.route(job, [other, preferred])
+      # And when nothing serves the preference, the job still runs.
+      assert {:ok, %{worker_id: "w-other"}} = Router.route(job, [other])
+    end
+
+    test "earlier preferences beat later ones" do
+      job = policy_job(%{"prefer" => ["first-choice", "second-choice"]})
+
+      first = worker("w-first", models: [%{model(false) | name: "first-choice"}])
+      second = worker("w-second", models: [%{model(false) | name: "second-choice"}])
+
+      assert {:ok, %{worker_id: "w-first"}} = Router.route(job, [second, first])
+    end
+
+    test "require_local is a hard filter, not a preference" do
+      # It is a refusal to use an external provider in all but name, so it behaves like one.
+      job = policy_job(%{"require_local" => true})
+
+      local = worker("w-local", [])
+      external = worker("w-external", mode: :external_provider, models: [model(true)])
+
+      assert {:ok, %{worker_id: "w-local"}} = Router.route(job, [external, local])
+      assert {:error, :no_eligible_worker} = Router.route(job, [external])
+    end
+
+    test "an exact model request still wins over a policy" do
+      # Naming a model is a constraint; a policy is advice. A job that does both gets the model.
+      job = %Job{
+        job_id: "job-both",
+        capability: @cap,
+        privacy: :public,
+        model: "exact",
+        payload: %{"model_policy" => %{"prefer" => ["other"]}}
+      }
+
+      exact = worker("w-exact", models: [%{model(false) | name: "exact"}])
+      other = worker("w-other", models: [%{model(false) | name: "other"}])
+
+      assert {:ok, %{worker_id: "w-exact"}} = Router.route(job, [other, exact])
+    end
+
+    test "a job with no policy routes exactly as before" do
+      job = %Job{job_id: "job-plain2", capability: @cap, privacy: :public, payload: %{}}
+      assert {:ok, _} = Router.route(job, [worker("w-any", [])])
+    end
+  end
+
+  defp policy_job(policy) do
+    %Job{
+      job_id: "job-policy",
+      capability: @cap,
+      privacy: :public,
+      payload: %{"model_policy" => policy}
+    }
+  end
+
   test "a job that may ask for context only goes to a worker that knows to pause" do
     # An older worker would run the reserved tool call straight through and hand the caller a
     # tool call for a tool they never defined — a confusing result rather than a pause.

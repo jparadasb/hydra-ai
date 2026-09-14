@@ -314,7 +314,11 @@ defmodule Coordinator.Mcp.Tools do
       "messages" => messages,
       "model" => args["model"],
       "max_tokens" => args["max_tokens"],
-      "temperature" => args["temperature"]
+      "temperature" => args["temperature"],
+      # Routing reads this; the worker ignores what it does not recognize inside `payload`,
+      # which is why a new instruction can ride here rather than as a job field older workers
+      # would refuse outright.
+      "model_policy" => args["model_policy"]
     }
     |> Enum.reject(fn {_k, v} -> is_nil(v) end)
     |> Map.new()
@@ -411,6 +415,25 @@ defmodule Coordinator.Mcp.Tools do
             "default" => false,
             "description" =>
               "Let the delegated model pause and ask you for a file or a definition it was not given, instead of guessing. Disables live token streaming for the job, since a tool call cannot be recognized halfway through."
+          },
+          "model_policy" => %{
+            "type" => "object",
+            "additionalProperties" => false,
+            "description" =>
+              "How to choose a model when you do not want to name one. Prefer this to `model` for delegated work: naming a model that is not connected is refused, while a preference that cannot be met degrades to whatever else is eligible.",
+            "properties" => %{
+              "prefer" => %{
+                "type" => "array",
+                "items" => %{"type" => "string"},
+                "description" =>
+                  "Model names in order of preference. Ordering, not a requirement."
+              },
+              "require_local" => %{
+                "type" => "boolean",
+                "description" =>
+                  "Only workers that can serve this from a local model. A refusal to use an external provider, expressed as routing rather than as a privacy level."
+              }
+            }
           },
           "max_total_tokens" => %{
             "type" => "integer",

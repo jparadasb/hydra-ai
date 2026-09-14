@@ -311,7 +311,10 @@ http_headers = { Authorization = "Bearer ${HYDRA_API_TOKEN}" }
   work tends to be repository content, and the agent sending it did not necessarily think about
   where it would run. Widen it per job when you mean to.
 - **A model name is a hard constraint.** An unavailable model is refused rather than
-  substituted, and the error lists what is actually connected.
+  substituted, and the error lists what is actually connected. For delegated work prefer
+  `model_policy` — `{"prefer": ["qwen3-coder", "…"], "require_local": true}` — which orders the
+  choice instead of demanding one, so a preference the fleet cannot meet costs you a slower
+  model rather than a refusal.
 - **Jobs are owned.** A job is visible only to the key that submitted it, and one belonging to
   someone else reads exactly like one that never existed.
 - **`idempotency_key` makes a retry free.** A repeat returns the first job whatever state it is
