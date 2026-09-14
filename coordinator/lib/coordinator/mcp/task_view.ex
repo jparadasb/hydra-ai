@@ -156,6 +156,9 @@ defmodule Coordinator.Mcp.TaskView do
       "finalizing" ->
         "finishing up"
 
+      "input_required" ->
+        "waiting for you: #{question_summary(job)}"
+
       "completed" ->
         "completed"
 
@@ -166,6 +169,14 @@ defmodule Coordinator.Mcp.TaskView do
         "failed: #{job.failure_reason || "unknown"}"
     end
   end
+
+  defp question_summary(%JobRecord{input_request: %{"requests" => [first | rest]}}) do
+    args = first["arguments"] || %{}
+    what = args["path"] || args["query"] || args["question"] || "more context"
+    if rest == [], do: what, else: "#{what} (and #{length(rest)} more)"
+  end
+
+  defp question_summary(_), do: "more context"
 
   defp generating_message(_job, %{output_tokens: nil}), do: "generating"
 

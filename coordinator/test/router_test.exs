@@ -38,6 +38,29 @@ defmodule Coordinator.RouterTest do
     }
   end
 
+  test "a job that may ask for context only goes to a worker that knows to pause" do
+    # An older worker would run the reserved tool call straight through and hand the caller a
+    # tool call for a tool they never defined — a confusing result rather than a pause.
+    job = %Job{
+      job_id: "job-ctx",
+      capability: @cap,
+      privacy: :public,
+      payload: %{"tools" => [Coordinator.Mcp.ContextRequest.tool()]}
+    }
+
+    old = worker("w-old", [])
+    new = %{worker("w-new", []) | supports_input_requests: true}
+
+    assert {:ok, %{worker_id: "w-new"}} = Router.route(job, [old, new])
+    assert {:error, :no_eligible_worker} = Router.route(job, [old])
+  end
+
+  test "an ordinary job is unaffected by the context-request constraint" do
+    job = %Job{job_id: "job-plain", capability: @cap, privacy: :public, payload: %{}}
+
+    assert {:ok, _} = Router.route(job, [worker("w-old", [])])
+  end
+
   test "public routes to local or external" do
     local = worker("local", models: [model(false)])
     ext = worker("ext", models: [model(true)])

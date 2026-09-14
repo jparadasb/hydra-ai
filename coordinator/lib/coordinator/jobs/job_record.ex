@@ -5,7 +5,7 @@ defmodule Coordinator.Jobs.JobRecord do
 
   alias Coordinator.Jobs.State
 
-  @statuses ~w(pending leased done failed cancelled)
+  @statuses ~w(pending leased awaiting_input done failed cancelled)
   @privacies ~w(public private sensitive local_only)
 
   @primary_key {:id, :string, autogenerate: false}
@@ -49,6 +49,12 @@ defmodule Coordinator.Jobs.JobRecord do
     # `Coordinator.JobRetention` redacts it with the payload.
     field(:metadata, :map)
     field(:source, :string, default: "openai")
+    # Set while the job is parked: what the model asked the caller for, and how many times it
+    # has asked. `input_request` is caller-facing text, so retention drops it with the payload.
+    field(:input_request, :map)
+    field(:awaiting_input_until, :utc_datetime_usec)
+    field(:last_worker_id, :string)
+    field(:input_rounds, :integer, default: 0)
     # When the prompt and completion were dropped by `Coordinator.JobRetention`. Nil means the
     # row still carries its text.
     field(:redacted_at, :utc_datetime_usec)
@@ -90,7 +96,11 @@ defmodule Coordinator.Jobs.JobRecord do
       :owner_scope,
       :idempotency_key,
       :metadata,
-      :source
+      :source,
+      :input_request,
+      :awaiting_input_until,
+      :last_worker_id,
+      :input_rounds
     ])
     |> derive_state()
     |> validate_required([:id, :capability, :privacy, :status, :state])

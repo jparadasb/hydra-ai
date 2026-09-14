@@ -23,6 +23,7 @@ defmodule Coordinator.Jobs.State do
   @by_status %{
     "pending" => ~w(queued routing),
     "leased" => ~w(leased loading_model prefill generating finalizing),
+    "awaiting_input" => ~w(input_required),
     "done" => ~w(completed),
     "failed" => ~w(failed expired),
     "cancelled" => ~w(cancelled)
@@ -80,6 +81,9 @@ defmodule Coordinator.Jobs.State do
       "done" -> "completed"
       "failed" -> "completed"
       "cancelled" -> "cancelled"
+      # The one status that is not simply "the job is busy": the caller has to act before it
+      # can continue, and a client that treats it as `working` waits forever.
+      "awaiting_input" -> "input_required"
       _ -> "working"
     end
   end

@@ -17,16 +17,17 @@ defmodule Coordinator.Mcp.Tools do
   """
 
   alias Coordinator.{Delegation, Models}
-  alias Coordinator.Mcp.TaskView
+  alias Coordinator.Mcp.{ContextRequest, TaskView}
 
   @submit "hydra_submit_job"
   @get "hydra_get_job"
   @cancel "hydra_cancel_job"
   @result "hydra_get_result"
+  @provide_input "hydra_provide_input"
 
   @doc "Tool definitions for `tools/list`."
   def list do
-    [submit_tool(), get_tool(), cancel_tool(), result_tool()]
+    [submit_tool(), get_tool(), cancel_tool(), result_tool(), provide_input_tool()]
   end
 
   def names, do: Enum.map(list(), & &1["name"])
@@ -43,17 +44,29 @@ defmodule Coordinator.Mcp.Tools do
     with {:ok, messages} <- messages(args),
          {:ok, privacy} <-
            Delegation.resolve_privacy(args["privacy"], args["allow_external_providers"]) do
+      payload = payload(args, messages)
+
+      payload =
+        if args["allow_context_requests"] == true do
+          case ContextRequest.inject(payload) do
+            {:ok, payload} -> payload
+            {:error, :reserved_tool_name} -> :reserved_tool_name
+          end
+        else
+          payload
+        end
+
       request = %{
         caller: ctx.caller,
         privacy: privacy,
         timeout_ms: Delegation.resolve_timeout(args["timeout_ms"]),
-        payload: payload(args, messages),
+        payload: payload,
         metadata: args["metadata"],
         idempotency_key: args["idempotency_key"],
         source: "mcp"
       }
 
-      case Delegation.submit(request) do
+      case submit_or_refuse(request) do
         {:ok, created, job} ->
           view = TaskView.render(job)
 
@@ -81,6 +94,12 @@ defmodule Coordinator.Mcp.Tools do
         {:error, :idempotency_conflict} ->
           err("A job with this idempotency_key is being created right now. Retry shortly.")
 
+        {:error, :reserved_tool_name} ->
+          err(
+            "'#{ContextRequest.tool_name()}' is reserved. Rename your tool, or drop " <>
+              "allow_context_requests."
+          )
+
         {:error, reason} ->
           err("The job could not be queued: #{inspect(reason)}")
       end
@@ -97,13 +116,31 @@ defmodule Coordinator.Mcp.Tools do
     with_job(args, ctx, fn job ->
       view = TaskView.render(job)
 
-      ok(view["statusMessage"], %{
+      base = %{
         "job_id" => job.id,
         "status" => view["status"],
         "state" => job.state,
         "hydra" => view["_meta"][TaskView.meta_key()],
         "poll_after_ms" => view["pollIntervalMs"]
-      })
+      }
+
+      # A job that is waiting on the caller has to say so where the caller is looking, or it
+      # sits in input_required while the agent politely keeps polling.
+      case job.input_request do
+        %{} = request ->
+          ok(
+            view["statusMessage"],
+            Map.merge(base, %{
+              "input_request" => %{
+                "request_id" => request["request_id"],
+                "requests" => ContextRequest.to_input_requests(request)
+              }
+            })
+          )
+
+        _ ->
+          ok(view["statusMessage"], base)
+      end
     end)
   end
 
@@ -135,6 +172,35 @@ defmodule Coordinator.Mcp.Tools do
 
   def call(@result, args, ctx) do
     with_job(args, ctx, fn job -> {:ok, result_payload(job)} end)
+  end
+
+  def call(@provide_input, args, ctx) do
+    with_job(args, ctx, fn job ->
+      case Coordinator.Jobs.resume_with_input(
+             job.id,
+             args["request_id"],
+             args["responses"] || args["response"]
+           ) do
+        {:ok, resumed} ->
+          ok("Job #{resumed.id} resumed with your answer. Keep polling #{@get}.", %{
+            "job_id" => resumed.id,
+            "status" => TaskView.render(resumed)["status"],
+            "state" => resumed.state
+          })
+
+        {:error, :not_awaiting_input} ->
+          err("Job #{job.id} is #{job.state}, not waiting for input.")
+
+        {:error, :stale_input_request} ->
+          err(
+            "That request_id is not the one job #{job.id} is waiting on. " <>
+              "Call #{@get} to see the current request."
+          )
+
+        {:error, reason} ->
+          err("The job could not be resumed: #{inspect(reason)}")
+      end
+    end)
   end
 
   def call(name, _args, _ctx), do: {:error, {:unknown_tool, name}}
@@ -246,6 +312,9 @@ defmodule Coordinator.Mcp.Tools do
     |> Map.new()
   end
 
+  defp submit_or_refuse(%{payload: :reserved_tool_name}), do: {:error, :reserved_tool_name}
+  defp submit_or_refuse(request), do: Delegation.submit(request)
+
   defp available_models do
     case Models.names() do
       [] -> "none — no worker is connected"
@@ -329,6 +398,12 @@ defmodule Coordinator.Mcp.Tools do
             "description" =>
               "Your correlation data. Stored with the job; never sent to the model."
           },
+          "allow_context_requests" => %{
+            "type" => "boolean",
+            "default" => false,
+            "description" =>
+              "Let the delegated model pause and ask you for a file or a definition it was not given, instead of guessing. Disables live token streaming for the job, since a tool call cannot be recognized halfway through."
+          },
           "max_tokens" => %{"type" => "integer", "minimum" => 1},
           "temperature" => %{"type" => "number"}
         }
@@ -388,6 +463,39 @@ defmodule Coordinator.Mcp.Tools do
         "destructiveHint" => true,
         "idempotentHint" => true
       }
+    }
+  end
+
+  defp provide_input_tool do
+    %{
+      "name" => @provide_input,
+      "title" => "Answer a delegated job's question",
+      "description" => """
+      Give a paused job the context it asked for. #{@get} reports a job in `input_required`
+      along with what it wants and the request_id to answer; pass that id and your answer here
+      and the job continues from where it stopped, under the same job id.
+
+      Safe to repeat: a second answer to a request already answered is a no-op rather than a
+      second turn in the conversation.
+      """,
+      "inputSchema" => %{
+        "type" => "object",
+        "additionalProperties" => false,
+        "required" => ["job_id", "request_id", "responses"],
+        "properties" => %{
+          "job_id" => %{"type" => "string"},
+          "request_id" => %{
+            "type" => "string",
+            "description" => "From the input_request that #{@get} reported."
+          },
+          "responses" => %{
+            "type" => "object",
+            "description" =>
+              "Answers keyed by the request key #{@get} reported, or a single answer for a single question."
+          }
+        }
+      },
+      "annotations" => %{"readOnlyHint" => false, "idempotentHint" => true}
     }
   end
 

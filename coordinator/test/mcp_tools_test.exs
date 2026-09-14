@@ -293,6 +293,117 @@ defmodule Coordinator.McpToolsTest do
     end
   end
 
+  describe "asking the caller for context" do
+    defp park(job_id) do
+      {:ok, _} = Jobs.mark_leased(Jobs.get(job_id), "m40-01", "lease-1")
+
+      {:ok, _} =
+        Jobs.park_for_input(job_id, %{
+          "lease_id" => "lease-1",
+          "request_id" => "ir-1",
+          "requests" => [
+            %{
+              "tool_call_id" => "call_1",
+              "arguments" => %{
+                "kind" => "file",
+                "path" => "src/foo.ex",
+                "reason" => "need the record definition"
+              }
+            }
+          ],
+          "assistant_message" => %{"role" => "assistant", "tool_calls" => [%{"id" => "call_1"}]}
+        })
+
+      :ok
+    end
+
+    test "the reserved tool is only offered when the caller opts in" do
+      plain = Jobs.get(submit()["structuredContent"]["job_id"])
+      refute Coordinator.Mcp.ContextRequest.present?(plain.payload)
+
+      opted = Jobs.get(submit(%{"allow_context_requests" => true})["structuredContent"]["job_id"])
+      assert Coordinator.Mcp.ContextRequest.present?(opted.payload)
+    end
+
+    test "the reserved name cannot be shadowed by a caller's own tool" do
+      # Not reachable through hydra_submit_job today — its schema has no `tools` field — so this
+      # guards the injection point directly. Shadowing would mean the caller's tool never being
+      # called and the job pausing when they expected an answer.
+      assert {:error, :reserved_tool_name} =
+               Coordinator.Mcp.ContextRequest.inject(%{
+                 "tools" => [Coordinator.Mcp.ContextRequest.tool()]
+               })
+
+      assert {:ok, payload} = Coordinator.Mcp.ContextRequest.inject(%{"messages" => []})
+      assert Coordinator.Mcp.ContextRequest.present?(payload)
+    end
+
+    test "hydra_get_job surfaces the question where the agent is already looking" do
+      id = submit(%{"allow_context_requests" => true})["structuredContent"]["job_id"]
+      :ok = park(id)
+
+      result = call("hydra_get_job", %{"job_id" => id})
+
+      assert result["structuredContent"]["status"] == "input_required"
+      request = result["structuredContent"]["input_request"]
+      assert request["request_id"] == "ir-1"
+      assert %{"call_1" => question} = request["requests"]
+      assert question["what"] == "src/foo.ex"
+      assert question["prompt"] =~ "record definition"
+      # The one line a model reads without parsing metadata.
+      assert hd(result["content"])["text"] =~ "src/foo.ex"
+    end
+
+    test "answering resumes the same job under the same id" do
+      id = submit(%{"allow_context_requests" => true})["structuredContent"]["job_id"]
+      :ok = park(id)
+
+      answered =
+        call("hydra_provide_input", %{
+          "job_id" => id,
+          "request_id" => "ir-1",
+          "responses" => %{"call_1" => "defmodule Foo do end"}
+        })
+
+      refute answered["isError"]
+      assert answered["structuredContent"]["job_id"] == id
+      assert answered["structuredContent"]["state"] == "queued"
+
+      resumed = Jobs.get(id)
+      assert List.last(resumed.payload["messages"])["content"] =~ "defmodule Foo"
+    end
+
+    test "answering the wrong question is refused with something actionable" do
+      id = submit(%{"allow_context_requests" => true})["structuredContent"]["job_id"]
+      :ok = park(id)
+
+      result =
+        call("hydra_provide_input", %{
+          "job_id" => id,
+          "request_id" => "ir-stale",
+          "responses" => %{"call_1" => "x"}
+        })
+
+      assert result["isError"]
+      assert hd(result["content"])["text"] =~ "hydra_get_job"
+    end
+
+    test "another caller cannot answer a question that was not asked of them" do
+      id = submit(%{"allow_context_requests" => true})["structuredContent"]["job_id"]
+      :ok = park(id)
+
+      result =
+        call(
+          "hydra_provide_input",
+          %{"job_id" => id, "request_id" => "ir-1", "responses" => %{"call_1" => "x"}},
+          @other
+        )
+
+      assert result["isError"]
+      assert Jobs.get(id).status == "awaiting_input"
+    end
+  end
+
   test "an unknown tool is a protocol error, because no tool ran" do
     assert {:error, {:unknown_tool, "hydra_do_something_else"}} =
              Tools.call("hydra_do_something_else", %{}, %{caller: @caller})

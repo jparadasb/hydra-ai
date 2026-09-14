@@ -114,12 +114,12 @@ defmodule Coordinator.McpTransportTest do
       assert decode(conn)["result"]["protocolVersion"] == "2025-06-18"
     end
 
-    test "tools/list offers the four verbs, each with a schema" do
+    test "tools/list offers the delegation verbs, each with a schema" do
       conn = send_rpc(rpc("tools/list"))
       tools = decode(conn)["result"]["tools"]
 
       assert Enum.map(tools, & &1["name"]) |> Enum.sort() ==
-               ~w(hydra_cancel_job hydra_get_job hydra_get_result hydra_submit_job)
+               ~w(hydra_cancel_job hydra_get_job hydra_get_result hydra_provide_input hydra_submit_job)
 
       for tool <- tools do
         assert tool["inputSchema"]["type"] == "object"

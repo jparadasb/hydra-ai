@@ -322,6 +322,35 @@ pub enum JobPhase {
     Finalizing,
 }
 
+/// The reserved tool a coordinator injects when a job may ask for more context.
+///
+/// The worker never executes it. Seeing it in a model's tool calls is the signal that the job
+/// is asking a question rather than producing an answer.
+pub const CONTEXT_REQUEST_TOOL: &str = "hydra_request_context";
+
+/// Worker -> coordinator. The model asked for something it was not given, so the job pauses.
+/// Mirrors `proto/job_input_request.schema.json`.
+///
+/// Sent *instead of* a [`JobResult`]: the job has not finished. The coordinator parks it, asks
+/// the caller, and re-leases it with the answer appended — so nothing here needs to survive on
+/// this worker, and a worker that dies while a job is parked costs nothing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobInputRequest {
+    pub job_id: String,
+    /// Required: a superseded generation must not be able to park a job another worker owns.
+    pub lease_id: String,
+    /// Unique within the job. Correlates the answer with the question, which is what lets the
+    /// coordinator treat a repeated resume as a no-op.
+    pub request_id: String,
+    /// The model's tool-call arguments, forwarded verbatim. Translating them is the
+    /// coordinator's job: a Rust change ships across a fleet, an Elixir one does not.
+    pub requests: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assistant_message: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ResultUsage>,
+}
+
 /// Per-job usage attached to a result. No secrets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResultUsage {

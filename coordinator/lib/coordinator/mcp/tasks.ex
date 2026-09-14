@@ -22,7 +22,7 @@ defmodule Coordinator.Mcp.Tasks do
   """
 
   alias Coordinator.Jobs.{JobRecord, State}
-  alias Coordinator.Mcp.{Protocol, TaskView, Tools}
+  alias Coordinator.Mcp.{ContextRequest, Protocol, TaskView, Tools}
   alias Coordinator.Delegation
 
   @extension "io.modelcontextprotocol/tasks"
@@ -98,17 +98,47 @@ defmodule Coordinator.Mcp.Tasks do
 
   def handle("tasks/update", params, id, ctx) do
     with_task(params, id, ctx, fn job ->
-      # Resuming a parked job is Phase 3b. Until a job can enter `input_required` there is
-      # nothing to resume, and answering with a bare acknowledgement would tell the caller their
-      # input had been accepted when nothing received it.
-      Protocol.invalid_params(
-        id,
-        "task #{job.id} is #{status(job)} and is not waiting for input"
-      )
+      request_id = (job.input_request || %{})["request_id"]
+
+      case Coordinator.Jobs.resume_with_input(
+             job.id,
+             request_id,
+             answers(params["inputResponses"])
+           ) do
+        {:ok, _resumed} ->
+          # An empty acknowledgement; the caller polls tasks/get for the job's new state.
+          Protocol.result(id, %{"resultType" => "complete"}, ctx.era)
+
+        {:error, :not_awaiting_input} ->
+          Protocol.invalid_params(
+            id,
+            "task #{job.id} is #{status(job)} and is not waiting for input"
+          )
+
+        {:error, reason} ->
+          Protocol.invalid_params(id, "task #{job.id} could not be resumed: #{reason}")
+      end
     end)
   end
 
   def handle(method, _params, id, _ctx), do: Protocol.method_not_found(id, method)
+
+  # The extension wraps each answer in an action/content envelope. A caller that declined is not
+  # a caller that answered — the model is told so, rather than being handed a silent empty
+  # string it would read as "the file is blank".
+  defp answers(%{} = responses) do
+    Map.new(responses, fn {key, value} ->
+      {key, unwrap(value)}
+    end)
+  end
+
+  defp answers(other), do: other
+
+  defp unwrap(%{"action" => action, "content" => content}) when action in ["accept", "accepted"],
+    do: content
+
+  defp unwrap(%{"action" => action}), do: "The caller #{action}ed this request."
+  defp unwrap(value), do: value
 
   @doc """
   Hydra's state as an MCP task status.
@@ -138,8 +168,16 @@ defmodule Coordinator.Mcp.Tasks do
     }
 
     case status(job) do
-      "completed" -> Map.put(base, "result", Tools.result_payload(job))
-      _ -> base
+      "completed" ->
+        Map.put(base, "result", Tools.result_payload(job))
+
+      "input_required" ->
+        # The extension keys each question so the answer can be matched back to it, which is the
+        # same correlation `hydra_provide_input` uses — one mechanism, two spellings.
+        Map.put(base, "inputRequests", ContextRequest.to_input_requests(job.input_request || %{}))
+
+      _ ->
+        base
     end
   end
 

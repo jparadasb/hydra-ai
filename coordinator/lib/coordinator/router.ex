@@ -48,8 +48,25 @@ defmodule Coordinator.Router do
       job.privacy in w.accepted_job_levels and
       Worker.serves?(w, job.capability) and
       not over_capacity?(w) and
-      privacy_compatible?(job, w)
+      privacy_compatible?(job, w) and
+      can_request_context?(job, w)
   end
+
+  # A job carrying the reserved `hydra_request_context` tool must go to a worker that knows to
+  # pause on it. An older worker would run the tool call straight through and hand the caller a
+  # tool call for a tool they never defined — a confusing result rather than a pause.
+  defp can_request_context?(%Job{} = job, %Worker{} = w) do
+    not context_requests?(job) or Map.get(w, :supports_input_requests, false)
+  end
+
+  defp context_requests?(%Job{payload: %{"tools" => tools}}) when is_list(tools) do
+    Enum.any?(
+      tools,
+      &(get_in(&1, ["function", "name"]) == Coordinator.Mcp.ContextRequest.tool_name())
+    )
+  end
+
+  defp context_requests?(_), do: false
 
   # The core privacy table.
   defp privacy_compatible?(%Job{privacy: :public}, _w), do: true

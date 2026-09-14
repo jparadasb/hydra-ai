@@ -205,6 +205,35 @@ defmodule Coordinator.WorkerSession do
 
   def handle_progress(_), do: {:error, :invalid_progress}
 
+  @doc """
+  Handle a job that paused to ask its caller for something.
+
+  Redacted, not verified — and this is the one inbound path where that matters most. The text
+  here is written by a model and travels straight into an agent's context, so it is the likeliest
+  place for a credential the model read somewhere to come back out. A hard reject would strand
+  the job instead of the secret, which is why the posture matches results and chunks.
+  """
+  def handle_input_request(%{"job_id" => job_id} = payload) when is_binary(job_id) do
+    {clean, _redactions} = SecretGuard.redact(payload)
+
+    case Jobs.park_for_input(job_id, clean) do
+      {:ok, record} ->
+        {:ok, record}
+
+      {:error, :too_many_rounds} ->
+        # The model asked once too often. Let the job finish on what it has rather than holding
+        # the caller's attention; the worker has already released it, so requeue it to run again
+        # with the question in its own history.
+        Jobs.requeue(Jobs.get(job_id))
+        {:error, :too_many_rounds}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  def handle_input_request(_), do: {:error, :invalid_input_request}
+
   # Record the result against the durable job, if it is one we are tracking.
   defp persist_result(%{"job_id" => job_id} = result) when is_binary(job_id) do
     Jobs.complete(job_id, result)

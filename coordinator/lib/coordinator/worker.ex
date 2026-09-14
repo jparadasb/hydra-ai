@@ -23,6 +23,7 @@ defmodule Coordinator.Worker do
           max_requests_per_hour: non_neg_integer() | nil,
           supports_cancel_ack: boolean(),
           supports_progress: boolean(),
+          supports_input_requests: boolean(),
           supports_lease_heartbeat: boolean(),
           # Live scheduling signals. All three are measured by the coordinator at the channel
           # boundary (`Coordinator.WorkerSignals`), never reported by the worker.
@@ -42,6 +43,7 @@ defmodule Coordinator.Worker do
             max_requests_per_hour: nil,
             supports_cancel_ack: false,
             supports_progress: false,
+            supports_input_requests: false,
             supports_lease_heartbeat: false,
             inflight: 0,
             avg_latency_ms: 0.0,
@@ -68,6 +70,7 @@ defmodule Coordinator.Worker do
       max_requests_per_hour: get_in(reg, ["limits", "max_requests_per_hour"]),
       supports_cancel_ack: reg["supports_cancel_ack"] == true,
       supports_progress: reg["supports_progress"] == true,
+      supports_input_requests: reg["supports_input_requests"] == true,
       supports_lease_heartbeat: reg["supports_lease_heartbeat"] == true
     }
   end

@@ -545,6 +545,257 @@ defmodule Coordinator.Jobs do
   def progress_topic(job_id) when is_binary(job_id), do: "job_progress:" <> job_id
 
   @doc """
+  Park a job because the model asked its caller for something.
+
+  The job stops being `leased`, which is what takes it out of the lease sweeper's reach: the
+  sweeper reclaims `status == "leased"` rows whose deadline passed, and a job waiting on a human
+  or an agent is not a job whose worker has wedged. No attempt is spent — nothing failed.
+
+  `lease_id` is cleared deliberately. The worker that asked has released the job and moved on,
+  so a late `result` from that generation must not be able to resurrect it; `complete/2`'s
+  stale-lease check does the rest.
+
+  Guarded on the generation that is actually live, so a superseded worker cannot park a job
+  another worker is running.
+  """
+  def park_for_input(job_id, %{} = request) when is_binary(job_id) do
+    lease_id = request["lease_id"]
+    request_id = request["request_id"]
+
+    with true <- is_binary(lease_id) and is_binary(request_id),
+         %JobRecord{} = record <- get(job_id) do
+      cond do
+        record.input_rounds >= max_input_rounds() ->
+          # A model asking in a loop would otherwise park, resume, and ask again forever. Let it
+          # finish on what it has rather than holding the caller's attention indefinitely.
+          Logger.info("job #{job_id} asked for context too many times; continuing without it")
+          {:error, :too_many_rounds}
+
+        true ->
+          do_park(record, lease_id, request)
+      end
+    else
+      nil -> {:error, :unknown_job}
+      false -> {:error, :invalid_input_request}
+    end
+  end
+
+  defp do_park(%JobRecord{} = record, lease_id, request) do
+    now = now()
+    messages = List.wrap(record.payload["messages"])
+
+    # The assistant turn that asked goes into the conversation now, so the resumed job reads as
+    # one exchange and the model sees its own question.
+    messages =
+      case request["assistant_message"] do
+        %{} = turn -> messages ++ [turn]
+        _ -> messages
+      end
+
+    payload = Map.put(record.payload, "messages", messages)
+
+    {count, _} =
+      from(j in JobRecord,
+        where: j.id == ^record.id and j.status == "leased" and j.lease_id == ^lease_id
+      )
+      |> Repo.update_all(
+        set: [
+          status: "awaiting_input",
+          state: "input_required",
+          payload: payload,
+          input_request: Map.take(request, ["request_id", "requests"]),
+          awaiting_input_until: DateTime.add(now, input_timeout_ms(), :millisecond),
+          last_worker_id: record.worker_id,
+          worker_id: nil,
+          lease_id: nil,
+          lease_expires_at: nil,
+          updated_at: now
+        ],
+        inc: [input_rounds: 1]
+      )
+
+    if count == 1 do
+      record = get(record.id)
+      Coordinator.Telemetry.emit([:hydra, :job, :awaiting_input], %{count: 1})
+
+      Logger.info("job awaiting caller input",
+        job_id: record.id,
+        worker_id: record.last_worker_id
+      )
+
+      Phoenix.PubSub.broadcast(
+        Coordinator.PubSub,
+        progress_topic(record.id),
+        {:job_progress, %{"job_id" => record.id, "state" => "input_required"}}
+      )
+
+      {:ok, record}
+    else
+      {:error, :stale_lease}
+    end
+  end
+
+  @doc """
+  Resume a parked job with the caller's answer.
+
+  Conditional on the round the caller is answering, which gives idempotency for nothing: a
+  duplicate resume finds the job already `pending` and returns it unchanged rather than
+  appending the same answer twice.
+
+  The caller's deadline is extended by however long the job spent waiting. `expires_at` is
+  checked by `LeaseWorker` and clamps the lease deadline, so a job that kept its original
+  deadline while Hydra waited on a slow agent would be guaranteed to expire — the clock would be
+  running on the caller's thinking time.
+
+  Privacy is deliberately *not* re-read from the resume call. A job submitted as `local_only`
+  stays `local_only`; otherwise a caller could submit narrowly and widen on the way back in.
+  """
+  def resume_with_input(job_id, request_id, responses) when is_binary(job_id) do
+    case get(job_id) do
+      nil ->
+        {:error, :unknown_job}
+
+      %JobRecord{status: "awaiting_input"} = record ->
+        if record.input_request["request_id"] == request_id do
+          do_resume(record, responses)
+        else
+          {:error, :stale_input_request}
+        end
+
+      # Already resumed: an agent retrying after a dropped connection sees the job running again
+      # rather than an error. `input_rounds` is what distinguishes it from a job that was never
+      # parked at all — without that check, answering a question nobody asked would look like a
+      # success.
+      %JobRecord{status: "pending", input_rounds: rounds} = record when rounds > 0 ->
+        {:ok, record}
+
+      %JobRecord{} ->
+        {:error, :not_awaiting_input}
+    end
+  end
+
+  defp do_resume(%JobRecord{} = record, responses) do
+    now = now()
+    waited_ms = waited_ms(record, now)
+
+    messages =
+      record.payload["messages"]
+      |> List.wrap()
+      |> Kernel.++(tool_messages(record, responses))
+
+    payload = Map.put(record.payload, "messages", messages)
+
+    {count, _} =
+      from(j in JobRecord, where: j.id == ^record.id and j.status == "awaiting_input")
+      |> Repo.update_all(
+        set: [
+          status: "pending",
+          state: State.initial(),
+          payload: payload,
+          input_request: nil,
+          awaiting_input_until: nil,
+          # Give back the time the caller spent thinking, so a slow answer cannot expire the job.
+          expires_at: extended_deadline(record, waited_ms),
+          progress_seq: nil,
+          started_at: nil,
+          last_progress_at: nil,
+          output_tokens: nil,
+          updated_at: now
+        ]
+      )
+
+    if count == 1 do
+      # Not a retry: no attempt is spent, because nothing failed.
+      enqueue_lease(record.id)
+      {:ok, get(record.id)}
+    else
+      {:ok, get(record.id)}
+    end
+  end
+
+  # The answer arrives as the tool response the model is waiting for, matched to the call it
+  # made — which is what lets the backend treat the resumed conversation as continuous.
+  defp tool_messages(%JobRecord{} = record, responses) do
+    requests = List.wrap(record.input_request["requests"])
+
+    Enum.map(requests, fn request ->
+      id = request["tool_call_id"]
+      answer = response_for(responses, id)
+
+      %{
+        "role" => "tool",
+        "tool_call_id" => id,
+        "content" => if(is_binary(answer), do: answer, else: Jason.encode!(answer))
+      }
+    end)
+  end
+
+  defp response_for(responses, id) when is_map(responses) do
+    Map.get(responses, id) || Map.get(responses, "content") || responses
+  end
+
+  defp response_for(responses, _id), do: responses
+
+  defp waited_ms(%JobRecord{updated_at: %DateTime{} = parked}, now),
+    do: max(DateTime.diff(now, parked, :millisecond), 0)
+
+  defp waited_ms(_, _), do: 0
+
+  defp extended_deadline(%JobRecord{expires_at: %DateTime{} = expires_at}, waited_ms),
+    do: DateTime.add(expires_at, waited_ms, :millisecond)
+
+  defp extended_deadline(_, _), do: nil
+
+  @doc """
+  Fail jobs whose caller never answered.
+
+  A parked job is not terminal, so `Coordinator.JobRetention` leaves it alone — which makes this
+  a privacy requirement as much as a liveness one. A job nobody answers is the caller's prompt
+  sitting in the database forever.
+
+  No attempt is spent: retrying would ask the same unanswered question again.
+  """
+  def fail_unanswered_input do
+    now = now()
+
+    ids =
+      from(j in JobRecord,
+        where: j.status == "awaiting_input" and j.awaiting_input_until <= ^now,
+        select: j.id
+      )
+      |> Repo.all()
+
+    Enum.each(ids, fn id ->
+      {count, _} =
+        from(j in JobRecord, where: j.id == ^id and j.status == "awaiting_input")
+        |> Repo.update_all(
+          set: [
+            status: "failed",
+            state: "failed",
+            result: %{"status" => "error", "reason" => "input_timeout"},
+            failure_reason: "input_timeout",
+            finished_at: now,
+            awaiting_input_until: nil,
+            updated_at: now
+          ]
+        )
+
+      if count == 1 do
+        Logger.info("job failed: the caller never provided the context it asked for", job_id: id)
+        broadcast_result(%{"job_id" => id, "status" => "error", "reason" => "input_timeout"})
+      end
+    end)
+
+    :ok
+  end
+
+  defp max_input_rounds,
+    do: Application.get_env(:coordinator, :max_input_rounds, 3)
+
+  defp input_timeout_ms,
+    do: Application.get_env(:coordinator, :input_timeout_ms, 600_000)
+
+  @doc """
   Record a worker's result. `ok` → done. Otherwise re-queue for another attempt until
   `@max_attempts`, then mark failed.
   """
@@ -642,7 +893,7 @@ defmodule Coordinator.Jobs do
       nil ->
         {:error, :unknown_job}
 
-      %{status: status} = record when status in ["pending", "leased"] ->
+      %{status: status} = record when status in ["pending", "leased", "awaiting_input"] ->
         {:ok, cancelled} =
           update_status(
             record,
@@ -669,7 +920,7 @@ defmodule Coordinator.Jobs do
 
     {count, _} =
       from(j in JobRecord,
-        where: j.id == ^record.id and j.status in ["pending", "leased"]
+        where: j.id == ^record.id and j.status in ["pending", "leased", "awaiting_input"]
       )
       |> Repo.update_all(
         set: [

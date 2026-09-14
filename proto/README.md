@@ -15,6 +15,7 @@ validates inbound payloads against them.
 | `job_result.schema.json`    | worker → coordinator | normalized result |
 | `job_result_chunk.schema.json` | worker → coordinator | streamed content fragment of a running job (best-effort; the final `job_result` stays authoritative) |
 | `job_progress.schema.json` | worker → coordinator | how far a running job has got: phase, token counts, actual model (throttled, best-effort) |
+| `job_input_request.schema.json` | worker → coordinator | the model asked for context it was not given; the job pauses instead of finishing |
 
 ## Hard invariant
 

@@ -78,6 +78,11 @@ pub struct WorkerRegistration {
     /// report progress from one that has gone quiet.
     #[serde(default)]
     pub supports_progress: bool,
+    /// Recognizes the reserved `hydra_request_context` tool and pauses the job instead of
+    /// returning its call as an ordinary result. A worker without this would hand the caller a
+    /// tool call for a tool they never defined, so routing treats it as a hard constraint.
+    #[serde(default)]
+    pub supports_input_requests: bool,
 }
 
 impl WorkerRegistration {
@@ -118,6 +123,7 @@ impl WorkerRegistration {
             supports_cancel_ack: true,
             supports_lease_heartbeat: true,
             supports_progress: true,
+            supports_input_requests: true,
         }
     }
 }
@@ -148,6 +154,7 @@ mod tests {
         // Capability flags are how the coordinator tells a worker that cannot do a thing from
         // one that is simply quiet, so a build that stops advertising one is a real regression.
         assert!(reg.supports_progress);
+        assert!(reg.supports_input_requests);
         assert!(reg.supports_cancel_ack);
         assert!(reg.supports_lease_heartbeat);
 

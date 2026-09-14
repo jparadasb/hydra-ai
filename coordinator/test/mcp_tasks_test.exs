@@ -221,9 +221,8 @@ defmodule Coordinator.McpTasksTest do
   end
 
   describe "tasks/update" do
-    test "says plainly that this job is not waiting for anything" do
-      # Until a job can park for input there is nothing to resume, and a bare acknowledgement
-      # would tell the caller their input had been accepted by something.
+    test "a job that is not waiting is told so rather than silently acknowledged" do
+      # A bare acknowledgement would tell the caller their input had been accepted by something.
       job_id = submit(ctx(true))["taskId"]
 
       {:reply, response} =

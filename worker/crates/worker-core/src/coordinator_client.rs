@@ -55,6 +55,163 @@ pub mod progress {
     }
 }
 
+/// Recognizing a job that is asking a question rather than answering one. Pure; no networking.
+pub mod context_request {
+    use crate::types::{JobInputRequest, JobResult, CONTEXT_REQUEST_TOOL};
+    use serde_json::Value;
+
+    /// Turn a result whose model called the reserved tool into the request to send instead.
+    ///
+    /// `None` for every ordinary result, which is almost all of them. The reserved name is the
+    /// whole signal: it can only appear in a model's tool calls because the coordinator injected
+    /// the tool, so there is nothing else to check.
+    ///
+    /// Only the reserved call is forwarded. A model may emit it alongside real tool calls, and
+    /// those belong to the caller's own tools, not to this mechanism.
+    pub fn from_result(result: &JobResult, request_id: &str) -> Option<JobInputRequest> {
+        if result.status != crate::types::JobStatus::Ok {
+            return None;
+        }
+
+        let lease_id = result.lease_id.clone()?;
+        let calls = result.output.as_ref()?.get("tool_calls")?.as_array()?;
+
+        let requests: Vec<Value> = calls
+            .iter()
+            .filter(|call| tool_name(call) == Some(CONTEXT_REQUEST_TOOL))
+            .filter_map(arguments)
+            .collect();
+
+        if requests.is_empty() {
+            return None;
+        }
+
+        Some(JobInputRequest {
+            job_id: result.job_id.clone(),
+            lease_id,
+            request_id: request_id.to_string(),
+            requests,
+            // The turn that asked, so the coordinator can rebuild the conversation. The model
+            // reads its own question back when the job resumes.
+            assistant_message: Some(serde_json::json!({
+                "role": "assistant",
+                "content": result.output.as_ref().and_then(|o| o.get("content")).cloned(),
+                "tool_calls": calls,
+            })),
+            usage: result.usage.clone(),
+        })
+    }
+
+    fn tool_name(call: &Value) -> Option<&str> {
+        call.get("function")
+            .and_then(|f| f.get("name"))
+            .or_else(|| call.get("name"))
+            .and_then(Value::as_str)
+    }
+
+    // Arguments arrive as a JSON string from every OpenAI-compatible backend, and occasionally
+    // as an object. Carry whichever came, and say which call it belongs to.
+    fn arguments(call: &Value) -> Option<Value> {
+        let raw = call
+            .get("function")
+            .and_then(|f| f.get("arguments"))
+            .or_else(|| call.get("arguments"))?;
+
+        let parsed = match raw {
+            Value::String(text) => serde_json::from_str::<Value>(text).unwrap_or(Value::Null),
+            other => other.clone(),
+        };
+
+        let mut request = serde_json::Map::new();
+        if let Some(id) = call.get("id").and_then(Value::as_str) {
+            request.insert("tool_call_id".into(), Value::String(id.into()));
+        }
+        request.insert("arguments".into(), parsed);
+        Some(Value::Object(request))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::types::{JobResult, JobStatus};
+
+        fn result_with(tool_calls: Value) -> JobResult {
+            JobResult {
+                job_id: "job-1".into(),
+                lease_id: Some("lease-1".into()),
+                status: JobStatus::Ok,
+                reason: None,
+                output: Some(serde_json::json!({"content": "", "tool_calls": tool_calls})),
+                usage: None,
+            }
+        }
+
+        #[test]
+        fn recognizes_the_reserved_call_and_carries_its_arguments() {
+            let result = result_with(serde_json::json!([{
+                "id": "call_1",
+                "function": {
+                    "name": CONTEXT_REQUEST_TOOL,
+                    "arguments": "{\"path\":\"src/foo.ex\"}"
+                }
+            }]));
+
+            let request = from_result(&result, "ir-1").expect("should pause");
+            assert_eq!(request.request_id, "ir-1");
+            assert_eq!(request.requests.len(), 1);
+            assert_eq!(request.requests[0]["arguments"]["path"], "src/foo.ex");
+            assert_eq!(request.requests[0]["tool_call_id"], "call_1");
+            assert!(request.assistant_message.is_some());
+        }
+
+        #[test]
+        fn leaves_the_callers_own_tool_calls_alone() {
+            // A model may call both. Only the reserved one is this mechanism's business; the
+            // rest belong to whoever defined them.
+            let result = result_with(serde_json::json!([
+                {"id": "a", "function": {"name": "get_weather", "arguments": "{}"}},
+                {"id": "b", "function": {"name": CONTEXT_REQUEST_TOOL, "arguments": "{}"}}
+            ]));
+
+            let request = from_result(&result, "ir-1").expect("should pause");
+            assert_eq!(request.requests.len(), 1);
+            assert_eq!(request.requests[0]["tool_call_id"], "b");
+        }
+
+        #[test]
+        fn an_ordinary_result_does_not_pause() {
+            let result = result_with(serde_json::json!([
+                {"id": "a", "function": {"name": "get_weather", "arguments": "{}"}}
+            ]));
+            assert!(from_result(&result, "ir-1").is_none());
+
+            let mut plain = result_with(serde_json::json!([]));
+            plain.output = Some(serde_json::json!({"content": "just an answer"}));
+            assert!(from_result(&plain, "ir-1").is_none());
+        }
+
+        #[test]
+        fn a_failed_job_is_not_a_question() {
+            let mut result = result_with(serde_json::json!([
+                {"id": "a", "function": {"name": CONTEXT_REQUEST_TOOL, "arguments": "{}"}}
+            ]));
+            result.status = JobStatus::Error;
+            assert!(from_result(&result, "ir-1").is_none());
+        }
+
+        #[test]
+        fn a_job_leased_without_a_generation_cannot_park() {
+            // Parking is guarded on the lease generation coordinator-side; without one there is
+            // nothing to guard with, so it finishes normally instead.
+            let mut result = result_with(serde_json::json!([
+                {"id": "a", "function": {"name": CONTEXT_REQUEST_TOOL, "arguments": "{}"}}
+            ]));
+            result.lease_id = None;
+            assert!(from_result(&result, "ir-1").is_none());
+        }
+    }
+}
+
 /// Phoenix v2 message framing. Pure (de)serialization; no networking.
 pub mod framing {
     use serde_json::{json, Value};
@@ -711,12 +868,31 @@ mod networked {
                             );
                             status.note_job_error(format!("job {}: {}", result.job_id, reason));
                         }
-                        let payload = serde_json::to_value(&result).unwrap_or(Value::Null);
+                        // The model may have asked for context instead of answering. That is
+                        // not a result: the job is paused, and the coordinator re-leases it once
+                        // the caller replies. Nothing about the pause lives on this worker, so a
+                        // worker that dies while a job is parked costs the job nothing.
+                        let (event, payload) = match super::context_request::from_result(
+                            &result,
+                            &format!("ir-{}", result.job_id),
+                        ) {
+                            Some(request) => {
+                                tracing::info!(
+                                    job = %request.job_id,
+                                    requests = request.requests.len(),
+                                    "job paused: the model asked for more context"
+                                );
+                                ("input_request", serde_json::to_value(&request))
+                            }
+                            None => ("result", serde_json::to_value(&result)),
+                        };
+
+                        let payload = payload.unwrap_or(Value::Null);
                         let out = PhoenixMsg::new(
                             Some("1".into()),
                             Some(next_ref()),
                             &topic,
-                            "result",
+                            event,
                             payload,
                         );
                         // Send fails silently if the socket already closed; the coordinator
