@@ -32,6 +32,10 @@ defmodule Coordinator.Jobs.JobRecord do
     field(:leased_at, :utc_datetime_usec)
     field(:started_at, :utc_datetime_usec)
     field(:last_progress_at, :utc_datetime_usec)
+    # When generation actually began, as opposed to when the job started running. Throughput is
+    # measured from here; `started_at` includes loading the model, which on a local backend can
+    # be most of a minute.
+    field(:first_token_at, :utc_datetime_usec)
     field(:finished_at, :utc_datetime_usec)
     # What the worker actually used, which need not be what was requested.
     field(:actual_model, :string)
@@ -92,6 +96,7 @@ defmodule Coordinator.Jobs.JobRecord do
       :leased_at,
       :started_at,
       :last_progress_at,
+      :first_token_at,
       :finished_at,
       :actual_model,
       :provider,

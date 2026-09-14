@@ -162,6 +162,90 @@ defmodule Coordinator.JobsProgressTest do
   end
 
   describe "progress_view/1" do
+    test "throughput is measured from the first token, not from when the job started" do
+      # A job announces `loading_model` before it generates anything, and on a local backend
+      # loading a large model can take most of a minute. Measured from the start of execution,
+      # a job generating at 20 tok/s reported 0.06 on its first frame and climbed for the rest
+      # of its life without ever reaching the truth — and an agent watching that has every
+      # reason to cancel a healthy job.
+      job = leased_job()
+
+      # Announced, but nothing generated yet.
+      assert :ok = Jobs.record_progress(job.id, frame(%{"seq" => 0, "phase" => "loading_model"}))
+      assert is_nil(Jobs.get(job.id).first_token_at)
+      assert is_nil(Jobs.progress_view(Jobs.get(job.id)).tokens_per_second)
+
+      # 40s of model loading, then 100 tokens in 5s.
+      import Ecto.Query
+
+      first = DateTime.add(DateTime.utc_now(), -5, :second)
+
+      Coordinator.Repo.update_all(
+        from(j in JobRecord, where: j.id == ^job.id),
+        set: [started_at: DateTime.add(first, -40, :second)]
+      )
+
+      assert :ok = Jobs.record_progress(job.id, frame(%{"seq" => 1, "output_tokens" => 100}))
+
+      Coordinator.Repo.update_all(
+        from(j in JobRecord, where: j.id == ^job.id),
+        set: [first_token_at: first]
+      )
+
+      view = Jobs.progress_view(Jobs.get(job.id))
+
+      # ~20/s over the generating window, not ~2/s over load-plus-generate.
+      assert view.tokens_per_second > 15
+      # Elapsed still means "how long has this been running", which includes the load.
+      assert view.elapsed_seconds > 40
+    end
+
+    test "the first-token clock is set once, not reset by every later frame" do
+      job = leased_job()
+
+      assert :ok = Jobs.record_progress(job.id, frame(%{"seq" => 0, "output_tokens" => 5}))
+      first = Jobs.get(job.id).first_token_at
+      assert %DateTime{} = first
+
+      assert :ok = Jobs.record_progress(job.id, frame(%{"seq" => 1, "output_tokens" => 200}))
+      assert Jobs.get(job.id).first_token_at == first
+    end
+
+    test "a re-leased attempt measures its own generation, not the previous one's" do
+      job = leased_job()
+      assert :ok = Jobs.record_progress(job.id, frame(%{"seq" => 0, "output_tokens" => 5}))
+      assert %DateTime{} = Jobs.get(job.id).first_token_at
+
+      {:ok, _} = Jobs.requeue(Jobs.get(job.id))
+      assert is_nil(Jobs.get(job.id).first_token_at)
+
+      {:ok, _} = Jobs.mark_leased(Jobs.get(job.id), "w-2", "lease-2")
+      assert is_nil(Jobs.get(job.id).first_token_at)
+    end
+
+    test "the model actually running is reported while the job runs" do
+      # Which model is running is decided by the worker's gateway, not the caller — a job may
+      # name none, or name one served under a different backend. Reporting it only at completion
+      # left a job that runs for minutes unable to say what was producing it.
+      job = leased_job()
+
+      assert :ok =
+               Jobs.record_progress(
+                 job.id,
+                 frame(%{
+                   "seq" => 0,
+                   "phase" => "prefill",
+                   "model" => "qwen3.6-35b-a3b",
+                   "provider" => "llama_swap"
+                 })
+               )
+
+      view = Jobs.progress_view(Jobs.get(job.id))
+      assert view.actual_model == "qwen3.6-35b-a3b"
+      assert view.provider == "llama_swap"
+      assert view.state == "prefill"
+    end
+
     test "derives throughput rather than trusting the worker for it" do
       job = leased_job()
       started = DateTime.add(DateTime.utc_now(), -10, :second)
@@ -170,6 +254,7 @@ defmodule Coordinator.JobsProgressTest do
         from(j in JobRecord, where: j.id == ^job.id),
         set: [
           started_at: started,
+          first_token_at: started,
           last_progress_at: DateTime.add(started, 10, :second),
           output_tokens: 78,
           actual_model: "qwen3-coder-30b"
@@ -191,7 +276,7 @@ defmodule Coordinator.JobsProgressTest do
 
       Coordinator.Repo.update_all(
         from(j in JobRecord, where: j.id == ^job.id),
-        set: [started_at: now, last_progress_at: now, output_tokens: 5]
+        set: [started_at: now, first_token_at: now, last_progress_at: now, output_tokens: 5]
       )
 
       assert Jobs.progress_view(Jobs.get(job.id)).tokens_per_second == nil
