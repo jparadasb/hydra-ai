@@ -14,6 +14,21 @@ None of these run in CI. They all need a coordinator to talk to.
 
 `--url` is required. `uninstall` removes the timer, the cron entry and the key file.
 
+## MCP installer
+
+Install Hydra MCP into Codex with one command. The script pauses for the gateway token and
+reads it silently:
+
+```sh
+curl -fsSL https://hydra.lambdatauri.dev/install-mcp.sh | bash
+```
+
+For another coordinator, pass its base URL after the script:
+
+```sh
+curl -fsSL https://hydra.lambdatauri.dev/install-mcp.sh | bash -s -- https://coordinator.example.com
+```
+
 ```sh
 scripts/setup-opencode.sh --url https://coordinator.example.com --key hydra_sk_...
 scripts/setup-opencode.sh sync        # refresh the model list now

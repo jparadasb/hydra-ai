@@ -20,6 +20,7 @@
       <a class="hidden text-muted hover:text-fg md:inline" href="#privacy"><span class="en">Privacy</span><span class="es">Privacidad</span></a>
       <a class="hidden text-muted hover:text-fg md:inline" href="#api">API</a>
       <a class="hidden text-muted hover:text-fg md:inline" href="#download"><span class="en">Download</span><span class="es">Descargar</span></a>
+      <a class="hidden text-muted hover:text-fg md:inline" href="#mcp-install">MCP</a>
       <a class="text-muted hover:text-fg" href="https://github.com/jparadasb/hydra-ai">GitHub</a>
       <div class="inline-flex overflow-hidden rounded-lg border border-line" role="group" aria-label="Language">
         <button type="button" data-set-lang="en" aria-pressed="true"
@@ -227,6 +228,15 @@ curl https://hydra.example.com/v1/chat/completions \
       <span class="en">Fetching the latest release…</span>
       <span class="es">Buscando la última versión…</span>
     </p>
+  </section>
+
+  <section id="mcp-install" class="border-t border-line py-10 md:py-14">
+    <h2 class="mb-2 font-mono text-[22px] font-semibold"><span class="en">Connect an agent with MCP</span><span class="es">Conecta un agente con MCP</span></h2>
+    <p class="mb-5 max-w-[62ch] text-muted">
+      <span class="en">Install Hydra in Codex from your terminal. The installer waits for your gateway token and reads it silently.</span>
+      <span class="es">Instala Hydra en Codex desde tu terminal. El instalador espera tu token y lo lee de forma silenciosa.</span>
+    </p>
+    <pre class="overflow-x-auto rounded-[10px] border border-line bg-panel p-5 font-mono text-[13px] leading-[1.7]">curl -fsSL https://hydra.lambdatauri.dev/install-mcp.sh | bash</pre>
   </section>
 
 </main>
