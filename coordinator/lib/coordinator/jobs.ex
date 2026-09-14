@@ -235,6 +235,7 @@ defmodule Coordinator.Jobs do
           # A previous attempt's progress describes a generation that no longer owns this job.
           progress_seq: nil,
           started_at: nil,
+          first_token_at: nil,
           last_progress_at: nil,
           worker_id: worker_id,
           lease_id: lease_id,
@@ -477,7 +478,12 @@ defmodule Coordinator.Jobs do
         )
         |> Repo.update_all(set: progress_set(progress, seq, now))
 
-      if count == 1, do: :ok, else: {:error, :stale_progress}
+      if count == 1 do
+        stamp_first_token(job_id, progress, now)
+        :ok
+      else
+        {:error, :stale_progress}
+      end
     else
       {:error, :invalid_progress}
     end
@@ -499,6 +505,25 @@ defmodule Coordinator.Jobs do
     |> put_present(:provider, progress["provider"])
   end
 
+  # The clock throughput is measured against, and it is not `started_at`. A job announces
+  # `loading_model` before it generates anything, and on a local backend loading a large model
+  # can take most of a minute — so throughput measured from the first frame reported a job
+  # generating at 20 tok/s as doing 0.06, climbing for the rest of its life without ever
+  # reaching the truth. A delegating agent watching that has every reason to cancel a healthy job.
+  #
+  # Its own statement, guarded on the column still being empty, so only the first frame carrying
+  # tokens sets it; every later one matches nothing. `requeue/1` clears it, so a re-leased
+  # attempt measures itself rather than inheriting the last one's clock.
+  defp stamp_first_token(job_id, %{"output_tokens" => tokens}, now)
+       when is_integer(tokens) and tokens > 0 do
+    from(j in JobRecord, where: j.id == ^job_id and is_nil(j.first_token_at))
+    |> Repo.update_all(set: [first_token_at: now])
+
+    :ok
+  end
+
+  defp stamp_first_token(_job_id, _progress, _now), do: :ok
+
   defp put_state(set, phase) when phase in ~w(loading_model prefill generating finalizing),
     do: Keyword.put(set, :state, phase)
 
@@ -518,7 +543,11 @@ defmodule Coordinator.Jobs do
   it produced but not how fast it is — throughput is the coordinator's measurement.
   """
   def progress_view(%JobRecord{} = r) do
-    elapsed_ms = span_ms(r.started_at, r.last_progress_at || r.finished_at)
+    last = r.last_progress_at || r.finished_at
+    elapsed_ms = span_ms(r.started_at, last)
+    # Throughput is generation speed, so it is measured from the first token rather than from
+    # the start of execution — which includes loading the model.
+    generating_ms = span_ms(r.first_token_at, last)
 
     %{
       state: r.state,
@@ -533,7 +562,7 @@ defmodule Coordinator.Jobs do
       output_tokens: r.output_tokens,
       queue_seconds: seconds(span_ms(r.inserted_at, r.leased_at || r.finished_at)),
       elapsed_seconds: seconds(elapsed_ms),
-      tokens_per_second: throughput(r.output_tokens, elapsed_ms),
+      tokens_per_second: throughput(r.output_tokens, generating_ms),
       last_progress_at: r.last_progress_at
     }
   end
@@ -715,6 +744,7 @@ defmodule Coordinator.Jobs do
           expires_at: extended_deadline(record, waited_ms),
           progress_seq: nil,
           started_at: nil,
+          first_token_at: nil,
           last_progress_at: nil,
           output_tokens: nil,
           updated_at: now
@@ -1031,6 +1061,7 @@ defmodule Coordinator.Jobs do
           # stays. `attempts` already records that an attempt happened.
           progress_seq: nil,
           started_at: nil,
+          first_token_at: nil,
           last_progress_at: nil,
           output_tokens: nil,
           updated_at: now()

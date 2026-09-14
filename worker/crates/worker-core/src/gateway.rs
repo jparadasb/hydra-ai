@@ -10,7 +10,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::adapter::{AdapterRegistry, DeltaSink, ProviderAdapter};
+use crate::adapter::{AdapterRegistry, DeltaSink, ProviderAdapter, SelectionSink};
 use crate::config::{Preference, PrivacyPrefs, RoutingPolicy};
 use crate::limits::LimitGuard;
 use crate::privacy::{self, Decision};
@@ -191,6 +191,24 @@ impl Gateway {
     /// while the backend generates (backends without streaming emit no deltas). The returned
     /// [`JobResult`] is the complete, authoritative output either way.
     pub async fn execute_streaming(&self, job: &Job, on_delta: DeltaSink) -> JobResult {
+        self.execute_observed(job, on_delta, Arc::new(|_, _| {}))
+            .await
+    }
+
+    /// As [`Gateway::execute_streaming`], plus a callback fired once the backend and model have
+    /// been chosen and before generation starts.
+    ///
+    /// Which model is *actually* running is decided here, not by the caller: a job may name no
+    /// model, or name one this worker serves under a different backend. Until now that was only
+    /// discoverable from the finished result, so a coordinator watching a job that runs for
+    /// minutes could not say what was producing it — which is most of what "what is this job
+    /// doing" means.
+    pub async fn execute_observed(
+        &self,
+        job: &Job,
+        on_delta: DeltaSink,
+        on_selected: SelectionSink,
+    ) -> JobResult {
         let reject = |reason: &str| JobResult {
             job_id: job.job_id.clone(),
             lease_id: job.lease_id.clone(),
@@ -254,6 +272,10 @@ impl Gateway {
                 };
             }
         };
+
+        // The backend is settled from here on, so this is the earliest honest moment to say what
+        // is about to run.
+        on_selected(cand.adapter.name(), &cand.model.name);
 
         // 3. Count every request; provider calls additionally consume a provider slot.
         let reservation = match self

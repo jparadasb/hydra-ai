@@ -15,6 +15,11 @@ use crate::types::{
 /// (not `&dyn`) so the `async_trait`-boxed futures can hold it without lifetime gymnastics.
 pub type DeltaSink = Arc<dyn Fn(&str, bool) + Send + Sync>;
 
+/// Called once with `(provider, model)` when the gateway has settled which backend will run a
+/// job, before generation starts. Lets a long-running job say what is producing it rather than
+/// only what produced it.
+pub type SelectionSink = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
 /// A backend the worker can run jobs against (OpenAI, Anthropic, Ollama, …).
 #[async_trait]
 pub trait ProviderAdapter: Send + Sync {

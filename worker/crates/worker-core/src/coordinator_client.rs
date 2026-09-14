@@ -414,6 +414,10 @@ mod networked {
         tokens: AtomicU64,
         last_emit_tokens: AtomicU64,
         last_emit_ms: AtomicU64,
+        /// Filled in once the gateway settles which backend runs the job. Every frame after
+        /// that carries it, so a job that runs for minutes can say what is producing it rather
+        /// than only what produced it.
+        selected: std::sync::Mutex<Option<(String, String)>>,
     }
 
     impl ProgressMeter {
@@ -450,7 +454,25 @@ mod networked {
             self.send(crate::types::JobPhase::Generating, Some(tokens));
         }
 
+        /// Record which backend the gateway chose, and say so immediately.
+        fn note_selected(&self, provider: &str, model: &str) {
+            if let Ok(mut slot) = self.selected.lock() {
+                *slot = Some((provider.to_string(), model.to_string()));
+            }
+            self.send(crate::types::JobPhase::Prefill, None);
+        }
+
         fn send(&self, phase: crate::types::JobPhase, output_tokens: Option<u64>) {
+            let (provider, model) = match self.selected.lock() {
+                Ok(slot) => match slot.as_ref() {
+                    Some((p, m)) => (Some(p.clone()), Some(m.clone())),
+                    None => (None, None),
+                },
+                // A poisoned lock means another thread panicked mid-update. Reporting no model
+                // is worse than reporting a stale one, but neither is worth failing the job.
+                Err(_) => (None, None),
+            };
+
             let frame = crate::types::JobProgress {
                 job_id: self.job_id.clone(),
                 lease_id: self.lease_id.clone(),
@@ -458,8 +480,8 @@ mod networked {
                 phase: Some(phase),
                 input_tokens: None,
                 output_tokens,
-                model: None,
-                provider: None,
+                model,
+                provider,
             };
 
             let payload = serde_json::to_value(&frame).unwrap_or(Value::Null);
@@ -785,6 +807,7 @@ mod networked {
                                 tokens: AtomicU64::new(0),
                                 last_emit_tokens: AtomicU64::new(0),
                                 last_emit_ms: AtomicU64::new(0),
+                                selected: std::sync::Mutex::new(None),
                             })
                         });
 
@@ -841,7 +864,16 @@ mod networked {
                                 }
                             })
                         };
-                        let result = gateway.execute_streaming(&job, on_delta).await;
+                        let on_selected: crate::adapter::SelectionSink = {
+                            let meter = meter.clone();
+                            Arc::new(move |provider: &str, model: &str| {
+                                if let Some(meter) = meter.as_ref() {
+                                    meter.note_selected(provider, model);
+                                }
+                            })
+                        };
+
+                        let result = gateway.execute_observed(&job, on_delta, on_selected).await;
 
                         // Generation is done; what remains is assembling and sending the result.
                         // On a job that buffered (tools or a strict schema suppress streaming)
