@@ -87,6 +87,19 @@ defmodule Coordinator.Mcp.Tools do
         {:error, {:model_unavailable, model}} ->
           err("No connected worker serves '#{model}'. Available now: #{available_models()}.")
 
+        {:error, {:privacy_unroutable, level, []}} ->
+          err(
+            "No connected worker is permitted to take '#{level}' jobs, and none advertises any " <>
+              "level at all. Grant one its privacy levels in /admin."
+          )
+
+        {:error, {:privacy_unroutable, level, accepted}} ->
+          err(
+            "No connected worker is permitted to take '#{level}' jobs. Workers currently accept: " <>
+              "#{Enum.join(accepted, ", ")}. Either grant a worker '#{level}' in /admin, or " <>
+              "submit with a level they accept — note this tool defaults to local_only."
+          )
+
         {:error, {:quota_exceeded, used, limit}} ->
           err(
             "This key has used #{used} of its #{limit} tokens for the last 30 days. " <>

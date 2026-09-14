@@ -309,7 +309,10 @@ http_headers = { Authorization = "Bearer ${HYDRA_API_TOKEN}" }
 
 - **Privacy defaults to `local_only` here**, unlike `/v1`, which defaults to `public`. Delegated
   work tends to be repository content, and the agent sending it did not necessarily think about
-  where it would run. Widen it per job when you mean to.
+  where it would run. Widen it per job when you mean to. **Workers must be granted the level**:
+  accepted levels are admin-granted and default to public-only, so a fresh deployment refuses
+  `local_only` submissions until you grant a worker that level in `/admin`. The refusal says so
+  and lists what your workers do accept.
 - **A model name is a hard constraint.** An unavailable model is refused rather than
   substituted, and the error lists what is actually connected. For delegated work prefer
   `model_policy` — `{"prefer": ["qwen3-coder", "…"], "require_local": true}` — which orders the
