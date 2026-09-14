@@ -74,6 +74,15 @@ pub struct WorkerRegistration {
     /// Enables renewable short leases for queued and running work.
     #[serde(default)]
     pub supports_lease_heartbeat: bool,
+    /// Emits `job_progress` while a job runs, so the coordinator can tell a worker that cannot
+    /// report progress from one that has gone quiet.
+    #[serde(default)]
+    pub supports_progress: bool,
+    /// Recognizes the reserved `hydra_request_context` tool and pauses the job instead of
+    /// returning its call as an ordinary result. A worker without this would hand the caller a
+    /// tool call for a tool they never defined, so routing treats it as a hard constraint.
+    #[serde(default)]
+    pub supports_input_requests: bool,
 }
 
 impl WorkerRegistration {
@@ -113,6 +122,8 @@ impl WorkerRegistration {
             version: Some(crate::self_update::build_version()),
             supports_cancel_ack: true,
             supports_lease_heartbeat: true,
+            supports_progress: true,
+            supports_input_requests: true,
         }
     }
 }
@@ -139,6 +150,14 @@ mod tests {
             uses_external_provider: true,
         }];
         let reg = WorkerRegistration::build(&cfg, None, Some(provider), &catalog);
+
+        // Capability flags are how the coordinator tells a worker that cannot do a thing from
+        // one that is simply quiet, so a build that stops advertising one is a real regression.
+        assert!(reg.supports_progress);
+        assert!(reg.supports_input_requests);
+        assert!(reg.supports_cancel_ack);
+        assert!(reg.supports_lease_heartbeat);
+
         let json = serde_json::to_string(&reg).unwrap().to_lowercase();
         for needle in [
             "\"token\"",

@@ -42,6 +42,12 @@ libraries; CI builds it separately).
 
 ## Coordinator (Elixir)
 
+**MCP** — `POST /mcp` (Streamable HTTP, revisions `2026-07-28` and `2025-11-25`-and-earlier).
+Four tools — submit / get / cancel / result — over the same durable job engine as `/v1`, so an
+agent can delegate a long job, disconnect, and collect it later. Privacy defaults to
+`local_only` on this door. Jobs are owned by the submitting key; an idempotency key makes a
+retry free; a per-key ceiling bounds open jobs.
+
 **Front door** — OpenAI-compatible `/v1/chat/completions` (streaming SSE and blocking),
 Codex-compatible `/v1/responses`, `/v1/models`, `/health`, `/metrics`, and public
 `/openapi.json` + `/docs`. Callers present a gateway key; requests carry a privacy level
@@ -52,6 +58,9 @@ rate, in-flight concurrency, and request body size are all bounded.
 
 **Durability** — `jobs` lifecycle (enqueue → lease → done | requeue ×5 → failed) on Ecto +
 Oban, with generation-tagged leases, transactional enqueue, and exponential retry backoff.
+Each row also carries a finer `state` (queued → routing → leased → generating → …), the worker
+and model actually used, live token counts reported by the worker while it runs, and timings —
+so a job is legible mid-flight rather than only at the end.
 Prompts and completions are redacted after a window and the rows deleted after a longer one.
 
 **Routing** — privacy table plus a scheduling score over channel-measured latency, in-flight

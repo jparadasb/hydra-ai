@@ -22,6 +22,8 @@ defmodule Coordinator.WorkerSession do
   diagnose.
   """
 
+  require Logger
+
   alias Coordinator.{Jobs, SecretGuard, Usage, Worker}
 
   @doc """
@@ -86,6 +88,47 @@ defmodule Coordinator.WorkerSession do
   and the result come back), not here — so there is no reservation to release.
   """
   def handle_result(payload) do
+    case oversize(payload) do
+      {:error, bytes} ->
+        # Refused rather than stored. The result is persisted verbatim and copied to every
+        # subscriber, so an unbounded one is the coordinator spending memory a worker chose.
+        # The job still gets an outcome — silently dropping it would strand the caller.
+        Logger.warning("worker result refused: too large",
+          job_id: payload["job_id"],
+          bytes: bytes
+        )
+
+        refusal =
+          payload
+          |> Map.take(["job_id", "lease_id"])
+          |> Map.merge(%{"status" => "error", "reason" => "result_too_large"})
+
+        persist_result(refusal)
+
+        Phoenix.PubSub.broadcast(
+          Coordinator.PubSub,
+          Jobs.result_topic(refusal["job_id"]),
+          {:job_result, refusal}
+        )
+
+        {:error, :result_too_large}
+
+      :ok ->
+        do_handle_result(payload)
+    end
+  end
+
+  # Measured on the encoded payload, which is what actually costs memory downstream.
+  defp oversize(payload) do
+    limit = Application.get_env(:coordinator, :max_result_bytes, 1_000_000)
+
+    case Jason.encode(payload) do
+      {:ok, encoded} when byte_size(encoded) > limit -> {:error, byte_size(encoded)}
+      _ -> :ok
+    end
+  end
+
+  defp do_handle_result(payload) do
     {clean, _redactions} = SecretGuard.redact(payload)
 
     case persist_result(clean) do
@@ -128,6 +171,68 @@ defmodule Coordinator.WorkerSession do
   end
 
   def handle_chunk(_), do: {:error, :invalid_chunk}
+
+  @doc """
+  Handle one progress report from a running job.
+
+  Redacted rather than verified, for the same reason usage and chunks are: a hard reject would
+  strand the caller's view of a job that is otherwise running fine, and the fields here are
+  counts and identifiers rather than anything a prompt flows into.
+
+  Persisted — unlike `handle_chunk/1` — because the point of it is to survive the caller going
+  away and the coordinator restarting. Broadcast as well, so a long-poll waiting on the job
+  wakes up rather than sitting until its next timeout.
+  """
+  def handle_progress(%{"job_id" => job_id} = payload) when is_binary(job_id) do
+    {clean, _redactions} = SecretGuard.redact(payload)
+
+    case Jobs.record_progress(job_id, clean) do
+      :ok ->
+        Phoenix.PubSub.broadcast(
+          Coordinator.PubSub,
+          Jobs.progress_topic(job_id),
+          {:job_progress, clean}
+        )
+
+        {:ok, clean}
+
+      {:error, reason} ->
+        # Not worth a log line each: a re-leased job's old generation can emit a burst of these
+        # before its task is aborted.
+        {:error, reason}
+    end
+  end
+
+  def handle_progress(_), do: {:error, :invalid_progress}
+
+  @doc """
+  Handle a job that paused to ask its caller for something.
+
+  Redacted, not verified — and this is the one inbound path where that matters most. The text
+  here is written by a model and travels straight into an agent's context, so it is the likeliest
+  place for a credential the model read somewhere to come back out. A hard reject would strand
+  the job instead of the secret, which is why the posture matches results and chunks.
+  """
+  def handle_input_request(%{"job_id" => job_id} = payload) when is_binary(job_id) do
+    {clean, _redactions} = SecretGuard.redact(payload)
+
+    case Jobs.park_for_input(job_id, clean) do
+      {:ok, record} ->
+        {:ok, record}
+
+      {:error, :too_many_rounds} ->
+        # The model asked once too often. Let the job finish on what it has rather than holding
+        # the caller's attention; the worker has already released it, so requeue it to run again
+        # with the question in its own history.
+        Jobs.requeue(Jobs.get(job_id))
+        {:error, :too_many_rounds}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  def handle_input_request(_), do: {:error, :invalid_input_request}
 
   # Record the result against the durable job, if it is one we are tracking.
   defp persist_result(%{"job_id" => job_id} = result) when is_binary(job_id) do

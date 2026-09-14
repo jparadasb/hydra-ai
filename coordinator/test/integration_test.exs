@@ -223,6 +223,95 @@ defmodule Coordinator.IntegrationTest do
     assert result["output"]["content"] =~ MockProvider.reply()
   end
 
+  test "a running job reports its progress to the coordinator, and it survives the job" do
+    # The headline of issue #85: an agent that submitted this job and walked away has to be able
+    # to come back and learn what it is doing. That means the counts are on the row, not just on
+    # the wire — so this asserts the persisted record, not only the broadcast.
+    {:ok, record} = chat_job(%{"stream" => true})
+
+    Phoenix.PubSub.subscribe(Coordinator.PubSub, Jobs.progress_topic(record.id))
+    Phoenix.PubSub.subscribe(Coordinator.PubSub, Jobs.result_topic(record.id))
+
+    assert :ok = drain_lease(record.id)
+
+    assert_receive {:job_progress, progress}, 30_000
+    assert progress["job_id"] == record.id
+    # A real lease generation, which is what lets the coordinator refuse a superseded one.
+    assert is_binary(progress["lease_id"])
+
+    assert_receive {:job_result, _result}, 30_000
+
+    stored = Jobs.get(record.id)
+    assert stored.status == "done"
+    # Written while the job ran, by the worker, and still here after it finished.
+    assert %DateTime{} = stored.last_progress_at
+    assert %DateTime{} = stored.leased_at
+    assert is_integer(stored.progress_seq)
+
+    view = Jobs.progress_view(stored)
+    assert view.worker_id != nil
+    assert view.state == "completed"
+  end
+
+  test "an agent delegates over MCP, disconnects, and collects the result later" do
+    # The whole point of issue #85, end to end against the real worker binary: submit returns an
+    # id without waiting, the job runs on its own, and the answer is still there afterwards.
+    submit =
+      mcp_call("hydra_submit_job", %{
+        "prompt" => "itest mcp delegation",
+        "model" => MockProvider.model(),
+        "privacy" => "public",
+        "allow_external_providers" => true
+      })
+
+    refute submit["isError"]
+    job_id = submit["structuredContent"]["job_id"]
+    assert is_binary(job_id)
+
+    # Nothing is waiting on a socket. The job exists and is durable before any worker sees it.
+    assert Jobs.get(job_id).status == "pending"
+
+    assert :ok = drain_lease(job_id)
+
+    # A fresh caller with the same key — as if the agent had reconnected — can still read it.
+    result = await_completed(job_id)
+    assert result["structuredContent"]["text"] =~ MockProvider.reply()
+    assert result["structuredContent"]["usage"]["output_tokens"]
+
+    status = mcp_call("hydra_get_job", %{"job_id" => job_id})
+    assert status["structuredContent"]["state"] == "completed"
+    assert status["structuredContent"]["hydra"]["worker"]
+    assert status["structuredContent"]["hydra"]["model"] == MockProvider.model()
+  end
+
+  test "a job delegated over MCP is refused to a different caller" do
+    submit = mcp_call("hydra_submit_job", %{"prompt" => "itest mcp ownership"})
+    job_id = submit["structuredContent"]["job_id"]
+
+    other = %{token_id: "someone-else", key: {:token, "someone-else"}}
+    assert mcp_call("hydra_get_job", %{"job_id" => job_id}, other)["isError"]
+  end
+
+  defp await_completed(job_id, tries \\ 100)
+  defp await_completed(job_id, 0), do: flunk("job #{job_id} never completed")
+
+  defp await_completed(job_id, tries) do
+    result = mcp_call("hydra_get_result", %{"job_id" => job_id})
+
+    if result["structuredContent"]["status"] == "completed" do
+      result
+    else
+      Process.sleep(100)
+      await_completed(job_id, tries - 1)
+    end
+  end
+
+  # Drive a tool the way the transport does, without the HTTP layer in the way.
+  defp mcp_call(name, args, caller \\ %{token_id: "itest", key: {:token, "itest"}}) do
+    {:ok, result} = Coordinator.Mcp.Tools.call(name, args, %{caller: caller})
+    result
+  end
+
   # Run the queued lease job for `job_id`. Oban is in manual testing mode, so nothing drains
   # the queue on its own.
   defp drain_lease(job_id, tries \\ 50)

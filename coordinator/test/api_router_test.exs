@@ -400,6 +400,119 @@ defmodule Coordinator.ApiRouterTest do
     assert chunk["object"] == "chat.completion.chunk"
   end
 
+  describe "collecting a job after the request that made it is gone" do
+    test "a job can be fetched by id by the key that submitted it" do
+      Application.put_env(:coordinator, :api_token, "owner-key")
+      nonce = "apijobs-#{System.unique_integer([:positive])}"
+
+      task =
+        Task.async(fn ->
+          post_chat(nonce, [{"authorization", "Bearer owner-key"}], %{"timeout_ms" => 300})
+        end)
+
+      job_id = wait_for(fn -> find_job_id(nonce) end)
+      Task.await(task, 6000)
+
+      conn =
+        conn(:get, "/v1/jobs/" <> job_id)
+        |> put_req_header("authorization", "Bearer owner-key")
+        |> Coordinator.ApiRouter.call(Coordinator.ApiRouter.init([]))
+
+      assert conn.status == 200
+      body = Jason.decode!(conn.resp_body)
+      assert body["taskId"] == job_id
+      assert body["status"]
+    end
+
+    test "another key cannot fetch it, and cannot tell it apart from one that never existed" do
+      Application.put_env(:coordinator, :api_token, "owner-key")
+      {:ok, other_token, _record} = Coordinator.ApiTokens.create("other")
+      nonce = "apijobsauth-#{System.unique_integer([:positive])}"
+
+      task =
+        Task.async(fn ->
+          post_chat(nonce, [{"authorization", "Bearer owner-key"}], %{"timeout_ms" => 300})
+        end)
+
+      job_id = wait_for(fn -> find_job_id(nonce) end)
+      Task.await(task, 6000)
+
+      theirs =
+        conn(:get, "/v1/jobs/" <> job_id)
+        |> put_req_header("authorization", "Bearer " <> other_token)
+        |> Coordinator.ApiRouter.call(Coordinator.ApiRouter.init([]))
+
+      absent =
+        conn(:get, "/v1/jobs/job-never-existed")
+        |> put_req_header("authorization", "Bearer " <> other_token)
+        |> Coordinator.ApiRouter.call(Coordinator.ApiRouter.init([]))
+
+      assert theirs.status == 404
+      assert theirs.resp_body == absent.resp_body
+    end
+
+    test "an unauthenticated caller is refused before the job is looked at" do
+      Application.put_env(:coordinator, :api_token, "owner-key")
+
+      conn =
+        conn(:get, "/v1/jobs/job-anything")
+        |> Coordinator.ApiRouter.call(Coordinator.ApiRouter.init([]))
+
+      assert conn.status == 401
+    end
+  end
+
+  test "stream:true reports a worker error as a content delta and finish_reason error" do
+    # Once the SSE headers are flushed there is no HTTP status left to say "this failed", so a
+    # failure after that point has to be delivered *inside* the stream. A client that only reads
+    # `conn.status` would call this a success, which is why the shape is asserted here rather
+    # than left to the reader of `stream_error/5`.
+    nonce = "apistreamerr-#{System.unique_integer([:positive])}"
+
+    task =
+      Task.async(fn ->
+        post("/v1/chat/completions", %{
+          "messages" => [%{"role" => "user", "content" => nonce}],
+          "model" => "llama3",
+          "stream" => true,
+          "timeout_ms" => 5000
+        })
+      end)
+
+    job_id = wait_for(fn -> find_job_id(nonce) end)
+
+    Phoenix.PubSub.broadcast(Coordinator.PubSub, Coordinator.Jobs.result_topic(job_id), {
+      :job_result,
+      %{"job_id" => job_id, "status" => "error", "reason" => "provider_error: upstream exploded"}
+    })
+
+    conn = Task.await(task, 6000)
+
+    # The status was already sent as 200 when the stream opened; the error rides the body.
+    assert conn.status == 200
+
+    body = conn.resp_body
+    assert body =~ "worker error: provider_error: upstream exploded"
+    assert body =~ ~s("finish_reason":"error")
+    assert body =~ "data: [DONE]"
+
+    frames =
+      body
+      |> String.split("\n\n", trim: true)
+      |> Enum.reject(&(&1 == "data: [DONE]"))
+      |> Enum.reject(&String.starts_with?(&1, ":"))
+      |> Enum.map(fn "data: " <> json -> Jason.decode!(json) end)
+
+    assert Enum.any?(frames, fn f ->
+             content = get_in(f, ["choices", Access.at(0), "delta", "content"])
+             is_binary(content) and content =~ "upstream exploded"
+           end)
+
+    assert Enum.any?(frames, fn f ->
+             get_in(f, ["choices", Access.at(0), "finish_reason"]) == "error"
+           end)
+  end
+
   test "stream:true emits SSE heartbeats while a slow job runs, then the result" do
     # Beats Cloudflare's ~100s idle 524: bytes keep flowing while the worker is busy. Use a tiny
     # heartbeat interval so a short test delay produces pings.

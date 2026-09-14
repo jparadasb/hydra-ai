@@ -37,6 +37,9 @@ defmodule Coordinator.LeaseWorker do
   defp lease(record) do
     domain = Jobs.to_domain(record)
 
+    # Observational: says "this job is being looked at right now" without touching `status`.
+    Jobs.mark_routing(record)
+
     # Route against the cluster-wide worker set (Presence-backed). Scoring uses each worker's
     # live inflight (maintained by its channel process), so leases still spread across nodes.
     # There is no hard reservation across the cluster: on the rare double-assignment the worker

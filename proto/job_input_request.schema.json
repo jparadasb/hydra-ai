@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hydra-ai/proto/job_input_request.schema.json",
+  "title": "JobInputRequest",
+  "description": "Worker -> coordinator. The delegated model asked for something it was not given and the job is paused. Sent instead of job_result.schema.json: the job has not finished, it is waiting. The coordinator parks the job, surfaces the request to the caller, and re-leases the job with the answer appended once one arrives.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["job_id", "lease_id", "request_id", "requests"],
+  "properties": {
+    "job_id": { "type": "string", "minLength": 1 },
+    "lease_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Required: a superseded generation must not be able to park a job another worker is live on."
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Worker-minted, unique within the job. Correlates the answer with the question, which is what makes resuming idempotent."
+    },
+    "requests": {
+      "type": "array",
+      "minItems": 1,
+      "description": "The model's tool-call arguments, forwarded verbatim. The coordinator owns the translation into whatever the caller's protocol expects, so a change there never requires a worker rollout.",
+      "items": { "type": "object" }
+    },
+    "assistant_message": {
+      "type": "object",
+      "description": "The assistant turn that made the request, including its tool_calls. The coordinator appends it to the conversation so the resumed job reads as one continuous exchange."
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "What the job consumed up to the pause. Partial by definition; nothing is lost when it parks.",
+      "properties": {
+        "provider": { "type": "string" },
+        "model": { "type": "string" },
+        "input_tokens": { "type": "integer", "minimum": 0 },
+        "output_tokens": { "type": "integer", "minimum": 0 },
+        "latency_ms": { "type": "number", "minimum": 0 }
+      }
+    }
+  }
+}

@@ -284,6 +284,73 @@ pub struct JobResultChunk {
     pub reasoning: bool,
 }
 
+/// How far a running job has got. Mirrors `proto/job_progress.schema.json`.
+///
+/// Throttled and best-effort, like [`JobResultChunk`]: a dropped frame costs the caller some
+/// visibility and nothing else, because the final [`JobResult`] still carries the authoritative
+/// counts. Unlike a chunk, the coordinator persists this, so a caller that disconnected can come
+/// back and read it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobProgress {
+    pub job_id: String,
+    /// Required, unlike on a chunk: a job re-leased after a failed attempt has a live generation
+    /// elsewhere, and this generation's counts must not overwrite it.
+    pub lease_id: String,
+    /// Monotonic per lease generation, starting at 0.
+    pub seq: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<JobPhase>,
+    /// Omitted when the backend reported nothing, so the coordinator can tell "no measurement"
+    /// from "measured zero" — the same rule [`ResultUsage`] follows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+}
+
+/// Coarse execution phase of a running job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobPhase {
+    LoadingModel,
+    Prefill,
+    Generating,
+    Finalizing,
+}
+
+/// The reserved tool a coordinator injects when a job may ask for more context.
+///
+/// The worker never executes it. Seeing it in a model's tool calls is the signal that the job
+/// is asking a question rather than producing an answer.
+pub const CONTEXT_REQUEST_TOOL: &str = "hydra_request_context";
+
+/// Worker -> coordinator. The model asked for something it was not given, so the job pauses.
+/// Mirrors `proto/job_input_request.schema.json`.
+///
+/// Sent *instead of* a [`JobResult`]: the job has not finished. The coordinator parks it, asks
+/// the caller, and re-leases it with the answer appended — so nothing here needs to survive on
+/// this worker, and a worker that dies while a job is parked costs nothing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobInputRequest {
+    pub job_id: String,
+    /// Required: a superseded generation must not be able to park a job another worker owns.
+    pub lease_id: String,
+    /// Unique within the job. Correlates the answer with the question, which is what lets the
+    /// coordinator treat a repeated resume as a no-op.
+    pub request_id: String,
+    /// The model's tool-call arguments, forwarded verbatim. Translating them is the
+    /// coordinator's job: a Rust change ships across a fleet, an Elixir one does not.
+    pub requests: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assistant_message: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ResultUsage>,
+}
+
 /// Per-job usage attached to a result. No secrets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResultUsage {
@@ -296,4 +363,72 @@ pub struct ResultUsage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
     pub latency_ms: f64,
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    fn frame() -> JobProgress {
+        JobProgress {
+            job_id: "job-1".into(),
+            lease_id: "lease-1".into(),
+            seq: 7,
+            phase: Some(JobPhase::Generating),
+            input_tokens: None,
+            output_tokens: Some(128),
+            model: Some("qwen3-coder".into()),
+            provider: Some("llama_cpp".into()),
+        }
+    }
+
+    #[test]
+    fn round_trips_and_omits_what_was_never_measured() {
+        let json = serde_json::to_value(frame()).unwrap();
+
+        // Absent, not zero: the coordinator must be able to tell "the backend reported no input
+        // token count" from "the backend counted zero input tokens".
+        assert!(json.get("input_tokens").is_none());
+        assert_eq!(json["output_tokens"], 128);
+        assert_eq!(json["phase"], "generating");
+
+        let back: JobProgress = serde_json::from_value(json).unwrap();
+        assert_eq!(back.seq, 7);
+        assert_eq!(back.lease_id, "lease-1");
+        assert_eq!(back.output_tokens, Some(128));
+        assert!(back.input_tokens.is_none());
+    }
+
+    #[test]
+    fn progress_has_no_secret_fields() {
+        // Progress is a new worker -> coordinator path, so it is covered by the same hard
+        // invariant every other message on this link is: no credential-shaped field, ever.
+        let json = serde_json::to_string(&frame()).unwrap().to_lowercase();
+
+        for needle in [
+            "\"token\"",
+            "api_key",
+            "authorization",
+            "x-api-key",
+            "bearer ",
+            "sk-",
+            "secret",
+        ] {
+            assert!(!json.contains(needle), "progress leaked {needle}: {json}");
+        }
+    }
+
+    #[test]
+    fn phases_match_the_schema_spelling() {
+        // The coordinator maps these strings straight onto its own job state column, so a
+        // rename here is a silent behaviour change there.
+        for (phase, spelled) in [
+            (JobPhase::LoadingModel, "loading_model"),
+            (JobPhase::Prefill, "prefill"),
+            (JobPhase::Generating, "generating"),
+            (JobPhase::Finalizing, "finalizing"),
+        ] {
+            assert_eq!(serde_json::to_value(phase).unwrap(), spelled);
+        }
+    }
 }

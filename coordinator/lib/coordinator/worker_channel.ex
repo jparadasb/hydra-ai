@@ -166,6 +166,31 @@ defmodule Coordinator.WorkerChannel do
     {:noreply, socket}
   end
 
+  # Progress reports. No reply, for the same reason `result_chunk` gets none: an ack per frame
+  # doubles the message rate to confirm something the next frame already implies. Unlike a
+  # chunk, this one is persisted — it is what a disconnected caller comes back to read.
+  def handle_in("job_progress", payload, socket) do
+    WorkerSession.handle_progress(payload)
+    {:noreply, socket}
+  end
+
+  # The job paused rather than finished. The worker has released it, so the lease is finished
+  # here even though the job is not — it is waiting on the caller now, not on a worker.
+  def handle_in("input_request", %{"job_id" => job_id, "lease_id" => lease_id} = payload, socket)
+      when is_binary(job_id) and is_binary(lease_id) do
+    case WorkerSession.handle_input_request(payload) do
+      {:ok, _record} ->
+        {:reply, :ok, finish_lease(socket, job_id, lease_id, :ok)}
+
+      {:error, reason} ->
+        {:reply, {:error, %{reason: to_string(reason)}},
+         finish_lease(socket, job_id, lease_id, :ok)}
+    end
+  end
+
+  def handle_in("input_request", _payload, socket),
+    do: {:reply, {:error, %{reason: "invalid_input_request"}}, socket}
+
   def handle_in("result", payload, socket) do
     case WorkerSession.handle_result(payload) do
       {:ok, _clean} ->
@@ -184,6 +209,19 @@ defmodule Coordinator.WorkerChannel do
 
     WorkerRegistry.update(self(), worker)
     {:reply, :ok, assign(socket, :worker, worker)}
+  end
+
+  # A worker newer than this coordinator may send an event this node has never heard of. Without
+  # this clause that raises `FunctionClauseError`, which kills the channel and drops every job
+  # the worker is running — a rollout hazard rather than a protocol one, since the fleet updates
+  # independently of the coordinator. Refuse the message, keep the connection.
+  def handle_in(event, _payload, socket) do
+    Logger.debug("unknown worker event",
+      event: event,
+      worker_id: socket.assigns[:worker_id]
+    )
+
+    {:reply, {:error, %{reason: "unknown_event"}}, socket}
   end
 
   defp now_ms, do: System.monotonic_time(:millisecond)

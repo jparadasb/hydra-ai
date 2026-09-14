@@ -26,15 +26,14 @@ defmodule Coordinator.ApiRouter do
   use Plug.Router
   require Logger
 
+  alias Coordinator.{Models, Sse}
+
   # Slow local backends chewing a large agent system prompt routinely
   # need >60s for a single completion. Streaming requests heartbeat past edge-proxy idle
   # windows; non-streaming callers behind Cloudflare still hit its ~100s TTFB limit and
   # should send `x-hydra-timeout-ms` / stream instead.
   @default_timeout_ms 300_000
   @max_timeout_ms 600_000
-  # While a streaming job runs, emit an SSE keepalive at least this often so an edge proxy
-  # (Cloudflare's ~100s idle/TTFB window -> 524) never sees a silent connection. Well under 100s.
-  @heartbeat_ms 15_000
   # Job privacy levels a caller may request. Declared here, with the other attributes, because
   # a module attribute reads as nil in any function compiled before its definition.
   @privacy_levels ~w(public private sensitive local_only)
@@ -86,7 +85,7 @@ defmodule Coordinator.ApiRouter do
   get "/v1/models" do
     case admit(conn) do
       {:ok, _caller} ->
-        models = list_models()
+        models = Models.list()
         # `data` is the OpenAI shape; `models` is accepted by Codex's provider model loader.
         json(conn, 200, %{"object" => "list", "data" => models, "models" => models})
 
@@ -98,7 +97,7 @@ defmodule Coordinator.ApiRouter do
   get "/v1/models/:id" do
     case admit(conn) do
       {:ok, _caller} ->
-        case Enum.find(list_models(), &(&1["id"] == id)) do
+        case Enum.find(Models.list(), &(&1["id"] == id)) do
           nil -> error(conn, 404, "model '#{id}' not found", "invalid_request_error")
           model -> json(conn, 200, model)
         end
@@ -108,48 +107,40 @@ defmodule Coordinator.ApiRouter do
     end
   end
 
-  match _ do
-    error(conn, 404, "unknown endpoint", "invalid_request_error")
+  # Collect a job by id, after the request that created it is gone.
+  #
+  # The OpenAI API has no such concept, which is exactly the gap: a client whose stream dropped
+  # had no way back to its own job, so abandoning one meant losing it. The response id is
+  # already `chatcmpl-<job_id>`, so a client that got any part of a stream already holds the
+  # handle — nothing new has to be correlated.
+  get "/v1/jobs/:id" do
+    case admit(conn) do
+      {:ok, caller} ->
+        case owned_job(conn, id, caller) do
+          {:ok, job} -> json(conn, 200, Coordinator.Mcp.TaskView.render(job))
+          {:error, conn} -> conn
+        end
+
+      {:error, code, msg, type, headers} ->
+        error(conn, code, msg, type, headers)
+    end
   end
 
-  # ---- models -------------------------------------------------------------------------------
+  get "/v1/jobs/:id/result" do
+    case admit(conn) do
+      {:ok, caller} ->
+        case owned_job(conn, id, caller) do
+          {:ok, job} -> json(conn, 200, Coordinator.Mcp.TaskView.result(job))
+          {:error, conn} -> conn
+        end
 
-  # OpenAI-shaped model list, aggregated from the live worker registry: every model a connected
-  # worker advertises for the front-door's routing capability, deduped by name (first worker
-  # wins for `owned_by`). Reflects what a chat completion can actually be served by right now.
-  defp list_models do
-    capability = Application.get_env(:coordinator, :api_capability, "chat")
-    created = System.system_time(:second)
+      {:error, code, msg, type, headers} ->
+        error(conn, code, msg, type, headers)
+    end
+  end
 
-    Coordinator.WorkerRegistry.list()
-    |> Enum.flat_map(fn worker ->
-      worker.models
-      |> Enum.filter(&(capability in &1.capabilities))
-      |> Enum.map(fn model ->
-        %{
-          "id" => model.name,
-          # Codex's model loader consumes the extended `models` list and requires a slug.
-          # Keep it identical to the public model id for OpenAI-compatible clients.
-          "slug" => model.name,
-          "display_name" => model.name,
-          "description" => "Hydra model #{model.name}",
-          "default_reasoning_level" => "medium",
-          "supported_reasoning_levels" => [
-            %{"effort" => "low", "description" => "Fast responses with lighter reasoning"},
-            %{"effort" => "medium", "description" => "Balances speed and reasoning depth"},
-            %{"effort" => "high", "description" => "Deeper reasoning for difficult tasks"}
-          ],
-          "shell_type" => "unified_exec",
-          "visibility" => "list",
-          "supported_in_api" => true,
-          "object" => "model",
-          "created" => created,
-          "owned_by" => worker.provider_name || "hydra"
-        }
-      end)
-    end)
-    |> Enum.uniq_by(& &1["id"])
-    |> Enum.sort_by(& &1["id"])
+  match _ do
+    error(conn, 404, "unknown endpoint", "invalid_request_error")
   end
 
   # ---- chat completions ---------------------------------------------------------------------
@@ -489,9 +480,13 @@ defmodule Coordinator.ApiRouter do
       {:ok, conn, _, _} ->
         response_error(conn, "worker returned no usable output", sequence)
 
-      {:timeout, conn} ->
+      {:deadline, conn} ->
         cancel_job(job_id)
         response_error(conn, "no worker completed the job in time", sequence)
+
+      {:disconnected, conn} ->
+        abandon_job(conn, job_id)
+        conn
     end
   end
 
@@ -615,9 +610,7 @@ defmodule Coordinator.ApiRouter do
   end
 
   defp requested_model_available(%{"model" => model}) when is_binary(model) and model != "" do
-    models = list_models()
-
-    if models == [] or Enum.any?(models, &(&1["id"] == model)),
+    if Models.available?(model),
       do: :ok,
       else: {:error, {:model_unavailable, model}}
   end
@@ -639,7 +632,12 @@ defmodule Coordinator.ApiRouter do
            payload: payload,
            # Attribution travels with the job: the usage row written when it completes reads
            # the key from here, not from the worker's (untrusted) result.
-           api_token_id: caller.token_id
+           api_token_id: caller.token_id,
+           # Every job carries an owner, including the ones submitted here. The OpenAI door has
+           # no way to ask for a job by id, so it never reads this back — but a job submitted
+           # here and a job submitted over MCP have to be the same kind of row.
+           owner_scope: Coordinator.ApiAuth.caller_scope(caller),
+           source: "openai"
          }) do
       {:ok, record} -> {:ok, record}
       {:error, reason} -> {:error, {:submit, reason}}
@@ -788,17 +786,11 @@ defmodule Coordinator.ApiRouter do
     created = System.system_time(:second)
     model0 = params["model"] || "hydra"
 
-    conn =
-      conn
-      |> put_resp_content_type("text/event-stream")
-      |> put_resp_header("cache-control", "no-cache")
-      # Ask nginx/proxies not to buffer, so chunks flush immediately.
-      |> put_resp_header("x-accel-buffering", "no")
-      |> send_chunked(200)
+    conn = Sse.open(conn)
 
     # First byte now (assistant role delta) so the edge proxy sees the stream open immediately.
     {conn, stream_open?} =
-      case chunk(conn, sse(chunk_map(id, created, model0, %{"role" => "assistant"}, nil))) do
+      case chunk(conn, Sse.event(chunk_map(id, created, model0, %{"role" => "assistant"}, nil))) do
         {:ok, conn} -> {conn, true}
         {:error, _} -> {conn, false}
       end
@@ -808,7 +800,7 @@ defmodule Coordinator.ApiRouter do
     # fragments as `content`.
     emit_delta = fn conn, delta, reasoning? ->
       field = if reasoning?, do: "reasoning_content", else: "content"
-      chunk(conn, sse(chunk_map(id, created, model0, %{field => delta}, nil)))
+      chunk(conn, Sse.event(chunk_map(id, created, model0, %{field => delta}, nil)))
     end
 
     if stream_open? do
@@ -822,9 +814,14 @@ defmodule Coordinator.ApiRouter do
         {:ok, conn, _other, _streamed?} ->
           stream_error(conn, id, created, model0, "worker returned no usable output")
 
-        {:timeout, conn} ->
+        {:deadline, conn} ->
+          # The caller's own deadline passed. The job cannot still be useful to them.
           cancel_job(job_id)
           stream_error(conn, id, created, model0, "no worker completed the job in time")
+
+        {:disconnected, conn} ->
+          abandon_job(conn, job_id)
+          conn
       end
     else
       cancel_job(job_id)
@@ -878,7 +875,7 @@ defmodule Coordinator.ApiRouter do
     (content_deltas ++
        tool_call_deltas ++
        [chunk_map(id, created, model, %{}, finish_reason(tool_calls)), usage_chunk])
-    |> send_events(conn)
+    |> Sse.send_events(conn)
   end
 
   # Once the stream is open we can't set an HTTP error status, so surface the failure as a
@@ -888,7 +885,7 @@ defmodule Coordinator.ApiRouter do
       chunk_map(id, created, model, %{"content" => message}, nil),
       chunk_map(id, created, model, %{}, "error")
     ]
-    |> send_events(conn)
+    |> Sse.send_events(conn)
   end
 
   defp chunk_map(id, created, model, delta, finish) do
@@ -901,21 +898,8 @@ defmodule Coordinator.ApiRouter do
     }
   end
 
-  defp sse(map), do: "data: " <> Jason.encode!(map) <> "\n\n"
-
-  # Encode + write each event, then `[DONE]`. Stops early if the client hung up.
-  defp send_events(events, conn) do
-    (Enum.map(events, &sse/1) ++ ["data: [DONE]\n\n"])
-    |> Enum.reduce_while(conn, fn event, conn ->
-      case chunk(conn, event) do
-        {:ok, conn} -> {:cont, conn}
-        {:error, _} -> {:halt, conn}
-      end
-    end)
-  end
-
   # Like `await_result` but relays this job's streamed chunks through `emit_delta` as they
-  # arrive, writes an SSE keepalive every `@heartbeat_ms` while nothing does, and carries the
+  # arrive, writes an SSE keepalive every `Sse.heartbeat_ms/0` while nothing does, and carries the
   # (mutated) conn back so the caller can keep streaming. A failed write means the client
   # disconnected -> stop waiting. Returns whether any content chunks were relayed, so the
   # caller knows not to resend the full content from the final result.
@@ -924,16 +908,13 @@ defmodule Coordinator.ApiRouter do
     do_await_hb(conn, job_id, deadline, emit_delta, false)
   end
 
-  # Overridable (tests use a tiny interval); defaults to the module attribute.
-  defp heartbeat_ms, do: Application.get_env(:coordinator, :api_heartbeat_ms, @heartbeat_ms)
-
   defp do_await_hb(conn, job_id, deadline, emit_delta, streamed?) do
     remaining = deadline - System.monotonic_time(:millisecond)
 
     if remaining <= 0 do
-      {:timeout, conn}
+      {:deadline, conn}
     else
-      wait = min(remaining, heartbeat_ms())
+      wait = min(remaining, Sse.heartbeat_ms())
 
       receive do
         {:job_result, %{"job_id" => ^job_id} = result} ->
@@ -955,181 +936,83 @@ defmodule Coordinator.ApiRouter do
               do_await_hb(conn, job_id, deadline, emit_delta, streamed? or not reasoning?)
 
             {:error, _} ->
-              {:timeout, conn}
+              # A failed write is the client hanging up, not the job running out of time. They
+              # used to be the same value, so the only available policy was to treat a
+              # disconnect as a deadline and kill the job.
+              {:disconnected, conn}
           end
 
         {:job_chunk, _malformed} ->
           do_await_hb(conn, job_id, deadline, emit_delta, streamed?)
       after
         wait ->
-          case chunk(conn, ": ping\n\n") do
+          case chunk(conn, Sse.ping()) do
             {:ok, conn} -> do_await_hb(conn, job_id, deadline, emit_delta, streamed?)
-            {:error, _} -> {:timeout, conn}
+            {:error, _} -> {:disconnected, conn}
           end
       end
     end
   end
 
-  # Persist cancellation before notifying the worker. A late result then cannot resurrect or
-  # requeue the abandoned job. Pending jobs have no worker to notify and stay terminal.
+  # The caller's deadline passed. `Coordinator.Jobs.cancel/1` persists that and signals the
+  # worker, so a late result cannot resurrect the job.
   defp cancel_job(job_id) do
-    case Coordinator.Jobs.cancel(job_id) do
-      {:ok, %{status: "cancelled", worker_id: worker_id, lease_id: lease_id}}
-      when is_binary(worker_id) and is_binary(lease_id) ->
-        Coordinator.WorkerChannel.cancel(worker_id, job_id, lease_id)
+    Coordinator.Jobs.cancel(job_id)
+    :ok
+  end
+
+  @doc false
+  # The client hung up. Whether that should stop the job is a policy, not a fact.
+  #
+  # The default stays `:cancel` — the behaviour this has always had. A detached job with nobody
+  # coming back for it is precisely the orphaned work issue #85 complains about, and detaching
+  # is only safe because `GET /v1/jobs/:id` now exists to collect one. A caller who wants that
+  # has to ask for it, per request or per deployment.
+  defp abandon_job(conn, job_id) do
+    case disconnect_policy(conn) do
+      :detach ->
+        Coordinator.Telemetry.emit([:hydra, :job, :detached], %{count: 1})
+
+        Logger.info("client disconnected; job left running",
+          job_id: job_id,
+          retrieve: "GET /v1/jobs/" <> job_id
+        )
+
+        :ok
 
       _ ->
-        :ok
+        cancel_job(job_id)
+    end
+  end
+
+  defp disconnect_policy(conn) do
+    conn
+    |> get_req_header("x-hydra-on-disconnect")
+    |> List.first()
+    |> Coordinator.Delegation.on_client_disconnect()
+  end
+
+  # A job belonging to another key reads exactly like one that does not exist, so an id cannot
+  # be used to find out whose jobs are real.
+  defp owned_job(conn, id, caller) do
+    case Coordinator.Jobs.get_for_caller(id, Coordinator.ApiAuth.caller_scope(caller)) do
+      nil -> {:error, error(conn, 404, "no such job", "invalid_request_error")}
+      job -> {:ok, job}
     end
   end
 
   # ---- admission: identity, then rate ---------------------------------------------------------
 
-  # The front door. Authenticate, then charge the request against the caller's rate window.
-  # Returns `{:ok, caller}` — the identity every downstream artifact is attributed to — or a
-  # ready-to-render error.
-  defp admit(conn) do
-    with {:ok, caller} <- authorize(conn) do
-      case Coordinator.RateLimiter.check_rate(caller.key) do
-        :ok ->
-          {:ok, caller}
+  # Authentication, rate and concurrency live in `Coordinator.ApiAuth` so the MCP surface shares
+  # one door rather than growing a second copy of it. `ApiAuth` renders nothing; the OpenAI error
+  # envelope is this router's concern, and MCP wraps the same failures as JSON-RPC errors.
+  defp admit(conn), do: Coordinator.ApiAuth.admit(conn)
 
-        {:error, :rate_limited, retry_after} ->
-          Coordinator.Telemetry.emit([:hydra, :api, :rate_limited], %{count: 1}, %{kind: "rate"})
-
-          Logger.info("request rate limited",
-            caller: inspect(caller.key),
-            retry_after: retry_after
-          )
-
-          {:error, 429, "rate limit exceeded, retry in #{retry_after}s", "rate_limit_error",
-           [{"retry-after", Integer.to_string(retry_after)}]}
-      end
-    end
-  end
-
-  # Hold one of the caller's concurrency slots for the lifetime of the request. A request that
-  # pins a Bandit process, a subscription and a job row for up to `@max_timeout_ms` is exactly
-  # what the cap exists to bound, so the slot covers the whole handler — streaming included —
-  # and is released even if it raises. (A caller that vanishes mid-stream is covered too: the
-  # limiter monitors this process.)
   defp metered(conn, caller, handler) do
-    case Coordinator.RateLimiter.acquire(caller.key) do
-      :ok ->
-        try do
-          handler.(conn)
-        after
-          Coordinator.RateLimiter.release(caller.key)
-        end
-
-      {:error, :too_many_concurrent} ->
-        Coordinator.Telemetry.emit(
-          [:hydra, :api, :rate_limited],
-          %{count: 1},
-          %{kind: "concurrency"}
-        )
-
-        Logger.info("request refused at the concurrency cap", caller: inspect(caller.key))
-
-        error(
-          conn,
-          429,
-          "too many concurrent requests for this key",
-          "rate_limit_error",
-          [{"retry-after", "1"}]
-        )
+    case Coordinator.ApiAuth.metered(caller, fn -> handler.(conn) end) do
+      {:ok, conn} -> conn
+      {:error, code, msg, type, headers} -> error(conn, code, msg, type, headers)
     end
-  end
-
-  # ---- auth + helpers -----------------------------------------------------------------------
-
-  # Gateway access control. A request is authorized by EITHER the legacy env master key
-  # (`:api_token`, constant-time compared) OR an admin-issued key from the `api_tokens` table
-  # (`Coordinator.ApiTokens`, looked up by hash). The door is only *enforced* when a credential
-  # is required — i.e. an env master key is set, or `:require_api_token` is true (set that in
-  # prod so admin-issued keys alone can gate the door). Otherwise it stays open for loopback dev.
-  #
-  # Success carries a caller identity rather than a bare `:ok`: `token_id` is the `api_tokens`
-  # row to attribute jobs and usage to (nil for the env master key and for an open door), and
-  # `key` is the bucket the rate/concurrency limits count against. An unidentified caller is
-  # bucketed by peer IP so an open or master-key door is still bounded.
-  defp authorize(conn) do
-    presented =
-      case get_req_header(conn, "authorization") do
-        ["Bearer " <> token] -> token
-        _ -> nil
-      end
-
-    case credential(presented) do
-      {:ok, token_id} when is_binary(token_id) ->
-        {:ok, %{token_id: token_id, key: {:token, token_id}}}
-
-      {:ok, nil} ->
-        {:ok, %{token_id: nil, key: {:ip, peer_ip(conn)}}}
-
-      :error ->
-        cond do
-          auth_required?() and is_nil(presented) ->
-            reject_auth(conn, "missing_token", "missing bearer token")
-
-          auth_required?() ->
-            reject_auth(conn, "invalid_key", "invalid api key")
-
-          true ->
-            {:ok, %{token_id: nil, key: {:ip, peer_ip(conn)}}}
-        end
-    end
-  end
-
-  # An auth failure was previously silent, so a misconfigured client and an attacker looked
-  # identical from outside: both produced nothing. The peer address is logged, never the
-  # credential that was presented.
-  defp reject_auth(conn, reason, message) do
-    Coordinator.Telemetry.emit([:hydra, :api, :auth, :rejected], %{count: 1}, %{reason: reason})
-
-    Logger.warning("front-door auth rejected",
-      reason: reason,
-      peer_ip: peer_ip(conn),
-      path: conn.request_path
-    )
-
-    {:error, 401, message, "invalid_request_error", []}
-  end
-
-  # `{:ok, token_id}` for an admin-issued key, `{:ok, nil}` for the env master key (valid, but
-  # not a row we can attribute to), `:error` for anything else.
-  defp credential(nil), do: :error
-
-  defp credential(presented) do
-    master = Application.get_env(:coordinator, :api_token)
-
-    if is_binary(master) and master != "" and Plug.Crypto.secure_compare(presented, master) do
-      {:ok, nil}
-    else
-      case Coordinator.ApiTokens.verify(presented) do
-        {:ok, token_id} -> {:ok, token_id}
-        {:error, :invalid} -> :error
-      end
-    end
-  end
-
-  # Peer address as a rate-limit bucket. Behind an ingress this is the proxy unless it sets
-  # `x-forwarded-for`; the first hop in that header is the client the proxy saw.
-  defp peer_ip(conn) do
-    case get_req_header(conn, "x-forwarded-for") do
-      [value | _] ->
-        value |> String.split(",") |> List.first() |> String.trim()
-
-      [] ->
-        conn.remote_ip |> :inet.ntoa() |> to_string()
-    end
-  end
-
-  defp auth_required? do
-    master = Application.get_env(:coordinator, :api_token)
-
-    (is_binary(master) and master != "") or
-      Application.get_env(:coordinator, :require_api_token, false)
   end
 
   defp resolve_timeout(conn, params) do

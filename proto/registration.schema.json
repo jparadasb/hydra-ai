@@ -69,6 +69,8 @@
     "trust_level": { "type": "string" },
     "version": { "type": "string", "description": "Worker build identity (e.g. \"0.1.0 (abc1234)\"). Informational; never gates routing." },
     "supports_cancel_ack": { "type": "boolean", "default": false },
+    "supports_input_requests": { "type": "boolean", "default": false, "description": "Worker recognizes the reserved hydra_request_context tool and pauses the job rather than returning its call as an ordinary result. Routing treats this as a hard constraint for jobs that enable context requests." },
+    "supports_progress": { "type": "boolean", "default": false, "description": "Worker emits job_progress.schema.json while a job runs. Lets the coordinator tell a worker that cannot report progress from one that has gone quiet." },
     "supports_lease_heartbeat": { "type": "boolean", "default": false }
   }
 }

@@ -32,11 +32,34 @@ defmodule Coordinator.Router do
   end
 
   # A requested model is an exact constraint. Never silently substitute another model.
-  defp prefer_requested_model(eligible, %Job{model: nil}), do: eligible
+  #
+  # `model_policy` is the other way to ask, and it exists because the two doors want different
+  # things. An OpenAI client names a model and means it — substituting one would change what its
+  # response says it is. A delegating agent usually wants "whatever can do this, cheaply", and
+  # naming a model it cannot verify is available is how a submission 404s for no good reason.
+  #
+  # A policy narrows and orders; it never widens. `require_local` is a hard filter because it is
+  # a refusal to leave the machine in all but name, and `prefer` is a scoring bonus so that an
+  # unavailable preference degrades to "something else eligible" rather than to nothing.
+  defp prefer_requested_model(eligible, %Job{model: nil} = job) do
+    case require_local(job) do
+      true -> Enum.filter(eligible, &Worker.has_local?(&1, job.capability))
+      _ -> eligible
+    end
+  end
 
   defp prefer_requested_model(eligible, %Job{model: model} = job) do
     Enum.filter(eligible, &Worker.serves_model?(&1, job.capability, model))
   end
+
+  defp require_local(%Job{payload: %{"model_policy" => %{"require_local" => true}}}), do: true
+  defp require_local(_), do: false
+
+  defp preferred_models(%Job{payload: %{"model_policy" => %{"prefer" => prefer}}})
+       when is_list(prefer),
+       do: prefer
+
+  defp preferred_models(_), do: []
 
   @doc "All workers eligible to run `job` (capability + privacy + availability)."
   @spec eligible(Job.t(), [Worker.t()]) :: [Worker.t()]
@@ -48,8 +71,25 @@ defmodule Coordinator.Router do
       job.privacy in w.accepted_job_levels and
       Worker.serves?(w, job.capability) and
       not over_capacity?(w) and
-      privacy_compatible?(job, w)
+      privacy_compatible?(job, w) and
+      can_request_context?(job, w)
   end
+
+  # A job carrying the reserved `hydra_request_context` tool must go to a worker that knows to
+  # pause on it. An older worker would run the tool call straight through and hand the caller a
+  # tool call for a tool they never defined — a confusing result rather than a pause.
+  defp can_request_context?(%Job{} = job, %Worker{} = w) do
+    not context_requests?(job) or Map.get(w, :supports_input_requests, false)
+  end
+
+  defp context_requests?(%Job{payload: %{"tools" => tools}}) when is_list(tools) do
+    Enum.any?(
+      tools,
+      &(get_in(&1, ["function", "name"]) == Coordinator.Mcp.ContextRequest.tool_name())
+    )
+  end
+
+  defp context_requests?(_), do: false
 
   # The core privacy table.
   defp privacy_compatible?(%Job{privacy: :public}, _w), do: true
@@ -83,7 +123,28 @@ defmodule Coordinator.Router do
     # that keeps failing loses work without an admin having to intervene, and earns it back by
     # succeeding.
     failures = w.recent_failures * 25
-    load + latency + external + trust + failures
+    # Ordered, not filtered: a preference the fleet cannot satisfy right now should cost the job
+    # a slower model, not a refusal. Large enough to outrank load and latency, small enough that
+    # the external penalty still dominates — a preferred model on an external provider does not
+    # beat an unpreferred local one when the job asked to stay local.
+    preference = preference_bonus(job, w)
+    load + latency + external + trust + failures + preference
+  end
+
+  # Each position down the caller's list costs a little. The first preference that a worker can
+  # actually serve is the one that counts.
+  defp preference_bonus(%Job{} = job, %Worker{} = w) do
+    case preferred_models(job) do
+      [] ->
+        0
+
+      prefer ->
+        prefer
+        |> Enum.with_index()
+        |> Enum.find_value(30, fn {name, index} ->
+          if Worker.serves_model?(w, job.capability, name), do: index * 5
+        end)
+    end
   end
 
   # Admin-granted (`Coordinator.WorkerPolicies`), not self-declared.
