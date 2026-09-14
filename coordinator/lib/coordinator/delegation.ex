@@ -117,6 +117,25 @@ defmodule Coordinator.Delegation do
 
   def resolve_privacy(level, _), do: {:error, {:bad_privacy, level}}
 
+  @doc """
+  What to do with a job whose streaming client hung up.
+
+  Separated from the deadline case because they are different events that used to share a return
+  value: a failed write means the caller went away, and a caller going away does not mean the
+  work stopped being worth doing.
+
+  `:cancel` remains the default — the behaviour this has always had. A detached job that nobody
+  comes back for is exactly the orphaned work issue #85 complains about, and detaching only
+  became safe once `GET /v1/jobs/:id` existed to collect one. Opting in is per request
+  (`x-hydra-on-disconnect`) or per deployment.
+  """
+  @spec on_client_disconnect(String.t() | nil) :: :cancel | :detach
+  def on_client_disconnect("detach"), do: :detach
+  def on_client_disconnect("cancel"), do: :cancel
+
+  def on_client_disconnect(_),
+    do: Application.get_env(:coordinator, :on_client_disconnect, :cancel)
+
   defp check_model(%{payload: %{"model" => model}}) when is_binary(model) and model != "" do
     if Models.available?(model), do: :ok, else: {:error, {:model_unavailable, model}}
   end

@@ -325,7 +325,16 @@ http_headers = { Authorization = "Bearer ${HYDRA_API_TOKEN}" }
 Protocol revisions `2026-07-28` (current) and `2025-11-25` and earlier are both served, since
 clients are split across the revision that removed the `initialize` handshake.
 
-`/v1/chat/completions` is unaffected and stays supported.
+`/v1/chat/completions` is unaffected and stays supported. Two things it gains from this work:
+
+- **`GET /v1/jobs/:id`** and **`/v1/jobs/:id/result`** — collect a job whose stream dropped. The
+  response id is already `chatcmpl-<job_id>`, so a client that received any part of a stream
+  already holds the handle. A job belonging to another key reads exactly like one that does not
+  exist.
+- **`x-hydra-on-disconnect: detach`** — leave the job running when a streaming client hangs up,
+  instead of cancelling it. Default stays `cancel` (`HYDRA_ON_CLIENT_DISCONNECT` changes it
+  deployment-wide). A deadline that actually passes always cancels; only a disconnect is a
+  policy.
 
 ## Observability
 

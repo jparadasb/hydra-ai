@@ -107,6 +107,38 @@ defmodule Coordinator.ApiRouter do
     end
   end
 
+  # Collect a job by id, after the request that created it is gone.
+  #
+  # The OpenAI API has no such concept, which is exactly the gap: a client whose stream dropped
+  # had no way back to its own job, so abandoning one meant losing it. The response id is
+  # already `chatcmpl-<job_id>`, so a client that got any part of a stream already holds the
+  # handle — nothing new has to be correlated.
+  get "/v1/jobs/:id" do
+    case admit(conn) do
+      {:ok, caller} ->
+        case owned_job(conn, id, caller) do
+          {:ok, job} -> json(conn, 200, Coordinator.Mcp.TaskView.render(job))
+          {:error, conn} -> conn
+        end
+
+      {:error, code, msg, type, headers} ->
+        error(conn, code, msg, type, headers)
+    end
+  end
+
+  get "/v1/jobs/:id/result" do
+    case admit(conn) do
+      {:ok, caller} ->
+        case owned_job(conn, id, caller) do
+          {:ok, job} -> json(conn, 200, Coordinator.Mcp.TaskView.result(job))
+          {:error, conn} -> conn
+        end
+
+      {:error, code, msg, type, headers} ->
+        error(conn, code, msg, type, headers)
+    end
+  end
+
   match _ do
     error(conn, 404, "unknown endpoint", "invalid_request_error")
   end
@@ -448,9 +480,13 @@ defmodule Coordinator.ApiRouter do
       {:ok, conn, _, _} ->
         response_error(conn, "worker returned no usable output", sequence)
 
-      {:timeout, conn} ->
+      {:deadline, conn} ->
         cancel_job(job_id)
         response_error(conn, "no worker completed the job in time", sequence)
+
+      {:disconnected, conn} ->
+        abandon_job(conn, job_id)
+        conn
     end
   end
 
@@ -778,9 +814,14 @@ defmodule Coordinator.ApiRouter do
         {:ok, conn, _other, _streamed?} ->
           stream_error(conn, id, created, model0, "worker returned no usable output")
 
-        {:timeout, conn} ->
+        {:deadline, conn} ->
+          # The caller's own deadline passed. The job cannot still be useful to them.
           cancel_job(job_id)
           stream_error(conn, id, created, model0, "no worker completed the job in time")
+
+        {:disconnected, conn} ->
+          abandon_job(conn, job_id)
+          conn
       end
     else
       cancel_job(job_id)
@@ -871,7 +912,7 @@ defmodule Coordinator.ApiRouter do
     remaining = deadline - System.monotonic_time(:millisecond)
 
     if remaining <= 0 do
-      {:timeout, conn}
+      {:deadline, conn}
     else
       wait = min(remaining, Sse.heartbeat_ms())
 
@@ -895,7 +936,10 @@ defmodule Coordinator.ApiRouter do
               do_await_hb(conn, job_id, deadline, emit_delta, streamed? or not reasoning?)
 
             {:error, _} ->
-              {:timeout, conn}
+              # A failed write is the client hanging up, not the job running out of time. They
+              # used to be the same value, so the only available policy was to treat a
+              # disconnect as a deadline and kill the job.
+              {:disconnected, conn}
           end
 
         {:job_chunk, _malformed} ->
@@ -904,17 +948,57 @@ defmodule Coordinator.ApiRouter do
         wait ->
           case chunk(conn, Sse.ping()) do
             {:ok, conn} -> do_await_hb(conn, job_id, deadline, emit_delta, streamed?)
-            {:error, _} -> {:timeout, conn}
+            {:error, _} -> {:disconnected, conn}
           end
       end
     end
   end
 
-  # The caller gave up — a deadline passed, or they hung up mid-stream. `Coordinator.Jobs.cancel/1`
-  # persists that and signals the worker; nothing here depends on which of the two happened.
+  # The caller's deadline passed. `Coordinator.Jobs.cancel/1` persists that and signals the
+  # worker, so a late result cannot resurrect the job.
   defp cancel_job(job_id) do
     Coordinator.Jobs.cancel(job_id)
     :ok
+  end
+
+  @doc false
+  # The client hung up. Whether that should stop the job is a policy, not a fact.
+  #
+  # The default stays `:cancel` — the behaviour this has always had. A detached job with nobody
+  # coming back for it is precisely the orphaned work issue #85 complains about, and detaching
+  # is only safe because `GET /v1/jobs/:id` now exists to collect one. A caller who wants that
+  # has to ask for it, per request or per deployment.
+  defp abandon_job(conn, job_id) do
+    case disconnect_policy(conn) do
+      :detach ->
+        Coordinator.Telemetry.emit([:hydra, :job, :detached], %{count: 1})
+
+        Logger.info("client disconnected; job left running",
+          job_id: job_id,
+          retrieve: "GET /v1/jobs/" <> job_id
+        )
+
+        :ok
+
+      _ ->
+        cancel_job(job_id)
+    end
+  end
+
+  defp disconnect_policy(conn) do
+    conn
+    |> get_req_header("x-hydra-on-disconnect")
+    |> List.first()
+    |> Coordinator.Delegation.on_client_disconnect()
+  end
+
+  # A job belonging to another key reads exactly like one that does not exist, so an id cannot
+  # be used to find out whose jobs are real.
+  defp owned_job(conn, id, caller) do
+    case Coordinator.Jobs.get_for_caller(id, Coordinator.ApiAuth.caller_scope(caller)) do
+      nil -> {:error, error(conn, 404, "no such job", "invalid_request_error")}
+      job -> {:ok, job}
+    end
   end
 
   # ---- admission: identity, then rate ---------------------------------------------------------

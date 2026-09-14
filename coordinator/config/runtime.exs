@@ -58,6 +58,14 @@ case Integer.parse(System.get_env("HYDRA_MAX_RESULT_BYTES") || "") do
   _ -> :ok
 end
 
+# What to do when a streaming client hangs up before its job finishes. `cancel` (the default,
+# and the behaviour this has always had) stops the job; `detach` leaves it running to be
+# collected later with GET /v1/jobs/:id. Per-request override: `x-hydra-on-disconnect`.
+case System.get_env("HYDRA_ON_CLIENT_DISCONNECT") do
+  "detach" -> config :coordinator, :on_client_disconnect, :detach
+  _ -> config :coordinator, :on_client_disconnect, :cancel
+end
+
 # --- MCP endpoint -----------------------------------------------------------------------------
 
 # The agent-facing door. On by default: it is behind the same gateway key as /v1, and a
