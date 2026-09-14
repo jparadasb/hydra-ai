@@ -69,8 +69,25 @@ defmodule Coordinator.Jobs do
 
   defp enqueue_lease(job_id, schedule_in_seconds \\ 0) do
     opts = if schedule_in_seconds > 0, do: [schedule_in: schedule_in_seconds], else: []
+
+    # Oban orders work of equal readiness by priority. Worth noting what this does and does not
+    # buy: LeaseWorker is one Oban job per Hydra job and snoozes when no worker is free, so this
+    # orders *retries and snoozed assignments*, not a global queue of pending work. A real
+    # priority queue would need a scheduler, which is the issue's stated non-goal.
+    opts =
+      case get(job_id) do
+        %JobRecord{priority: p} when is_integer(p) ->
+          Keyword.put(opts, :priority, clamp_priority(p))
+
+        _ ->
+          opts
+      end
+
     %{job_id: job_id} |> Coordinator.LeaseWorker.new(opts) |> Oban.insert()
   end
+
+  # Oban's range. Out-of-range values are the caller's mistake, not a reason to refuse the job.
+  defp clamp_priority(p), do: p |> max(0) |> min(3)
 
   @doc """
   Submit a job on behalf of a caller, returning the existing one if they have submitted it
@@ -843,6 +860,16 @@ defmodule Coordinator.Jobs do
     end
   end
 
+  # Counts everything the job has spent, across retries and resumed rounds — which is the point:
+  # a job that can pause and resume is the first kind here that can grow without ever failing,
+  # so the attempt counter cannot be what stops it.
+  defp over_budget?(%JobRecord{max_total_tokens: limit} = record)
+       when is_integer(limit) and limit > 0 do
+    (record.input_tokens || 0) + (record.output_tokens || 0) >= limit
+  end
+
+  defp over_budget?(_), do: false
+
   defp apply_result(record, result) do
     status = result["status"]
 
@@ -853,6 +880,18 @@ defmodule Coordinator.Jobs do
         # before it goes terminal, so a caller reading the finished job sees real usage.
         {:ok, record} = record_final_usage(record, result)
         update_status(record, "done", result)
+
+      over_budget?(record) ->
+        # The job consumed what it was allowed. Retrying it would spend more of the same budget
+        # on the same failure, which is the runaway a budget exists to stop.
+        Logger.info("job #{record.id} stopped: it reached its token budget")
+
+        update_status(
+          record,
+          "failed",
+          Map.put(result, "reason", "budget_exceeded"),
+          "failed"
+        )
 
       record.attempts >= @max_attempts ->
         Logger.warning(

@@ -321,6 +321,14 @@ http_headers = { Authorization = "Bearer ${HYDRA_API_TOKEN}" }
   this replaces it.
 - **There is no percent-complete**, because generation has no known endpoint. A rising
   generated-token count is the signal that a job is working.
+- **Two ceilings bound spend.** `max_total_tokens` stops one job once it has consumed that much
+  across retries and any rounds spent asking for context; a per-key `monthly_token_limit` (set
+  in `/admin`) refuses new submissions once a key has spent its rolling 30 days. Both are nil by
+  default, and a key with no limit is unlimited.
+- **`allow_context_requests: true`** lets the delegated model pause and ask you for a file it
+  was not given, instead of guessing. `hydra_get_job` then reports the question and a
+  `request_id`; answer with `hydra_provide_input` and the same job continues. It disables live
+  token streaming for that job, since a tool call cannot be recognized halfway through.
 
 Protocol revisions `2026-07-28` (current) and `2025-11-25` and earlier are both served, since
 clients are split across the revision that removed the `initialize` handshake.

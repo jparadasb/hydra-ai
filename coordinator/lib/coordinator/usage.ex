@@ -52,6 +52,34 @@ defmodule Coordinator.Usage do
     |> Repo.one()
   end
 
+  @doc """
+  Whether a key has spent its monthly allowance.
+
+  Checked at submission rather than on the way out: refusing a job before it queues is the only
+  point at which refusing it costs nothing. An agent looping overnight is the case this exists
+  for — it will not notice a slow response, but it will notice being told to stop.
+
+  A key with no limit set is unlimited, which is what every key issued before quotas existed is.
+  """
+  def quota_exceeded?(nil), do: false
+
+  def quota_exceeded?(api_token_id) when is_binary(api_token_id) do
+    case Repo.get(Coordinator.ApiToken, api_token_id) do
+      %{monthly_token_limit: limit} when is_integer(limit) and limit > 0 ->
+        since = DateTime.add(DateTime.utc_now(), -30 * 86_400, :second)
+
+        case tokens_since(api_token_id, since) do
+          used when is_integer(used) and used >= limit -> {true, used, limit}
+          _ -> false
+        end
+
+      _ ->
+        false
+    end
+  end
+
+  def quota_exceeded?(_), do: false
+
   @doc "Every usage row for a key, newest first. Used by the admin console and tests."
   def list_for_token(api_token_id, limit \\ 100) when is_binary(api_token_id) do
     from(u in UsageRecord,

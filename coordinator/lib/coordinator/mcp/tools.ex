@@ -63,6 +63,8 @@ defmodule Coordinator.Mcp.Tools do
         payload: payload,
         metadata: args["metadata"],
         idempotency_key: args["idempotency_key"],
+        max_total_tokens: args["max_total_tokens"],
+        priority: args["priority"],
         source: "mcp"
       }
 
@@ -84,6 +86,12 @@ defmodule Coordinator.Mcp.Tools do
 
         {:error, {:model_unavailable, model}} ->
           err("No connected worker serves '#{model}'. Available now: #{available_models()}.")
+
+        {:error, {:quota_exceeded, used, limit}} ->
+          err(
+            "This key has used #{used} of its #{limit} tokens for the last 30 days. " <>
+              "Nothing will run until the window rolls or the limit is raised."
+          )
 
         {:error, {:too_many_open_jobs, limit}} ->
           err(
@@ -403,6 +411,20 @@ defmodule Coordinator.Mcp.Tools do
             "default" => false,
             "description" =>
               "Let the delegated model pause and ask you for a file or a definition it was not given, instead of guessing. Disables live token streaming for the job, since a tool call cannot be recognized halfway through."
+          },
+          "max_total_tokens" => %{
+            "type" => "integer",
+            "minimum" => 1,
+            "description" =>
+              "Stop the job once it has consumed this many tokens in total, across retries and any rounds spent asking for context. Unbounded if omitted."
+          },
+          "priority" => %{
+            "type" => "integer",
+            "minimum" => 0,
+            "maximum" => 3,
+            "default" => 1,
+            "description" =>
+              "0 is highest. Orders this job's assignment against other queued work; it does not preempt a job already running."
           },
           "max_tokens" => %{"type" => "integer", "minimum" => 1},
           "temperature" => %{"type" => "number"}

@@ -16,13 +16,24 @@ defmodule Coordinator.ApiToken do
     field(:created_by, :string)
     field(:last_used_at, :utc_datetime_usec)
     field(:revoked_at, :utc_datetime_usec)
+    # Tokens this key may consume in a rolling 30 days. Nil is unlimited, which is what every
+    # key issued before quotas existed is.
+    field(:monthly_token_limit, :integer)
 
     timestamps(type: :utc_datetime_usec)
   end
 
   def changeset(record, attrs) do
     record
-    |> cast(attrs, [:id, :label, :token_hash, :created_by, :last_used_at, :revoked_at])
+    |> cast(attrs, [
+      :id,
+      :label,
+      :token_hash,
+      :created_by,
+      :last_used_at,
+      :revoked_at,
+      :monthly_token_limit
+    ])
     |> validate_required([:id, :label, :token_hash])
     |> unique_constraint(:token_hash)
   end

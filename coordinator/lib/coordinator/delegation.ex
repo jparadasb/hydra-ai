@@ -38,6 +38,7 @@ defmodule Coordinator.Delegation do
     end)
 
     with :ok <- check_model(request),
+         :ok <- check_quota(caller),
          :ok <- check_open_jobs(caller) do
       Jobs.submit(%{
         id: job_id,
@@ -48,6 +49,10 @@ defmodule Coordinator.Delegation do
         payload: request.payload,
         metadata: Map.get(request, :metadata),
         idempotency_key: Map.get(request, :idempotency_key),
+        max_total_tokens: Map.get(request, :max_total_tokens),
+        # `||`, not a Map.get default: a caller that named the key and left it empty still means
+        # "no preference", and the column is NOT NULL.
+        priority: Map.get(request, :priority) || 1,
         api_token_id: caller.token_id,
         owner_scope: ApiAuth.caller_scope(caller),
         source: Map.get(request, :source, "mcp")
@@ -141,6 +146,17 @@ defmodule Coordinator.Delegation do
   end
 
   defp check_model(_), do: :ok
+
+  # Refusing before the job queues is the only point at which refusing costs nothing. An agent
+  # looping overnight will not notice a slow response, but it will notice being told to stop.
+  defp check_quota(%{token_id: token_id}) do
+    case Coordinator.Usage.quota_exceeded?(token_id) do
+      {true, used, limit} -> {:error, {:quota_exceeded, used, limit}}
+      _ -> :ok
+    end
+  end
+
+  defp check_quota(_), do: :ok
 
   # A blocking request was its own backpressure: a caller could only have as many jobs running
   # as it was willing to hold connections open for. Submitting asynchronously removes that, so

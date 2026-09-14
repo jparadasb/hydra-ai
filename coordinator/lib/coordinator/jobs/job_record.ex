@@ -55,6 +55,11 @@ defmodule Coordinator.Jobs.JobRecord do
     field(:awaiting_input_until, :utc_datetime_usec)
     field(:last_worker_id, :string)
     field(:input_rounds, :integer, default: 0)
+    # Ceiling on what this job may consume in total, across retries and resumed rounds. Nil is
+    # unbounded. `priority` mirrors the Oban priority the caller asked for, so it is visible on
+    # the row rather than only inside the queue.
+    field(:max_total_tokens, :integer)
+    field(:priority, :integer, default: 1)
     # When the prompt and completion were dropped by `Coordinator.JobRetention`. Nil means the
     # row still carries its text.
     field(:redacted_at, :utc_datetime_usec)
@@ -100,7 +105,9 @@ defmodule Coordinator.Jobs.JobRecord do
       :input_request,
       :awaiting_input_until,
       :last_worker_id,
-      :input_rounds
+      :input_rounds,
+      :max_total_tokens,
+      :priority
     ])
     |> derive_state()
     |> validate_required([:id, :capability, :privacy, :status, :state])
