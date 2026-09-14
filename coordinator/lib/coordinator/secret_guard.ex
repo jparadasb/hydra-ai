@@ -49,6 +49,17 @@ defmodule Coordinator.SecretGuard do
     token_storage tokens_per_second
   )
 
+  # Keys whose value is a correlation identifier, not a credential.
+  #
+  # A model's tool-call id is exactly what the opaque-secret heuristic is built to catch: long,
+  # dense, base64url-ish and whitespace-free. Redacting it is worse than useless — the id is how
+  # a tool response is matched to the call it answers, and two calls redacted to the same
+  # literal become indistinguishable, so answers cannot be routed back to the right question.
+  #
+  # Only the *heuristic* is skipped for these. Every explicit credential pattern still applies,
+  # so an `id` that really does hold `sk-…` is still redacted.
+  @identifier_keys ~w(id tool_call_id request_id job_id lease_id worker_id)
+
   # Value shapes that are credentials wherever they appear. Prefix-and-length rather than a
   # bare prefix: `sk-` on its own matched ordinary prose.
   @secret_value_patterns [
@@ -155,11 +166,17 @@ defmodule Coordinator.SecretGuard do
 
   defp do_redact(map, count) when is_map(map) do
     Enum.reduce(map, {%{}, count}, fn {k, v}, {acc, n} ->
-      if banned_key?(k) and not empty_value?(v) do
-        {Map.put(acc, k, @redaction), n + 1}
-      else
-        {clean, n} = do_redact(v, n)
-        {Map.put(acc, k, clean), n}
+      cond do
+        banned_key?(k) and not empty_value?(v) ->
+          {Map.put(acc, k, @redaction), n + 1}
+
+        # A correlation id survives the entropy heuristic but not the credential patterns.
+        identifier_key?(k) and is_binary(v) ->
+          {Map.put(acc, k, redact_string(v)), n + redaction_count(v)}
+
+        true ->
+          {clean, n} = do_redact(v, n)
+          {Map.put(acc, k, clean), n}
       end
     end)
   end
@@ -221,6 +238,14 @@ defmodule Coordinator.SecretGuard do
   end
 
   defp banned_key?(_), do: false
+
+  defp identifier_key?(k) when is_atom(k), do: identifier_key?(Atom.to_string(k))
+
+  defp identifier_key?(k) when is_binary(k) do
+    k |> String.downcase() |> String.replace(~r/[^a-z0-9]+/, "_") |> Kernel.in(@identifier_keys)
+  end
+
+  defp identifier_key?(_), do: false
 
   defp has_banned_key?(%_{} = struct), do: struct |> Map.from_struct() |> has_banned_key?()
 
