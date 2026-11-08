@@ -9,7 +9,7 @@
     "watch:site": "tailwindcss -i coordinator/assets/styles.css -o coordinator/priv/site/tailwind.css --watch"
   },
   "devDependencies": {
-    "@tailwindcss/cli": "^4.3.3",
+    "@tailwindcss/cli": "^4.3.4",
     "tailwindcss": "^4.3.3"
   }
 }
